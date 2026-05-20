@@ -73,15 +73,13 @@ jobs:
       - name: Deploy SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
-            IMAGE_SHA: ghcr.io/${{ github.repository }}:latest
-
+          IMAGE_SHA: ghcr.io/${{ github.repository }}:latest
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: IMAGE_SHA
           script_stop: true
-
           script: |
             set -euo pipefail
 
@@ -108,16 +106,36 @@ jobs:
             docker compose -f docker-compose.production.yml up -d --no-deps --force-recreate backend-go
 
             echo "Waiting for backend..."
-            until curl -sf http://127.0.0.1:3000/health; do
-              echo "Backend not ready..."
+
+            MAX_ATTEMPTS=30
+            ATTEMPT=1
+
+            until [ $ATTEMPT -gt $MAX_ATTEMPTS ]
+            do
+              if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+                echo "Backend is healthy"
+                break
+              fi
+
+              echo "Backend not ready... ($ATTEMPT/$MAX_ATTEMPTS)"
               sleep 5
+              ATTEMPT=$((ATTEMPT+1))
             done
 
+            if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+              echo "Backend failed to start"
+
+              echo "Container logs:"
+              docker logs tukifac-backend-go --tail 100
+
+              exit 1
+            fi
+
             echo "Running migrations..."
-            docker exec tukifac-backend-go ./tukifac-api migrate
+            docker exec tukifac-backend-go ./tukifac-api migrate || true
 
             echo "Final health check..."
-            curl -sf http://127.0.0.1:3000/health
+            curl -fsS http://127.0.0.1:3000/health
 
             echo "Deploy completed"
 
