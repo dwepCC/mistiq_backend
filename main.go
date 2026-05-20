@@ -41,6 +41,7 @@ func runServer(cfg *config.Config) {
 		panic(err)
 	}
 
+	// Cron de vencimientos solo tras esquema central (migrate-central en entrypoint o AutoMigrateDev).
 	cron.StartExpirationChecker()
 
 	app := fiber.New(fiber.Config{

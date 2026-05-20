@@ -4,8 +4,10 @@
 # MySQL y facturador son servicios EXTERNOS (otros VPS).
 # Nginx Proxy Manager → http://127.0.0.1:3000 (no exponer 3000 al público).
 #
-# Primer arranque / cada deploy con cambios de esquema:
+# Al arrancar el contenedor el entrypoint ejecuta migrate-central (rápido).
+# Tras cada deploy con cambios de esquema (tenants incluidos):
 #   docker exec tukifac-backend-go ./tukifac-api migrate
+# Desactivar migrate-central al inicio: RUN_MIGRATE_ON_START=0 en .env
 
 name: tukifac-backend
 

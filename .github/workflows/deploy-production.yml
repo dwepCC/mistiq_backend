@@ -81,12 +81,20 @@ jobs:
           envs: IMAGE_SHA
           script_stop: true
           script: |
-            set -x
+            set -euo pipefail
 
-            cd /opt/tukifac || exit 1
+            cd /opt/tukifac
+
+            mkdir -p .deploy
 
             echo "Login GHCR..."
             echo "${{ secrets.VPS_GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            PREV=$(grep '^TUKIFAC_IMAGE=' .env | cut -d= -f2- || true)
+
+            if [ -n "$PREV" ]; then
+              echo "$PREV" > .deploy/previous-image
+            fi
 
             echo "Updating image..."
             sed -i "s|^TUKIFAC_IMAGE=.*|TUKIFAC_IMAGE=${IMAGE_SHA}|" .env
@@ -97,23 +105,37 @@ jobs:
             echo "Restarting container..."
             docker compose -f docker-compose.production.yml up -d --no-deps --force-recreate backend-go
 
-            echo "Sleeping 10 sec..."
-            sleep 10
+            echo "Waiting for backend..."
 
-            echo "Testing backend manually..."
-            curl -v http://127.0.0.1:3000/health || true
+            MAX_ATTEMPTS=30
+            ATTEMPT=1
 
-            echo "Container logs:"
-            docker logs tukifac-backend-go --tail 100 || true
+            until [ $ATTEMPT -gt $MAX_ATTEMPTS ]
+            do
+              if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+                echo "Backend is healthy"
+                break
+              fi
 
-            echo "Container status:"
-            docker ps
+              echo "Backend not ready... ($ATTEMPT/$MAX_ATTEMPTS)"
+              sleep 5
+              ATTEMPT=$((ATTEMPT+1))
+            done
 
-            echo "Running migrate..."
+            if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+              echo "Backend failed to start"
+
+              echo "Container logs:"
+              docker logs tukifac-backend-go --tail 100
+
+              exit 1
+            fi
+
+            echo "Running migrations..."
             docker exec tukifac-backend-go ./tukifac-api migrate || true
 
-            echo "Final health..."
-            curl -v http://127.0.0.1:3000/health || true
+            echo "Final health check..."
+            curl -fsS http://127.0.0.1:3000/health
 
             echo "Deploy completed"
 

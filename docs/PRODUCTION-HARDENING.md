@@ -352,7 +352,7 @@ Recomendación migración 500 clientes:
 |--------|-----------|-------|
 | N+1 contactos en listado ventas | `sale_service.go` ~572+ | Query extra por lote de IDs — OK con paginación |
 | `sync.Map` tenant pools sin límite | `tenant.go` | Muchos tenants distintos en pico → muchos pools; monitorear memoria |
-| Cron 24h + query central | `cron/expiration.go` | Bajo impacto |
+| Cron 24h + query central | `cron/expiration.go` | Solo arranca si `IsCentralSchemaReady()`; entrypoint corre `migrate-central` antes del API |
 | Rate limiter memoria por IP | `ratelimit.go` | Crece con IPs únicas; reinicio limpia |
 
 ### BAJO

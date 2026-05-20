@@ -36,8 +36,10 @@ LABEL org.opencontainers.image.description="Tukifac Multi-tenant SaaS API"
 WORKDIR /app
 
 COPY --from=builder --chmod=755 /out/tukifac-api ./tukifac-api
+COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
 
-RUN mkdir -p uploads storage/invoices \
+RUN chmod 755 /app/docker-entrypoint.sh \
+    && mkdir -p uploads storage/invoices \
     && chown -R app:app /app
 
 USER app
@@ -50,6 +52,6 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/health >/dev/null 2>&1 || exit 1
 
-ENTRYPOINT ["dumb-init", "--"]
+ENTRYPOINT ["dumb-init", "--", "/app/docker-entrypoint.sh"]
 
 CMD ["./tukifac-api"]
