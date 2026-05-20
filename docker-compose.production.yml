@@ -49,3 +49,12 @@ services:
           memory: 256M
     tmpfs:
       - /tmp:size=64M,mode=1777
+
+    networks:
+      - default
+      - npm_network
+
+networks:
+  npm_network:
+    external: true
+    name: npm_default
