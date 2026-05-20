@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -59,6 +60,8 @@ type Config struct {
 	// URLs de los frontends React (para CORS)
 	FrontendURL        string
 	CentralFrontendURL string
+	// Orígenes adicionales separados por coma (opcional)
+	CORSExtraOrigins []string
 
 	// Rate limiting (req / ventana 1m por clave IP o IP|tenant)
 	RateLimitEnabled       bool
@@ -128,6 +131,7 @@ func Load() error {
 
 		FrontendURL:        getEnv("FRONTEND_URL", "http://localhost:5173"),
 		CentralFrontendURL: getEnv("CENTRAL_FRONTEND_URL", "http://localhost:5174"),
+		CORSExtraOrigins:   splitEnvList(getEnv("CORS_ALLOWED_ORIGINS", "")),
 
 		RateLimitEnabled:       getEnvBool("RATE_LIMIT_ENABLED", true),
 		RateLimitGlobal:        getEnvInt("RATE_LIMIT_GLOBAL", 300),
@@ -175,6 +179,22 @@ func getEnvBool(key string, defaultVal bool) bool {
 		}
 	}
 	return defaultVal
+}
+
+func splitEnvList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getEnvDuration(key, defaultVal string) time.Duration {

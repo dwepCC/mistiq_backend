@@ -1,9 +1,12 @@
 package routes
 
 import (
+	"log/slog"
 	"strings"
 
 	"tukifac/config"
+	"tukifac/pkg/corspolicy"
+	"tukifac/pkg/logger"
 	"tukifac/internal/auth"
 	"tukifac/internal/billing"
 	"tukifac/internal/cashbank"
@@ -30,44 +33,17 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/cors"
 )
 
-// allowedOrigin verifica si el origen está permitido para CORS.
-// En producción (APP_DOMAIN=app.tukifac.cloud): https://app.tukifac.cloud y https://*.app.tukifac.cloud.
-// También se aceptan explícitamente app.tukifac.cloud y *.app.tukifac.cloud por si no están las env en el servidor.
-func allowedOrigin(origin string) bool {
-	cfg := config.AppConfig
-	// Producción conocida: permitir app.tukifac.cloud y tenant1.app.tukifac.cloud aunque no estén APP_ENV/APP_DOMAIN
-	if origin == "https://app.tukifac.cloud" {
-		return true
-	}
-	if strings.HasPrefix(origin, "https://") && strings.HasSuffix(origin, ".app.tukifac.cloud") {
-		return true
-	}
-	// Lista fija de desarrollo
-	devOrigins := []string{
-		"http://localhost:5173", "http://localhost:5174", "http://localhost:5175",
-		"http://localhost:4173", "http://localhost:4174",
-		"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost",
-		cfg.FrontendURL, cfg.CentralFrontendURL,
-	}
-	for _, o := range devOrigins {
-		if o != "" && origin == o {
-			return true
-		}
-	}
-	if cfg.AppEnv == "production" && cfg.AppDomain != "" && cfg.AppDomain != "localhost" {
-		domain := strings.TrimPrefix(cfg.AppDomain, ".")
-		if origin == "https://"+domain {
-			return true
-		}
-		if (strings.HasPrefix(origin, "https://") || strings.HasPrefix(origin, "http://")) &&
-			strings.HasSuffix(origin, "."+domain) {
-			return true
-		}
-	}
-	return false
-}
-
 func Setup(app *fiber.App) {
+	cfg := config.AppConfig
+	corsMatcher := corspolicy.NewMatcher(cfg)
+	logger.L.Info("cors_configured",
+		slog.String("app_env", cfg.AppEnv),
+		slog.String("app_domain", cfg.AppDomain),
+		slog.String("frontend_url", cfg.FrontendURL),
+		slog.String("central_frontend_url", cfg.CentralFrontendURL),
+		slog.Any("base_hosts", corsMatcher.BaseHosts()),
+		slog.Int("exact_origins_count", corsMatcher.ExactCount()),
+	)
 	app.Use(middleware.SecurityHeaders())
 	app.Use(middleware.RequestID())
 	app.Use(middleware.RequestLogger())
@@ -77,32 +53,16 @@ func Setup(app *fiber.App) {
 	app.Get("/health", health.Readiness)
 	app.Get("/metrics", health.Metrics)
 
-	middleware.ApplyRateLimits(app)
-
-	// ── CORS: desarrollo (lista fija) y producción (app.tukifac.cloud + *.app.tukifac.cloud) ──
+	// CORS antes de rate limits: preflight OPTIONS debe recibir Allow-Origin si el origen es válido.
 	app.Use(cors.New(cors.Config{
-		AllowOriginsFunc: allowedOrigin,
+		AllowOriginsFunc: corsMatcher.Allow,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Tenant-Slug"},
-		AllowCredentials: false,
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Tenant-Slug"},
+		AllowCredentials: true,
 		MaxAge:           3600,
 	}))
 
-	// Preflight OPTIONS: responde con cabeceras CORS para que el navegador no bloquee el POST.
-	// Solo para método OPTIONS; el resto sigue al siguiente handler.
-	app.Use(func(c fiber.Ctx) error {
-		if c.Method() != "OPTIONS" {
-			return c.Next()
-		}
-		origin := strings.TrimSpace(c.Get("Origin"))
-		if origin != "" && allowedOrigin(origin) {
-			c.Set("Access-Control-Allow-Origin", origin)
-		}
-		c.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-Tenant-Slug")
-		c.Set("Access-Control-Max-Age", "3600")
-		return c.SendStatus(fiber.StatusNoContent)
-	})
+	middleware.ApplyRateLimits(app)
 
 	// Consulta DNI/RUC (público): valida tenant_ruc en central antes de llamar a apiperu
 	consultaH := consultaHandler.NewConsultaHandler()
