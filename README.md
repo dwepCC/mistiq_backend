@@ -171,3 +171,6 @@ docker build -f dockerfile -t tukifac-api .
 2. Registrar en `routes/routes.go` dentro del grupo `tenantAPI`
 3. Si requiere plan: `middleware.RequireModule("clave")` en rutas
 4. Modelos en `pkg/database/migrations.go` si persisten en tenant DB
+
+esto es otro prueba
+
