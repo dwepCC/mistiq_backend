@@ -85,16 +85,8 @@ jobs:
 
             cd /opt/tukifac
 
-            mkdir -p .deploy
-
             echo "Login GHCR..."
             echo "${{ secrets.VPS_GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-            PREV=$(grep '^TUKIFAC_IMAGE=' .env | cut -d= -f2- || true)
-
-            if [ -n "$PREV" ]; then
-              echo "$PREV" > .deploy/previous-image
-            fi
 
             echo "Updating image..."
             sed -i "s|^TUKIFAC_IMAGE=.*|TUKIFAC_IMAGE=${IMAGE_SHA}|" .env
@@ -105,36 +97,24 @@ jobs:
             echo "Restarting container..."
             docker compose -f docker-compose.production.yml up -d --no-deps --force-recreate backend-go
 
-            echo "Waiting for backend..."
+            echo "Waiting container..."
+            sleep 10
 
-            MAX_ATTEMPTS=30
-            ATTEMPT=1
+            echo "Running migrations..."
+            docker exec tukifac-backend-go ./tukifac-api migrate
 
-            until [ $ATTEMPT -gt $MAX_ATTEMPTS ]
-            do
+            echo "Waiting backend..."
+            for i in {1..30}; do
               if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
-                echo "Backend is healthy"
+                echo "Backend healthy"
                 break
               fi
 
-              echo "Backend not ready... ($ATTEMPT/$MAX_ATTEMPTS)"
+              echo "Waiting... ($i/30)"
               sleep 5
-              ATTEMPT=$((ATTEMPT+1))
             done
 
-            if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-              echo "Backend failed to start"
-
-              echo "Container logs:"
-              docker logs tukifac-backend-go --tail 100
-
-              exit 1
-            fi
-
-            echo "Running migrations..."
-            docker exec tukifac-backend-go ./tukifac-api migrate || true
-
-            echo "Final health check..."
+            echo "Final health..."
             curl -fsS http://127.0.0.1:3000/health
 
             echo "Deploy completed"
