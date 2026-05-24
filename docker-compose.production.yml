@@ -8,7 +8,7 @@
 # Entrypoint: solo API (sin migraciones al arrancar).
 # Deploy: migrate-central antes de restart — ver docs/MIGRATIONS-SaaS.md
 # Fleet tenants (cron): deploy/scripts/migrate-fleet.sh
-#   migrate-bump-target → migrate-fleet → migrate-backfill-fleet
+#   migrate-fleet-cron → bump-target + migrate-fleet + backfills registrados (tenantbackfills)
 
 name: tukifac-backend
 

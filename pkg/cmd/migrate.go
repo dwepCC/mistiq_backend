@@ -105,7 +105,7 @@ func RunMigrateFleetCron(args []string) int {
 	backfill := engine.RunBackfillFleet(engine.BackfillOptions{
 		Limit:      *limit,
 		Workers:    *workers,
-		Version:    engine.CodeTargetVersion(),
+		Version:    0, // todos los backfills registrados (V31, V32, …); no usar CodeTargetVersion (schema)
 		ActiveOnly: *activeOnly,
 	})
 	backfillRC := printTenantsSummary(backfill)

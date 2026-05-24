@@ -34,7 +34,10 @@ bash deploy/scripts/rollback.sh
 
 **El deploy ya no migra todos los tenants.** Solo BD central.
 
-Los tenants se migran en background con `migrate-fleet` (cron recomendado).
+Los tenants se migran en background con `migrate-fleet-cron` (cron recomendado).
+
+- **Schema DDL:** `tenantmigrations` registry → `target_version` = `MaxVersion()` del binario.
+- **Backfills datos:** registry aparte (`tenantbackfills`, hoy V31/V32). El cron itera solo backfills registrados, **no** el schema target.
 
 Documentación completa: **[docs/MIGRATIONS-SaaS.md](../docs/MIGRATIONS-SaaS.md)**
 

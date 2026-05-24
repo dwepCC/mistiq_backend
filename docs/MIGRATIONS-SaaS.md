@@ -7,11 +7,14 @@ Guía operativa para producción multi-tenant (database-per-tenant). Basada en e
 | Concepto | Valor / comportamiento |
 |----------|------------------------|
 | Baseline congelado | **V30** — estado del sistema antes del registry incremental |
-| Versión objetivo actual | **V33** — pedidos restaurante + timestamps repartidores (`V033DeliveryDriversTimestamps`) |
+| Versión objetivo schema (binario) | **`tenantmigrations.MaxVersion()`** — hoy V31…V43 en `pkg/database/tenantmigrations/` |
+| Backfills run-once (datos) | **Registry aparte** en `pkg/database/tenantbackfills/` — hoy V31, V32 (no sigue al schema target) |
 | Registry central | Tabla `tenant_schema_versions` en BD `tukifac_saas` |
 | Historial por tenant | Tabla `tenant_migration_history` |
 | Deploy HTTP | **No** migra tenants; solo pool de conexiones |
 | Deploy CI/VPS | `migrate-central` antes del restart; fleet = cron aparte |
+
+**No confundir:** `CodeTargetVersion()` / `target_version` aplican al **schema DDL** (`tenantmigrations`). Los **backfills** tienen su propio registry y versión independiente.
 
 ---
 
@@ -21,16 +24,18 @@ Guía operativa para producción multi-tenant (database-per-tenant). Basada en e
 Deploy (CI o deploy.sh)
   └─ ./tukifac-api migrate-central   → BD central (sin migrar en entrypoint del contenedor)
 
-Cron cada 5 min (run-migrate-fleet.sh)
-  ├─ migrate-bump-target            → target_version = V32 en central
-  ├─ migrate-fleet --workers=4      → incremental hasta V32 (sin AutoMigrate masivo)
-  └─ migrate-backfill-fleet         → datos run-once (V032RestaurantOrdersBackfill, etc.)
+Cron cada 5 min (migrate-fleet.sh → migrate-fleet-cron)
+  ├─ migrate-bump-target            → target_version = tenantmigrations.MaxVersion() en central
+  ├─ migrate-fleet --workers=4      → DDL incremental (tenantmigrations registry)
+  └─ backfill fleet (Version=0)     → todos los backfills registrados (tenantbackfills registry)
 
 Panel Super Admin → /fleet-migrations
   └─ Retry / Migrate / Pause / Resume por tenant
 ```
 
-**Importante:** `migrate-fleet` ejecuta solo migraciones registradas en `pkg/database/tenantmigrations/` (hasta `V032RestaurantOrders`). **No** ejecuta `AutoMigrate` de todos los modelos en cada tenant.
+**Importante:** `migrate-fleet` ejecuta solo migraciones registradas en `pkg/database/tenantmigrations/` (DDL incremental V31+). **No** ejecuta `AutoMigrate` de todos los modelos en cada tenant.
+
+Los **backfills** (`pkg/database/tenantbackfills/`) son migraciones de **datos run-once** (V31 sucursales, V32 pedidos restaurante, etc.). No hay backfill por cada versión de schema: añadir V44 schema **no** implica backfill V44 automático.
 
 Los **tenants nuevos** (alta desde panel) siguen usando `MigrateTenantSchema` (bootstrap con `AutoMigrate` + seeds) una sola vez.
 
@@ -52,8 +57,9 @@ docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./
 | `migrate` | Alias de `migrate-central` + aviso fleet |
 | `migrate-init-versions` | **Una vez** por entorno: registra todos los tenants en V30 |
 | `migrate-bump-target` | Tras deploy con nueva versión de código: sube `target_version` |
-| `migrate-fleet --workers=4 --limit=100` | Migración incremental de tenants pendientes |
-| `migrate-backfill-fleet --workers=4 --limit=100` | Backfills de datos run-once |
+| `migrate-fleet --workers=4 --limit=100` | Migración incremental DDL de tenants pendientes |
+| `migrate-backfill-fleet --workers=4 --limit=100` | Backfills de datos run-once (ver flags abajo) |
+| `migrate-fleet-cron` | Ciclo cron: bump + fleet + backfills registrados |
 | `migrate-tenant <slug>` | **Emergencia:** bootstrap AutoMigrate de un tenant |
 | `migrate-tenants` | **Bloqueado en producción** (`APP_ENV=production`) |
 | `migrate-backfill-branch` | Alias backfill V31 |
@@ -62,8 +68,15 @@ docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./
 
 ```bash
 migrate-fleet --workers=4 --limit=100 --active-only=true
+
+# Un backfill concreto (debe existir en tenantbackfills registry):
 migrate-backfill-fleet --version=31 --tenant=mi-empresa
+
+# Versión no registrada → skip operacional (warn en log, exit 0), no error (registry)
+migrate-backfill-fleet --version=99
 ```
+
+**Backfill en cron (`migrate-fleet-cron`):** usa `Version=0` (interno) → recorre **todos** los backfills de `tenantbackfills.TenantBackfills`, compartiendo el `--limit` (100 tenants/ciclo en total entre V31, V32, …). **No** usa `CodeTargetVersion()` del schema.
 
 ### Variables de entorno (lotes y alertas)
 
@@ -191,9 +204,20 @@ Lease del lock: `MIGRATE_TIMEOUT_SEC` o `FLEET_LOCK_LEASE_SEC` (default 3600s). 
 
 ### Qué hace cada ciclo (`migrate-fleet-cron`)
 
-1. `migrate-bump-target` — alinea `target_version` con el código desplegado (V31).
-2. `migrate-fleet` — hasta 100 tenants pendientes, 4 workers en paralelo.
-3. `migrate-backfill-fleet` — backfills run-once pendientes.
+1. `migrate-bump-target` — alinea `target_version` con `tenantmigrations.MaxVersion()` del binario desplegado.
+2. `migrate-fleet` — hasta 100 tenants pendientes de **schema**, 4 workers en paralelo.
+3. **Backfill fleet** — itera backfills registrados en `tenantbackfills/` (V31, V32, …), mismo `--limit` compartido.
+
+**Códigos de salida del cron:**
+
+| Resultado | Exit code |
+|-----------|-----------|
+| Fleet OK + backfill OK (o sin pendientes) | **0** |
+| Lock global ya tomado (otra instancia) | **0** (silencioso) |
+| Fallo real en tenant (schema o backfill) | **1** |
+| Circuit breaker abierto en fleet | **1** |
+
+Si no hay tenants pendientes verás `fleet_migrate_no_pending` y `Tenants migrated: 0` — es **normal** y debe terminar en exit **0**.
 
 Locks por tenant (`migration_lock` + `lock_expires_at`) se liberan automáticamente si expiraron antes del fleet.
 
@@ -276,10 +300,21 @@ Throughput orientativo: ~2000–4000 tenants/hora (depende de DDL y tamaño de B
 
 | Recurso | URL / comando |
 |---------|----------------|
-| Logs estructurados | `tenant_migration_success`, `fleet_tenant_*` en logs del contenedor |
+| Logs estructurados | `tenant_migration_success`, `fleet_tenant_*`, `backfill_registry_skip` en logs del contenedor |
 | Prometheus texto | `GET /metrics` — `tukifac_migration_*`, `tukifac_fleet_*` |
 | Fleet health | `GET /api/internal/fleet-health` + header `X-Internal-Key` |
 | Dashboard | Panel central → Fleet Migrations |
+| Log cron VPS | `/var/log/tukifac/migrate-fleet.log` |
+
+### Troubleshooting cron
+
+| Síntoma | Causa probable | Acción |
+|---------|----------------|--------|
+| `fleet_migrate_no_pending` + exit 0 | Sin tenants pendientes de schema | Normal |
+| `FAILED: (registry)` en logs antiguos | Cron buscaba backfill = schema target (ej. V43 sin backfill) | Actualizar binario con fix; cron usa backfills registrados |
+| `FAILED: <slug>` | Error real en tenant | Panel Fleet → Retry; revisar `last_error` |
+| Exit 0 sin output | `flock` — otra instancia del script activa | Normal |
+| Target bajo tras deploy | Deploy solo corre `migrate-central` | Esperar cron o ejecutar `migrate-bump-target` + `migrate-fleet` manual |
 
 ---
 
@@ -300,11 +335,13 @@ Las columnas ya añadidas en MySQL **no** se eliminan automáticamente. El binar
 
 | Ruta | Contenido |
 |------|-----------|
-| `pkg/database/schema_version.go` | V30, V31 |
-| `pkg/database/tenant_schema_registry.go` | Central registry, locks |
-| `pkg/database/tenantmigrations/` | `V031MultiBranch` |
-| `pkg/database/tenantbackfills/` | `V031BranchBackfill` |
-| `pkg/database/engine/` | Fleet runner |
+| `pkg/database/schema_version.go` | Baseline V30, `TenantSchemaTargetVersion()` |
+| `pkg/database/tenant_schema_registry.go` | Central registry, locks, bump target |
+| `pkg/database/tenantmigrations/` | Registry DDL incremental (V31…V43) |
+| `pkg/database/tenantbackfills/` | Registry backfills run-once (V31, V32) |
+| `pkg/database/engine/fleet.go` | Fleet schema runner |
+| `pkg/database/engine/backfill.go` | Fleet backfill (`Version=0` = todos registrados) |
+| `pkg/cmd/migrate.go` | CLI: `migrate-fleet-cron`, `migrate-central`, etc. |
 | `pkg/database/schema_features.go` | `SchemaAtLeast`, capabilities |
 | `internal/superadmin/service/migration_fleet_service.go` | Dashboard API |
 

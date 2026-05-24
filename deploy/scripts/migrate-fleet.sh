@@ -8,7 +8,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
 CONTAINER="${TUKIFAC_CONTAINER:-tukifac-backend-go}"
 LOCKFILE="${MIGRATE_LOCKFILE:-/tmp/tukifac-migrate-fleet.lock}"
 TIMEOUT="${MIGRATE_TIMEOUT_SEC:-3600}"
-LOG_DIR="${MIGRATE_LOG_DIR:-/var/log/tukifac}"
+LOG_DIR="${MIGRATE_LOG_DIR:-/opt/tukifac/logs}"
 LOG_FILE="${LOG_DIR}/migrate-fleet.log"
 WORKERS="${MIGRATE_WORKERS:-4}"
 LIMIT="${MIGRATE_LIMIT:-100}"
@@ -30,9 +30,21 @@ fi
 
 echo "$(date -Iseconds) [start] migrate-fleet-cron workers=${WORKERS} limit=${LIMIT}" >> "${LOG_FILE}"
 
-timeout "${TIMEOUT}" docker compose -f "${COMPOSE_FILE}" exec -T backend-go \
-  ./tukifac-api migrate-fleet-cron --workers="${WORKERS}" --limit="${LIMIT}" >> "${LOG_FILE}" 2>&1
+set +e
+
+timeout "${TIMEOUT}" docker exec "${CONTAINER}" \
+  ./tukifac-api migrate-fleet-cron \
+  --workers="${WORKERS}" \
+  --limit="${LIMIT}" >> "${LOG_FILE}" 2>&1
+
 RC=$?
+
+# rc!=0 indica fallo real (tenant o circuit breaker); con fleet OK y sin pendientes debe ser 0.
+if [ "${RC}" -ne 0 ]; then
+  echo "$(date -Iseconds) [warn] migrate-fleet-cron exited rc=${RC}" >> "${LOG_FILE}"
+fi
+
+set -e
 
 echo "$(date -Iseconds) [done] rc=${RC}" >> "${LOG_FILE}"
 exit "${RC}"

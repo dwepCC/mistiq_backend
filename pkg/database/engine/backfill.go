@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,23 +21,53 @@ type BackfillOptions struct {
 }
 
 // RunBackfillFleet ejecuta backfills run-once registrados.
+// Version <= 0: recorre todos los backfills del registry (recomendado en cron).
+// Version > 0: un backfill concreto; si no existe en registry, skip operacional (no falla el proceso).
 func RunBackfillFleet(opts BackfillOptions) database.MigrateSummary {
-	summary := database.MigrateSummary{}
 	if opts.Workers <= 0 {
 		opts.Workers = 4
 	}
 	if opts.Version <= 0 {
-		opts.Version = 31
+		return runAllRegisteredBackfills(opts)
 	}
+
 	byVer := tenantbackfills.ByVersion()
 	bf, ok := byVer[opts.Version]
 	if !ok {
-		summary.Failed = append(summary.Failed, database.TenantMigrateFailure{
-			Slug: "(registry)",
-			Err:  fmt.Errorf("backfill V%d no registrado", opts.Version),
-		})
-		return summary
+		logger.L.Warn("backfill_registry_skip",
+			slog.Int("version", opts.Version),
+			slog.String("reason", "not_registered"),
+		)
+		return database.MigrateSummary{}
 	}
+	return runBackfillFleetForVersion(opts, bf)
+}
+
+func runAllRegisteredBackfills(opts BackfillOptions) database.MigrateSummary {
+	merged := database.MigrateSummary{}
+	budget := opts.Limit
+	for _, reg := range tenantbackfills.TenantBackfills {
+		if opts.Limit > 0 && budget <= 0 {
+			break
+		}
+		sub := opts
+		sub.Version = reg.Version()
+		if opts.Limit > 0 {
+			sub.Limit = budget
+		}
+		part := runBackfillFleetForVersion(sub, reg)
+		merged.Success = append(merged.Success, part.Success...)
+		merged.Failed = append(merged.Failed, part.Failed...)
+		if opts.Limit > 0 {
+			budget -= len(part.Success) + len(part.Failed)
+		}
+	}
+	return merged
+}
+
+func runBackfillFleetForVersion(opts BackfillOptions, bf tenantbackfills.TenantBackfill) database.MigrateSummary {
+	summary := database.MigrateSummary{}
+	version := bf.Version()
 
 	var tenants []database.Tenant
 	var err error
@@ -74,7 +103,7 @@ func RunBackfillFleet(opts BackfillOptions) database.MigrateSummary {
 	worker := func() {
 		defer wg.Done()
 		for t := range jobs {
-			if err := runBackfillOne(t.Slug, t.DBName, opts.Version, bf); err != nil {
+			if err := runBackfillOne(t.Slug, t.DBName, version, bf); err != nil {
 				mu.Lock()
 				summary.Failed = append(summary.Failed, database.TenantMigrateFailure{
 					Slug: t.Slug, DBName: t.DBName, Err: err,
