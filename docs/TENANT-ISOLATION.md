@@ -2,14 +2,28 @@
 
 ## Flujos soportados
 
-### Web
+### Web (panel tenant SPA)
 
 ```
-https://empresa1.tukifac.com → subdominio = tenant
+https://demo.tukifac.com
+        ↓ same-origin
+https://demo.tukifac.com/api/*
+        ↓ nginx proxy (Host: demo.tukifac.com)
+backend Go :3000
 ```
 
+- Frontend tenant **no** debe apuntar rutas autenticadas a `api.tukifac.com`.
+- Resolver: `frontend_tenant/src/config/apiBaseUrl.ts`.
 - `X-Tenant-Slug` **ignorado** para resolver (solo validación si se envía).
 - Header ≠ subdominio → **403** `TENANT_ISOLATION_VIOLATION`.
+
+### Panel central
+
+```
+https://app.tukifac.com → https://api.tukifac.com/api/*
+```
+
+(Superadmin; frontend en `frontend_central`.)
 
 ### Tukichef (Android / Tauri)
 
@@ -63,7 +77,41 @@ Invalidación: `InvalidateTenantCache(slug)` tras cambios de plan/permisos/suspe
 3. **Monitoreo** — alertas en logs `tenant_security_violation`.
 4. **Postman** — JWT tenant A + Host empresa2 → 403.
 5. **App** — verificar que peticiones van a `https://{slug}.tukifac.com`, no solo a `api.tukifac.com`.
-6. **Nginx** — wildcard `*.tukifac.com` apunta al backend Go.
+6. **Nginx** — wildcard `*.tukifac.com`: SPA en `/`, proxy `/api` al Go con `Host` preservado (ver abajo).
+
+## Nginx Proxy Manager (producción tukifac.com)
+
+Tres proxy hosts (orden de especificidad):
+
+| Host | Destino | Notas |
+|------|---------|-------|
+| `api.tukifac.com` | backend Go `:3000` | Panel central / superadmin / bootstrap |
+| `app.tukifac.com` | SPA `frontend_central` | Sin proxy `/api` al Go |
+| `*.tukifac.com` | SPA tenant + proxy `/api` | Excluir `api` y `app` con hosts dedicados |
+
+**Custom location** en wildcard tenant (`demo.tukifac.com`, etc.):
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Origin $http_origin;
+}
+```
+
+Crítico: `proxy_set_header Host $host` para que el backend reciba `demo.tukifac.com` y resuelva `subdomain=demo`.
+
+Validación en logs tras deploy:
+
+```json
+{ "host": "demo.tukifac.com", "subdomain": "demo" }
+```
+
+Sin `missing_resolved_tenant` ni 403 en `/api/session/context`.
 
 ## Tests
 
