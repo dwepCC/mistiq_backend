@@ -1,9 +1,12 @@
 package staff
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"tukifac/pkg/database"
 	"tukifac/pkg/restaurantperm"
@@ -196,6 +199,131 @@ type UpsertFlags struct {
 	KitchenAccess  bool
 	DeliveryAccess bool
 	ClearPin       bool
+}
+
+// CreateStaffUserInput alta de usuario operativo Tukichef (rol tenant mínimo + perfil staff).
+type CreateStaffUserInput struct {
+	Name         string
+	Email        string
+	Phone        string
+	EmployeeType string
+	Pin          string
+	StaffCode    string
+	DisplayName  string
+}
+
+func (s *Service) CreateStaffUser(in CreateStaffUserInput) (*StaffManagementItem, error) {
+	name := strings.TrimSpace(in.Name)
+	email := strings.TrimSpace(strings.ToLower(in.Email))
+	employeeType := normalizeEmployeeType(in.EmployeeType)
+	if name == "" {
+		return nil, errors.New("nombre requerido")
+	}
+	if email == "" {
+		return nil, errors.New("email requerido")
+	}
+	if employeeType == "" {
+		return nil, errors.New("rol de restaurante requerido")
+	}
+	if err := ValidatePINFormat(in.Pin); err != nil {
+		return nil, err
+	}
+
+	var existing database.TenantUser
+	if err := s.db.Where("email = ?", email).First(&existing).Error; err == nil {
+		return nil, errors.New("el email ya está registrado")
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	roleID, err := s.ensureOperativeRestaurantRoleID()
+	if err != nil {
+		return nil, err
+	}
+	homeBranchID, err := s.mainBranchID()
+	if err != nil {
+		return nil, err
+	}
+
+	user := &database.TenantUser{
+		RoleID:       roleID,
+		HomeBranchID: &homeBranchID,
+		BranchID:     &homeBranchID,
+		Name:         name,
+		Email:        email,
+		Phone:        strings.TrimSpace(in.Phone),
+		Active:       true,
+	}
+	if err := user.SetPassword(randomOperativePassword()); err != nil {
+		return nil, err
+	}
+	if err := s.db.Create(user).Error; err != nil {
+		return nil, fmt.Errorf("creando usuario: %w", err)
+	}
+
+	flags := UpsertFlags{
+		DisplayName: strings.TrimSpace(in.DisplayName),
+		StaffCode:   strings.TrimSpace(in.StaffCode),
+	}
+	if err := s.UpsertStaffForUser(user.ID, employeeType, in.Pin, flags); err != nil {
+		_ = s.db.Delete(&database.TenantUser{}, user.ID).Error
+		return nil, err
+	}
+
+	items, err := s.ListStaffManagement()
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.UserID == user.ID {
+			return &item, nil
+		}
+	}
+	return &StaffManagementItem{
+		UserID: user.ID, Name: user.Name, Email: user.Email, Active: user.Active,
+		EmployeeType: employeeType, HasPin: true, StaffActive: true,
+	}, nil
+}
+
+const operativeRestaurantRoleName = "Operativo Restaurante"
+
+func (s *Service) ensureOperativeRestaurantRoleID() (uint, error) {
+	var role database.TenantRole
+	err := s.db.Where("name = ?", operativeRestaurantRoleName).First(&role).Error
+	if err == nil {
+		return role.ID, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+	role = database.TenantRole{
+		Name:        operativeRestaurantRoleName,
+		Description: "Acceso operativo Tukichef (PIN). Sin permisos del panel ERP.",
+		IsSystem:    true,
+	}
+	if err := s.db.Create(&role).Error; err != nil {
+		return 0, fmt.Errorf("rol operativo: %w", err)
+	}
+	return role.ID, nil
+}
+
+func (s *Service) mainBranchID() (uint, error) {
+	var branch database.TenantBranch
+	if err := s.db.Where("is_main = ? AND active = ?", true, true).First(&branch).Error; err == nil {
+		return branch.ID, nil
+	}
+	if err := s.db.Where("active = ?", true).Order("id ASC").First(&branch).Error; err != nil {
+		return 0, errors.New("no hay sucursal activa configurada")
+	}
+	return branch.ID, nil
+}
+
+func randomOperativePassword() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("op-%d", time.Now().UnixNano())
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func normalizeEmployeeType(et string) string {

@@ -26,6 +26,36 @@ func (h *RestaurantHandler) ListStaff(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": list})
 }
 
+// POST /api/restaurant/staff/users — crear usuario operativo Tukichef
+func (h *RestaurantHandler) CreateStaffUser(c fiber.Ctx) error {
+	var body struct {
+		Name         string `json:"name"`
+		Email        string `json:"email"`
+		Phone        string `json:"phone"`
+		EmployeeType string `json:"employee_type"`
+		Pin          string `json:"pin"`
+		StaffCode    string `json:"staff_code"`
+		DisplayName  string `json:"display_name"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+	if body.Pin != "" {
+		if err := staff.ValidatePINFormat(body.Pin); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+	item, err := staff.New(db(c)).CreateStaffUser(staff.CreateStaffUserInput{
+		Name: body.Name, Email: body.Email, Phone: body.Phone,
+		EmployeeType: body.EmployeeType, Pin: body.Pin,
+		StaffCode: body.StaffCode, DisplayName: body.DisplayName,
+	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "data": item})
+}
+
 // PUT /api/restaurant/users/:id/staff
 func (h *RestaurantHandler) UpsertUserStaff(c fiber.Ctx) error {
 	id, err := parseID(c)

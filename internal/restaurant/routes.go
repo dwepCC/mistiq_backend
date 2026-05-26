@@ -22,6 +22,7 @@ func RegisterRoutes(api fiber.Router) {
 	r.Get("/session/permissions", h.SessionPermissions)
 	r.Get("/staff", manage, h.ListStaff)
 	r.Get("/staff/management", manage, h.ListStaffManagement)
+	r.Post("/staff/users", manage, h.CreateStaffUser)
 	r.Put("/users/:id/staff", manage, h.UpsertUserStaff)
 
 	r.Get("/settings", middleware.RequireAnyRestaurantPerm(restaurantperm.OrdersCharge, restaurantperm.TablesOpen, restaurantperm.KitchenView, restaurantperm.SettingsManage), h.GetSettings)
@@ -39,6 +40,10 @@ func RegisterRoutes(api fiber.Router) {
 	r.Get("/tables/:id/session", middleware.RequireRestaurantPerm(restaurantperm.TablesView), h.GetTableSession)
 
 	r.Get("/orders", middleware.RequireAnyRestaurantPerm(restaurantperm.TablesView, restaurantperm.KitchenView, restaurantperm.POSUse), h.ListOpenOrders)
+	r.Get("/delivery-companies", middleware.RequireRestaurantPerm(restaurantperm.DeliveryView), h.ListDeliveryCompanies)
+	r.Post("/delivery-companies", middleware.RequireRestaurantPerm(restaurantperm.ProductsManage), h.CreateDeliveryCompany)
+	r.Put("/delivery-companies/:id", middleware.RequireRestaurantPerm(restaurantperm.ProductsManage), h.UpdateDeliveryCompany)
+	r.Delete("/delivery-companies/:id", middleware.RequireRestaurantPerm(restaurantperm.ProductsManage), h.DeleteDeliveryCompany)
 	r.Get("/delivery-drivers", middleware.RequireRestaurantPerm(restaurantperm.DeliveryView), h.ListDeliveryDrivers)
 	r.Post("/delivery-drivers", middleware.RequireRestaurantPerm(restaurantperm.ProductsManage), h.CreateDeliveryDriver)
 	r.Put("/delivery-drivers/:id", middleware.RequireRestaurantPerm(restaurantperm.ProductsManage), h.UpdateDeliveryDriver)
@@ -50,6 +55,7 @@ func RegisterRoutes(api fiber.Router) {
 	r.Put("/sessions/:id/order-status", middleware.RequireAnyRestaurantPerm(restaurantperm.TablesView, restaurantperm.KitchenView), h.UpdateOrderStatus)
 	r.Get("/sessions/:id/precuenta", middleware.RequireRestaurantPerm(restaurantperm.TablesView), h.GetPrecuenta)
 	r.Post("/sessions/:id/orders", middleware.RequireRestaurantPerm(restaurantperm.TablesOpen), h.AddOrder)
+	r.Post("/table-orders/:id/printed", middleware.RequireRestaurantPerm(restaurantperm.TablesOpen), h.MarkTableOrderPrinted)
 	r.Post("/sessions/:id/bill", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.BillSession)
 	r.Post("/sessions/:id/close", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.CloseSession)
 	r.Post("/sessions/:id/cancel", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.CancelSession)

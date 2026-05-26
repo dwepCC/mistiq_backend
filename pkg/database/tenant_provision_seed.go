@@ -18,6 +18,7 @@ type TenantSeedInput struct {
 	Ubigeo        string
 	Phone         string
 	Email         string
+	Rubro         string // general | gastronomico
 }
 
 // ProvisionTenantSeed inicializa BD tenant en una transacción (sucursal, empresa, POS, admin, series).
@@ -46,8 +47,18 @@ func ProvisionTenantSeed(db *gorm.DB, in TenantSeedInput) error {
 		if err := SeedPaymentMethodsIfEmpty(tx); err != nil {
 			return err
 		}
+		if err := seedGastronomicDefaultsIfNeeded(tx, in.Rubro, mainBranchID); err != nil {
+			return err
+		}
 		return nil
 	})
+}
+
+func seedGastronomicDefaultsIfNeeded(tx *gorm.DB, rubro string, branchID uint) error {
+	if !IsGastronomicRubro(rubro) {
+		return nil
+	}
+	return seedGastronomicDefaults(tx, branchID)
 }
 
 func seedTenantRoles(tx *gorm.DB) error {
@@ -206,5 +217,13 @@ func seedAdminUser(tx *gorm.DB, in TenantSeedInput, mainBranchID uint) error {
 	if err := user.SetPassword(in.AdminPassword); err != nil {
 		return err
 	}
-	return tx.Create(user).Error
+	if err := tx.Create(user).Error; err != nil {
+		return err
+	}
+	if IsGastronomicRubro(in.Rubro) {
+		if err := seedGastronomicAdminStaff(tx, user.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

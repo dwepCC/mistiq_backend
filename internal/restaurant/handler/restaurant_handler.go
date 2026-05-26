@@ -394,7 +394,19 @@ func (h *RestaurantHandler) PrintComanda(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := svc(c).MarkComandaPrinted(id); err != nil {
+	if err := svc(c).MarkComandaPrinted(id, uid(c)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// POST /api/restaurant/table-orders/:id/printed — confirma impresión de toda la ronda (ticket)
+func (h *RestaurantHandler) MarkTableOrderPrinted(c fiber.Ctx) error {
+	id, err := parseID(c)
+	if err != nil {
+		return err
+	}
+	if err := svc(c).MarkTableOrderPrinted(id, uid(c)); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
@@ -594,6 +606,60 @@ func (h *RestaurantHandler) GetPrecuenta(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": data})
 }
 
+// GET /api/restaurant/delivery-companies
+func (h *RestaurantHandler) ListDeliveryCompanies(c fiber.Ctx) error {
+	activeOnly := c.Query("active_only", "true") == "true"
+	list, err := svc(c).ListDeliveryCompanies(activeOnly)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": list})
+}
+
+func (h *RestaurantHandler) CreateDeliveryCompany(c fiber.Ctx) error {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	company, err := svc(c).CreateDeliveryCompany(body.Name)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "data": company})
+}
+
+func (h *RestaurantHandler) UpdateDeliveryCompany(c fiber.Ctx) error {
+	id, err := parseID(c)
+	if err != nil {
+		return err
+	}
+	var body struct {
+		Name      string `json:"name"`
+		Active    bool   `json:"active"`
+		SortOrder int    `json:"sort_order"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	if err := svc(c).UpdateDeliveryCompany(id, body.Name, body.Active, body.SortOrder); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (h *RestaurantHandler) DeleteDeliveryCompany(c fiber.Ctx) error {
+	id, err := parseID(c)
+	if err != nil {
+		return err
+	}
+	if err := svc(c).DeleteDeliveryCompany(id); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
 // GET /api/restaurant/delivery-drivers
 func (h *RestaurantHandler) ListDeliveryDrivers(c fiber.Ctx) error {
 	activeOnly := c.Query("active_only", "true") == "true"
@@ -606,16 +672,17 @@ func (h *RestaurantHandler) ListDeliveryDrivers(c fiber.Ctx) error {
 
 func (h *RestaurantHandler) CreateDeliveryDriver(c fiber.Ctx) error {
 	var body struct {
-		Name        string `json:"name"`
-		Phone       string `json:"phone"`
-		VehicleType string `json:"vehicle_type"`
-		Plate       string `json:"plate"`
-		Notes       string `json:"notes"`
+		Name              string `json:"name"`
+		Phone             string `json:"phone"`
+		VehicleType       string `json:"vehicle_type"`
+		Plate             string `json:"plate"`
+		Notes             string `json:"notes"`
+		DeliveryCompanyID *uint  `json:"delivery_company_id"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
-	d, err := svc(c).CreateDeliveryDriver(body.Name, body.Phone, body.VehicleType, body.Plate, body.Notes)
+	d, err := svc(c).CreateDeliveryDriver(body.Name, body.Phone, body.VehicleType, body.Plate, body.Notes, body.DeliveryCompanyID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -628,17 +695,18 @@ func (h *RestaurantHandler) UpdateDeliveryDriver(c fiber.Ctx) error {
 		return err
 	}
 	var body struct {
-		Name        string `json:"name"`
-		Phone       string `json:"phone"`
-		VehicleType string `json:"vehicle_type"`
-		Plate       string `json:"plate"`
-		Notes       string `json:"notes"`
-		Active      bool   `json:"active"`
+		Name              string `json:"name"`
+		Phone             string `json:"phone"`
+		VehicleType       string `json:"vehicle_type"`
+		Plate             string `json:"plate"`
+		Notes             string `json:"notes"`
+		Active            bool   `json:"active"`
+		DeliveryCompanyID *uint  `json:"delivery_company_id"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
-	if err := svc(c).UpdateDeliveryDriver(id, body.Name, body.Phone, body.VehicleType, body.Plate, body.Notes, body.Active); err != nil {
+	if err := svc(c).UpdateDeliveryDriver(id, body.Name, body.Phone, body.VehicleType, body.Plate, body.Notes, body.Active, body.DeliveryCompanyID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

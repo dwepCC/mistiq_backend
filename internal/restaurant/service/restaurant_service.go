@@ -194,7 +194,7 @@ func (s *RestaurantService) ListTables(branchID, floorID uint) ([]TableWithSessi
 		Joins("LEFT JOIN tenant_table_sessions ts ON ts.table_id = t.id AND ts.status = 'open'").
 		Joins("LEFT JOIN tenant_restaurant_staff st ON st.id = ts.staff_id").
 		Joins("LEFT JOIN tenant_users u ON u.id = st.user_id").
-		Where("t.active = ?", true)
+		Where("t.active = ? AND t.deleted_at IS NULL", true)
 	if branchID > 0 {
 		q = q.Where("t.branch_id = ?", branchID)
 	}
@@ -235,12 +235,79 @@ func (s *RestaurantService) UpdateTable(id uint, name string, capacity int, acti
 	}).Error
 }
 
-func (s *RestaurantService) DeleteTable(id uint) error {
-	var sess database.TenantTableSession
-	if s.db.Where("table_id = ? AND status = 'open'", id).First(&sess).Error == nil {
-		return errors.New("la mesa tiene una sesión activa, no se puede eliminar")
+// tableDeleteBlockReason devuelve el motivo por el que no se puede eliminar la mesa, o "" si está permitido.
+func (s *RestaurantService) tableDeleteBlockReason(table *database.TenantRestaurantTable) string {
+	if table == nil {
+		return "mesa no encontrada"
 	}
-	return s.db.Delete(&database.TenantRestaurantTable{}, id).Error
+	if !table.Active {
+		return "la mesa ya fue eliminada"
+	}
+	if table.Status != "libre" {
+		switch table.Status {
+		case "ocupada":
+			return "la mesa está ocupada: cierre o libere la mesa antes de eliminarla"
+		case "en_consumo":
+			return "la mesa está en consumo: finalice la operación antes de eliminarla"
+		default:
+			return fmt.Sprintf("la mesa está en estado «%s»; debe estar libre para eliminarla", table.Status)
+		}
+	}
+
+	var openSess database.TenantTableSession
+	if err := s.db.Where("table_id = ? AND status = ?", table.ID, "open").First(&openSess).Error; err == nil {
+		if strings.TrimSpace(openSess.OrderCode) != "" {
+			return fmt.Sprintf("la mesa tiene el pedido %s abierto; anúlelo o ciérrelo antes de eliminar la mesa", openSess.OrderCode)
+		}
+		return "la mesa tiene un pedido abierto; anúlelo o ciérrelo antes de eliminar la mesa"
+	}
+
+	var sessionIDs []uint
+	if err := s.db.Model(&database.TenantTableSession{}).
+		Where("table_id = ? AND status IN ?", table.ID, []string{"open", "billed"}).
+		Pluck("id", &sessionIDs).Error; err != nil {
+		return "no se pudo verificar operaciones vinculadas a la mesa"
+	}
+	if len(sessionIDs) == 0 {
+		return ""
+	}
+
+	var activeOrders int64
+	s.db.Model(&database.TenantTableOrder{}).
+		Where("session_id IN ? AND status = ?", sessionIDs, "active").
+		Count(&activeOrders)
+	if activeOrders > 0 {
+		return fmt.Sprintf("la mesa tiene %d pedido(s) activo(s); finalice o anule la operación antes de eliminarla", activeOrders)
+	}
+
+	var pendingComandas int64
+	s.db.Model(&database.TenantComanda{}).
+		Where("session_id IN ? AND cancelled_at IS NULL", sessionIDs).
+		Where("status IN ?", []string{"pendiente", "preparacion", "lista"}).
+		Count(&pendingComandas)
+	if pendingComandas > 0 {
+		return fmt.Sprintf("la mesa tiene %d comanda(s) en cocina; espere la entrega o anule el pedido", pendingComandas)
+	}
+
+	return ""
+}
+
+func (s *RestaurantService) DeleteTable(id uint) error {
+	var table database.TenantRestaurantTable
+	if err := s.db.First(&table, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("mesa no encontrada")
+		}
+		return err
+	}
+	if reason := s.tableDeleteBlockReason(&table); reason != "" {
+		return errors.New(reason)
+	}
+	// Borrado físico: ListTables usa Table() sin el scope de soft-delete de GORM.
+	if err := s.db.Unscoped().Delete(&database.TenantRestaurantTable{}, id).Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 // ============================= SESIONES DE MESA =============================
@@ -391,17 +458,19 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 		}
 		taxCfg := tax.LoadFromDB(tx)
 		for _, item := range items {
-			// Cada ítem es una comanda independiente (incluso si el producto es el mismo)
+			prepArea := resolveProductPreparationArea(tx, item.ProductID)
+			// Cada ítem es una fila de comanda; la ronda (TenantTableOrder) es el ticket de cocina.
 			c := database.TenantComanda{
-				OrderID:     order.ID,
-				SessionID:   sessionID,
-				ProductID:   item.ProductID,
-				ProductCode: item.ProductCode,
-				ProductName: item.ProductName,
-				Quantity:    item.Quantity,
-				UnitPrice:   item.UnitPrice,
-				Notes:       item.Notes,
-				Status:      "pendiente",
+				OrderID:         order.ID,
+				SessionID:       sessionID,
+				ProductID:       item.ProductID,
+				ProductCode:     item.ProductCode,
+				ProductName:     item.ProductName,
+				PreparationArea: prepArea,
+				Quantity:        item.Quantity,
+				UnitPrice:       item.UnitPrice,
+				Notes:           item.Notes,
+				Status:          "pendiente",
 			}
 			if err := tx.Create(&c).Error; err != nil {
 				return err
@@ -435,7 +504,20 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 	return &OrderDetail{TenantTableOrder: *order, Comandas: comandas}, nil
 }
 
-// UpdateComandaStatus cambia el estado de una comanda.
+func comandaStatusRank(status string) int {
+	switch status {
+	case "preparacion":
+		return 1
+	case "lista":
+		return 2
+	case "entregada":
+		return 3
+	default:
+		return 0 // pendiente u otro
+	}
+}
+
+// UpdateComandaStatus cambia el estado de una comanda (solo avance, sin retroceder).
 func (s *RestaurantService) UpdateComandaStatus(id uint, status string, userID uint) error {
 	validStatuses := map[string]bool{
 		"pendiente": true, "preparacion": true, "lista": true, "entregada": true,
@@ -443,15 +525,21 @@ func (s *RestaurantService) UpdateComandaStatus(id uint, status string, userID u
 	if !validStatuses[status] {
 		return errors.New("estado inválido: usa pendiente, preparacion, lista o entregada")
 	}
+	var c database.TenantComanda
+	if err := s.db.First(&c, id).Error; err != nil {
+		return errors.New("comanda no encontrada")
+	}
+	if c.CancelledAt != nil {
+		return errors.New("la comanda está anulada")
+	}
+	if comandaStatusRank(status) <= comandaStatusRank(c.Status) {
+		return errors.New("no se puede retroceder el estado de la comanda")
+	}
 	err := s.db.Model(&database.TenantComanda{}).Where("id = ?", id).Update("status", status).Error
 	if err != nil {
 		return err
 	}
-	var c database.TenantComanda
-	if s.db.First(&c, id).Error == nil {
-		return s.syncSessionOrderStatus(s.db, c.SessionID)
-	}
-	return nil
+	return s.syncSessionOrderStatus(s.db, c.SessionID)
 }
 
 // CancelComanda anula una comanda (solo admin).
@@ -485,24 +573,173 @@ func (s *RestaurantService) CancelComanda(id uint, reason string, cancelledByID 
 	})
 }
 
-// MarkComandaPrinted marca una comanda como impresa.
-func (s *RestaurantService) MarkComandaPrinted(id uint) error {
+func resolveProductPreparationArea(tx *gorm.DB, productID *uint) string {
+	if productID == nil || *productID == 0 {
+		return "cocina"
+	}
+	var p database.TenantProduct
+	if err := tx.Select("preparation_area").First(&p, *productID).Error; err != nil {
+		return "cocina"
+	}
+	area := strings.TrimSpace(strings.ToLower(p.PreparationArea))
+	if area == "" {
+		return "cocina"
+	}
+	return area
+}
+
+// MarkComandaPrinted marca una línea de comanda como impresa.
+func (s *RestaurantService) MarkComandaPrinted(id uint, userID uint) error {
 	now := time.Now()
-	return s.db.Model(&database.TenantComanda{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"printed": true, "printed_at": now,
-	}).Error
+	upd := map[string]interface{}{"printed": true, "printed_at": now}
+	if userID > 0 {
+		upd["printed_by_id"] = userID
+	}
+	return s.db.Model(&database.TenantComanda{}).Where("id = ?", id).Updates(upd).Error
+}
+
+// MarkTableOrderPrinted marca una ronda completa (ticket) y todas sus líneas como impresas.
+func (s *RestaurantService) MarkTableOrderPrinted(tableOrderID uint, userID uint) error {
+	var order database.TenantTableOrder
+	if err := s.db.First(&order, tableOrderID).Error; err != nil {
+		return errors.New("comanda no encontrada")
+	}
+	now := time.Now()
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		orderUpd := map[string]interface{}{"printed_at": now}
+		lineUpd := map[string]interface{}{"printed": true, "printed_at": now}
+		if userID > 0 {
+			orderUpd["printed_by_id"] = userID
+			lineUpd["printed_by_id"] = userID
+		}
+		if err := tx.Model(&database.TenantTableOrder{}).Where("id = ?", tableOrderID).Updates(orderUpd).Error; err != nil {
+			return err
+		}
+		return tx.Model(&database.TenantComanda{}).Where("order_id = ? AND cancelled_at IS NULL", tableOrderID).Updates(lineUpd).Error
+	})
+}
+
+// KitchenSessionMeta contexto del pedido para la vista de cocina.
+type KitchenSessionMeta struct {
+	OrderCode       string     `json:"order_code"`
+	OrderType       string     `json:"order_type"`
+	OrderStatus     string     `json:"order_status"`
+	TableID         *uint      `json:"table_id"`
+	TableName       string     `json:"table_name"`
+	FloorName       string     `json:"floor_name"`
+	CustomerName    string     `json:"customer_name"`
+	CustomerPhone   string     `json:"customer_phone"`
+	DeliveryAddress string     `json:"delivery_address"`
+	WaiterName      string     `json:"waiter_name"`
+	DriverName      string     `json:"driver_name"`
+	OpenedAt        time.Time  `json:"session_opened_at"`
+}
+
+// KitchenComandaView línea de cocina con datos del pedido y de la ronda.
+type KitchenComandaView struct {
+	database.TenantComanda
+	OrderNumber int `json:"order_number"`
+	KitchenSessionMeta
 }
 
 // GetKitchenComandas retorna comandas para la vista de cocina/comandas.
 // Solo incluye comandas de sesiones ABIERTAS (mesas aún no cerradas), en los 4 estados.
-// Así no aparecen "fantasmas" de mesas ya cerradas o cobradas.
-func (s *RestaurantService) GetKitchenComandas(branchID uint) ([]database.TenantComanda, error) {
+func (s *RestaurantService) GetKitchenComandas(branchID uint) ([]KitchenComandaView, error) {
 	var comandas []database.TenantComanda
 	err := s.db.Joins("JOIN tenant_table_sessions ts ON ts.id = tenant_comandas.session_id").
 		Where("ts.branch_id = ? AND ts.status = ? AND tenant_comandas.status IN ('pendiente','preparacion','lista','entregada') AND tenant_comandas.cancelled_at IS NULL", branchID, "open").
 		Order("tenant_comandas.created_at ASC").
 		Find(&comandas).Error
-	return comandas, err
+	if err != nil {
+		return nil, err
+	}
+	if len(comandas) == 0 {
+		return []KitchenComandaView{}, nil
+	}
+
+	sessionIDs := make([]uint, 0, len(comandas))
+	seenSess := make(map[uint]struct{})
+	orderIDs := make([]uint, 0, len(comandas))
+	seenOrd := make(map[uint]struct{})
+	for _, c := range comandas {
+		if _, ok := seenSess[c.SessionID]; !ok {
+			seenSess[c.SessionID] = struct{}{}
+			sessionIDs = append(sessionIDs, c.SessionID)
+		}
+		if _, ok := seenOrd[c.OrderID]; !ok {
+			seenOrd[c.OrderID] = struct{}{}
+			orderIDs = append(orderIDs, c.OrderID)
+		}
+	}
+
+	metaBySession := s.kitchenSessionMetaMap(sessionIDs)
+	orderNum := make(map[uint]int)
+	var orders []database.TenantTableOrder
+	if s.db.Where("id IN ?", orderIDs).Find(&orders).Error == nil {
+		for _, o := range orders {
+			orderNum[o.ID] = o.OrderNumber
+		}
+	}
+
+	out := make([]KitchenComandaView, 0, len(comandas))
+	for _, c := range comandas {
+		out = append(out, KitchenComandaView{
+			TenantComanda:      c,
+			OrderNumber:        orderNum[c.OrderID],
+			KitchenSessionMeta: metaBySession[c.SessionID],
+		})
+	}
+	return out, nil
+}
+
+func (s *RestaurantService) kitchenSessionMetaMap(sessionIDs []uint) map[uint]KitchenSessionMeta {
+	out := make(map[uint]KitchenSessionMeta, len(sessionIDs))
+	if len(sessionIDs) == 0 {
+		return out
+	}
+	var sessions []database.TenantTableSession
+	if err := s.db.Where("id IN ?", sessionIDs).Find(&sessions).Error; err != nil {
+		return out
+	}
+	for _, sess := range sessions {
+		meta := KitchenSessionMeta{
+			OrderCode:       sess.OrderCode,
+			OrderType:       sess.OrderType,
+			OrderStatus:     sess.OrderStatus,
+			TableID:         sess.TableID,
+			CustomerName:    sess.CustomerName,
+			CustomerPhone:   sess.CustomerPhone,
+			DeliveryAddress: sess.DeliveryAddress,
+			OpenedAt:        sess.OpenedAt,
+		}
+		if sess.TableID != nil {
+			var table database.TenantRestaurantTable
+			if s.db.First(&table, *sess.TableID).Error == nil {
+				meta.TableName = table.Name
+				var floor database.TenantRestaurantFloor
+				if s.db.First(&floor, table.FloorID).Error == nil {
+					meta.FloorName = floor.Name
+				}
+			}
+		}
+		if sess.StaffID != nil {
+			meta.WaiterName = s.staffDisplayName(sess.StaffID)
+		}
+		if sess.DeliveryDriverID != nil {
+			var d database.TenantDeliveryDriver
+			if s.db.First(&d, *sess.DeliveryDriverID).Error == nil {
+				meta.DriverName = d.Name
+			}
+		}
+		if sess.ContactID != nil && meta.CustomerName == "" {
+			var c database.TenantContact
+			if s.db.First(&c, *sess.ContactID).Error == nil {
+				meta.CustomerName = c.BusinessName
+			}
+		}
+		out[sess.ID] = meta
+	}
+	return out
 }
 
 // ============================= COBRO Y CIERRE =============================

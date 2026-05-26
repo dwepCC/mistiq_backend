@@ -20,6 +20,7 @@ func enrichTenantMap(t *database.Tenant) fiber.Map {
 		"email":              t.Email,
 		"phone":              t.Phone,
 		"ruc":                t.RUC,
+		"rubro":              t.Rubro,
 		"address":            t.Address,
 		"ubigeo":             t.Ubigeo,
 		"sunat_env_mode":     t.SunatEnvMode,

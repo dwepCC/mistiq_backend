@@ -19,6 +19,7 @@ type Tenant struct {
 	Email              string         `gorm:"size:255" json:"email"`
 	Phone              string         `gorm:"size:50" json:"phone"`
 	RUC                string         `gorm:"size:20" json:"ruc"`
+	Rubro              string         `gorm:"size:30;default:'general';index" json:"rubro"` // general | gastronomico
 	Address            string         `gorm:"size:500" json:"address"`
 	Ubigeo             string         `gorm:"size:6;index" json:"ubigeo"`                   // código 6 dígitos (distrito) para filtros y comprobantes
 	LogoURL            string         `gorm:"type:longtext" json:"logo_url"`                // logo de la empresa (data URL); se sincroniza desde el panel tenant cuando tiene SUNAT
@@ -1065,32 +1066,48 @@ type TenantTableSession struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-// TenantDeliveryDriver repartidor para pedidos delivery.
-type TenantDeliveryDriver struct {
-	ID          uint           `gorm:"primaryKey" json:"id"`
-	Name        string         `gorm:"size:100;not null" json:"name"`
-	Phone       string         `gorm:"size:30" json:"phone"`
-	VehicleType string         `gorm:"size:50" json:"vehicle_type"`
-	Plate       string         `gorm:"size:20" json:"plate"`
-	Active      bool           `gorm:"default:true" json:"active"`
-	Notes       string         `gorm:"type:text" json:"notes"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+// TenantDeliveryCompany plataforma de delivery (PedidosYa, Rappi, etc.).
+type TenantDeliveryCompany struct {
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	Name      string         `gorm:"size:100;not null;uniqueIndex" json:"name"`
+	SortOrder int            `gorm:"default:0" json:"sort_order"`
+	Active    bool           `gorm:"default:true" json:"active"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
-// TenantTableOrder representa un pedido (ronda) dentro de una sesión de mesa.
+// TenantDeliveryDriver repartidor para pedidos delivery.
+type TenantDeliveryDriver struct {
+	ID                uint           `gorm:"primaryKey" json:"id"`
+	DeliveryCompanyID *uint          `gorm:"index" json:"delivery_company_id"`
+	Name              string         `gorm:"size:100;not null" json:"name"`
+	Phone             string         `gorm:"size:30" json:"phone"`
+	VehicleType       string         `gorm:"size:50" json:"vehicle_type"`
+	Plate             string         `gorm:"size:20" json:"plate"`
+	Active            bool           `gorm:"default:true" json:"active"`
+	Notes             string         `gorm:"type:text" json:"notes"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `gorm:"index" json:"-"`
+
+	DeliveryCompany *TenantDeliveryCompany `gorm:"foreignKey:DeliveryCompanyID" json:"delivery_company,omitempty"`
+}
+
+// TenantTableOrder representa una ronda/comanda de cocina (ticket) dentro de la sesión.
 type TenantTableOrder struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	SessionID   uint      `gorm:"not null;index" json:"session_id"`
-	WaiterID    *uint     `gorm:"index" json:"waiter_id,omitempty"` // deprecado
-	StaffID     *uint     `gorm:"index" json:"staff_id"`
-	UserID      uint      `gorm:"not null;index" json:"user_id"`
-	OrderNumber int       `gorm:"not null" json:"order_number"` // número de pedido dentro de la sesión
-	Notes       string    `gorm:"type:text" json:"notes"`
-	Status      string    `gorm:"size:20;default:'active'" json:"status"` // active, cancelled
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	SessionID   uint       `gorm:"not null;index" json:"session_id"`
+	WaiterID    *uint      `gorm:"index" json:"waiter_id,omitempty"` // deprecado
+	StaffID     *uint      `gorm:"index" json:"staff_id"`
+	UserID      uint       `gorm:"not null;index" json:"user_id"`
+	OrderNumber int        `gorm:"not null" json:"order_number"` // número de comanda/ronda en la sesión
+	Notes       string     `gorm:"type:text" json:"notes"`
+	Status      string     `gorm:"size:20;default:'active'" json:"status"` // active, cancelled
+	PrintedAt   *time.Time `json:"printed_at"`
+	PrintedByID *uint      `gorm:"index" json:"printed_by_id"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // TenantComanda representa un ítem individual dentro de un pedido.
@@ -1100,13 +1117,15 @@ type TenantComanda struct {
 	SessionID     uint       `gorm:"not null;index" json:"session_id"`
 	ProductID     *uint      `gorm:"index" json:"product_id"`
 	ProductCode   string     `gorm:"size:100" json:"product_code"`
-	ProductName   string     `gorm:"size:255;not null" json:"product_name"`
-	Quantity      float64    `gorm:"type:decimal(15,3);not null" json:"quantity"`
-	UnitPrice     float64    `gorm:"type:decimal(15,2);not null" json:"unit_price"`
-	Notes         string     `gorm:"size:500" json:"notes"`                     // instrucciones especiales (sin cebolla, etc.)
-	Status        string     `gorm:"size:20;default:'pendiente'" json:"status"` // pendiente, preparacion, lista, entregada
-	Printed       bool       `gorm:"default:false" json:"printed"`
-	PrintedAt     *time.Time `json:"printed_at"`
+	ProductName      string     `gorm:"size:255;not null" json:"product_name"`
+	PreparationArea  string     `gorm:"size:50" json:"preparation_area"` // snapshot al enviar (cocina, bar, etc.)
+	Quantity         float64    `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	UnitPrice        float64    `gorm:"type:decimal(15,2);not null" json:"unit_price"`
+	Notes            string     `gorm:"size:500" json:"notes"`                     // instrucciones especiales (sin cebolla, etc.)
+	Status           string     `gorm:"size:20;default:'pendiente'" json:"status"` // pendiente, preparacion, lista, entregada
+	Printed          bool       `gorm:"default:false" json:"printed"`
+	PrintedAt        *time.Time `json:"printed_at"`
+	PrintedByID      *uint      `gorm:"index" json:"printed_by_id"`
 	CancelledAt   *time.Time `json:"cancelled_at"`
 	CancelledByID *uint      `gorm:"index" json:"cancelled_by_id"`
 	CancelReason  string     `gorm:"size:255" json:"cancel_reason"`
@@ -1252,6 +1271,7 @@ func MigrateTenant(db *gorm.DB) error {
 		&TenantTableSession{},
 		&TenantTableOrder{},
 		&TenantComanda{},
+		&TenantDeliveryCompany{},
 		&TenantDeliveryDriver{},
 		&TenantRestaurantSetting{},
 		&TenantRestaurantStaff{},

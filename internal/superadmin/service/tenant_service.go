@@ -11,6 +11,7 @@ import (
 	"tukifac/pkg/database"
 	"tukifac/pkg/middleware"
 	"tukifac/pkg/saas"
+	"tukifac/pkg/tenantrubro"
 	"tukifac/pkg/tenantstorage"
 	"tukifac/pkg/utils"
 
@@ -39,6 +40,7 @@ type CreateTenantInput struct {
 	AdminEmail         string `json:"admin_email"`
 	AdminPassword      string `json:"admin_password"`
 	SubscriptionMonths int    `json:"subscription_months"` // duración en meses de la suscripción al crear (0 = no crear suscripción automática)
+	Rubro              string `json:"rubro"`               // general | gastronomico
 }
 
 // Create provisioning completo y transaccional (rollback automático si falla cualquier paso).
@@ -76,9 +78,10 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 
 	dbName := "saas_tenant_" + slug
 	trialEnd := time.Now().AddDate(0, 0, 30)
+	rubro := tenantrubro.Normalize(input.Rubro)
 	tenant = &database.Tenant{
 		Name: input.Name, Slug: slug, DBName: dbName, Plan: plan, Status: "active",
-		Email: input.Email, Phone: input.Phone, RUC: input.RUC,
+		Email: input.Email, Phone: input.Phone, RUC: input.RUC, Rubro: rubro,
 		Address: input.Address, Ubigeo: input.Ubigeo, TrialEndsAt: &trialEnd,
 	}
 
@@ -99,6 +102,7 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 		CompanyName: input.Name, RUC: input.RUC,
 		Address: input.Address, Ubigeo: input.Ubigeo,
 		Phone: input.Phone, Email: input.Email,
+		Rubro: rubro,
 	}
 
 	// 2–4. BD + migrate + seed (transacción en BD tenant)
@@ -144,6 +148,12 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 		tenant.ID, plan, months, "Suscripción creada al registrar la empresa",
 	); err != nil {
 		return nil, fmt.Errorf("suscripción SaaS: %w", err)
+	}
+
+	if tenantrubro.IsGastronomico(rubro) {
+		if err = database.EnableTenantModule(s.db, tenant.ID, "restaurant"); err != nil {
+			return nil, fmt.Errorf("activando módulo restaurante: %w", err)
+		}
 	}
 
 	saas.InvalidateTenantCache(tenant.ID)

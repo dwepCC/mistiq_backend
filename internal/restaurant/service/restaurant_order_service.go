@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"tukifac/pkg/database"
@@ -76,13 +77,16 @@ type OrderSummary struct {
 
 // PrecuentaPayload resumen imprimible sin venta.
 type PrecuentaPayload struct {
-	OrderCode     string              `json:"order_code"`
-	OrderType     string              `json:"order_type"`
-	TableName     string              `json:"table_name"`
-	CustomerName  string              `json:"customer_name"`
-	CustomerPhone string              `json:"customer_phone"`
-	OpenedAt      time.Time           `json:"opened_at"`
-	Notes         string              `json:"notes"`
+	OrderCode          string              `json:"order_code"`
+	OrderType          string              `json:"order_type"`
+	TableName          string              `json:"table_name"`
+	CustomerName       string              `json:"customer_name"`
+	CustomerPhone      string              `json:"customer_phone"`
+	DeliveryAddress    string              `json:"delivery_address"`
+	DeliveryReference  string              `json:"delivery_reference"`
+	DriverName         string              `json:"driver_name"`
+	OpenedAt           time.Time           `json:"opened_at"`
+	Notes              string              `json:"notes"`
 	Subtotal      float64             `json:"subtotal"`
 	TaxAmount     float64             `json:"tax_amount"`
 	Total         float64             `json:"total"`
@@ -403,13 +407,16 @@ func (s *RestaurantService) GetPrecuenta(sessionID uint) (*PrecuentaPayload, err
 		subtotal = detail.TotalAmount
 	}
 	return &PrecuentaPayload{
-		OrderCode:     detail.OrderCode,
-		OrderType:     detail.OrderType,
-		TableName:     detail.TableName,
-		CustomerName:  customer,
-		CustomerPhone: detail.CustomerPhone,
-		OpenedAt:      detail.OpenedAt,
-		Notes:         detail.Notes,
+		OrderCode:         detail.OrderCode,
+		OrderType:         detail.OrderType,
+		TableName:         detail.TableName,
+		CustomerName:      customer,
+		CustomerPhone:     detail.CustomerPhone,
+		DeliveryAddress:   detail.DeliveryAddress,
+		DeliveryReference: detail.DeliveryReference,
+		DriverName:        detail.DriverName,
+		OpenedAt:          detail.OpenedAt,
+		Notes:             detail.Notes,
 		Subtotal:      subtotal,
 		TaxAmount:     taxAmount,
 		Total:         total,
@@ -417,30 +424,103 @@ func (s *RestaurantService) GetPrecuenta(sessionID uint) (*PrecuentaPayload, err
 	}, nil
 }
 
-// Delivery drivers CRUD
+// Delivery drivers & companies CRUD
 
-func (s *RestaurantService) ListDeliveryDrivers(activeOnly bool) ([]database.TenantDeliveryDriver, error) {
-	var list []database.TenantDeliveryDriver
-	q := s.db.Order("name ASC")
+func (s *RestaurantService) ListDeliveryCompanies(activeOnly bool) ([]database.TenantDeliveryCompany, error) {
+	var list []database.TenantDeliveryCompany
+	q := s.db.Order("sort_order ASC, name ASC")
 	if activeOnly {
 		q = q.Where("active = ?", true)
 	}
 	return list, q.Find(&list).Error
 }
 
-func (s *RestaurantService) CreateDeliveryDriver(name, phone, vehicleType, plate, notes string) (*database.TenantDeliveryDriver, error) {
+func (s *RestaurantService) CreateDeliveryCompany(name string) (*database.TenantDeliveryCompany, error) {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("nombre requerido")
 	}
+	var existing database.TenantDeliveryCompany
+	if err := s.db.Where("name = ?", name).First(&existing).Error; err == nil {
+		return nil, errors.New("ya existe una empresa con ese nombre")
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) && err != nil {
+		return nil, err
+	}
+	c := &database.TenantDeliveryCompany{Name: name, Active: true}
+	return c, s.db.Create(c).Error
+}
+
+func (s *RestaurantService) UpdateDeliveryCompany(id uint, name string, active bool, sortOrder int) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("nombre requerido")
+	}
+	var company database.TenantDeliveryCompany
+	if err := s.db.First(&company, id).Error; err != nil {
+		return errors.New("empresa no encontrada")
+	}
+	var dup database.TenantDeliveryCompany
+	if err := s.db.Where("name = ? AND id <> ?", name, id).First(&dup).Error; err == nil {
+		return errors.New("ya existe una empresa con ese nombre")
+	}
+	return s.db.Model(&company).Updates(map[string]interface{}{
+		"name": name, "active": active, "sort_order": sortOrder,
+	}).Error
+}
+
+func (s *RestaurantService) DeleteDeliveryCompany(id uint) error {
+	var company database.TenantDeliveryCompany
+	if err := s.db.First(&company, id).Error; err != nil {
+		return errors.New("empresa no encontrada")
+	}
+	var drivers int64
+	s.db.Model(&database.TenantDeliveryDriver{}).Where("delivery_company_id = ?", id).Count(&drivers)
+	if drivers > 0 {
+		return fmt.Errorf("no se puede eliminar: %d repartidor(es) vinculado(s) a esta empresa", drivers)
+	}
+	return s.db.Unscoped().Delete(&database.TenantDeliveryCompany{}, id).Error
+}
+
+func (s *RestaurantService) ListDeliveryDrivers(activeOnly bool) ([]database.TenantDeliveryDriver, error) {
+	var list []database.TenantDeliveryDriver
+	q := s.db.Preload("DeliveryCompany").Order("name ASC")
+	if activeOnly {
+		q = q.Where("active = ?", true)
+	}
+	return list, q.Find(&list).Error
+}
+
+func (s *RestaurantService) CreateDeliveryDriver(name, phone, vehicleType, plate, notes string, deliveryCompanyID *uint) (*database.TenantDeliveryDriver, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("nombre requerido")
+	}
+	if deliveryCompanyID != nil && *deliveryCompanyID > 0 {
+		var company database.TenantDeliveryCompany
+		if err := s.db.First(&company, *deliveryCompanyID).Error; err != nil {
+			return nil, errors.New("empresa de delivery no encontrada")
+		}
+	} else {
+		deliveryCompanyID = nil
+	}
 	d := &database.TenantDeliveryDriver{
-		Name: name, Phone: phone, VehicleType: vehicleType, Plate: plate, Notes: notes, Active: true,
+		Name: name, Phone: phone, VehicleType: vehicleType, Plate: plate, Notes: notes,
+		DeliveryCompanyID: deliveryCompanyID, Active: true,
 	}
 	return d, s.db.Create(d).Error
 }
 
-func (s *RestaurantService) UpdateDeliveryDriver(id uint, name, phone, vehicleType, plate, notes string, active bool) error {
+func (s *RestaurantService) UpdateDeliveryDriver(id uint, name, phone, vehicleType, plate, notes string, active bool, deliveryCompanyID *uint) error {
+	if deliveryCompanyID != nil && *deliveryCompanyID > 0 {
+		var company database.TenantDeliveryCompany
+		if err := s.db.First(&company, *deliveryCompanyID).Error; err != nil {
+			return errors.New("empresa de delivery no encontrada")
+		}
+	} else {
+		deliveryCompanyID = nil
+	}
 	return s.db.Model(&database.TenantDeliveryDriver{}).Where("id = ?", id).Updates(map[string]interface{}{
 		"name": name, "phone": phone, "vehicle_type": vehicleType, "plate": plate, "notes": notes, "active": active,
+		"delivery_company_id": deliveryCompanyID,
 	}).Error
 }
 
