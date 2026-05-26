@@ -5,6 +5,7 @@ package tax
 
 import (
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 
 	"gorm.io/gorm"
 )
@@ -132,5 +133,8 @@ func CalcItem(price, quantity, discount float64, igvAffectationType string, pric
 		taxAmount = gross * (rate / 100)
 	}
 	total = subtotal + taxAmount
+	subtotal = money.RoundSunat(subtotal)
+	taxAmount = money.RoundSunat(taxAmount)
+	total = money.RoundSunat(total)
 	return
 }

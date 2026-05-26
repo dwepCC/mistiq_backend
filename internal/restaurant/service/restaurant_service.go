@@ -8,6 +8,7 @@ import (
 
 	"tukifac/internal/restaurant/staff"
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 	"tukifac/pkg/tax"
 	cashbanksvc "tukifac/internal/cashbank/service"
 
@@ -38,7 +39,7 @@ func restaurantLinePayableTotal(db *gorm.DB, taxCfg tax.Config, productID *uint,
 		}
 	}
 	_, _, total := tax.CalcItem(unitPrice, quantity, 0, affType, priceIncludes, taxCfg)
-	return total
+	return money.RoundSunat(total)
 }
 
 // ============================= PISOS / SALAS =============================
@@ -517,6 +518,22 @@ func comandaStatusRank(status string) int {
 	}
 }
 
+// UpdateComandaNotes actualiza la nota de una línea de comanda (instrucciones de cocina).
+func (s *RestaurantService) UpdateComandaNotes(id uint, notes string) error {
+	var c database.TenantComanda
+	if err := s.db.First(&c, id).Error; err != nil {
+		return errors.New("comanda no encontrada")
+	}
+	if c.CancelledAt != nil {
+		return errors.New("la comanda está anulada")
+	}
+	trimmed := strings.TrimSpace(notes)
+	if len(trimmed) > 500 {
+		return errors.New("la nota no puede superar 500 caracteres")
+	}
+	return s.db.Model(&c).Update("notes", trimmed).Error
+}
+
 // UpdateComandaStatus cambia el estado de una comanda (solo avance, sin retroceder).
 func (s *RestaurantService) UpdateComandaStatus(id uint, status string, userID uint) error {
 	validStatuses := map[string]bool{
@@ -745,17 +762,18 @@ func (s *RestaurantService) kitchenSessionMetaMap(sessionIDs []uint) map[uint]Ki
 // ============================= COBRO Y CIERRE =============================
 
 type BillInput struct {
-	SessionID     uint
-	UserID        uint
-	EmployeeType  string // staff restaurante: bloquea efectivo a waiter
-	SeriesID      uint
-	DocType       string
-	IssueDate     time.Time
-	Currency      string
-	ContactID     *uint
-	Payments      []PaymentInput
-	CashSessionID *uint
-	CloseSession  bool // si es false, genera la venta pero no cierra la mesa (cliente puede seguir consumiendo)
+	SessionID      uint
+	UserID         uint
+	EmployeeType   string // staff restaurante: bloquea efectivo a waiter
+	SeriesID       uint
+	DocType        string
+	IssueDate      time.Time
+	Currency       string
+	ContactID      *uint
+	Payments       []PaymentInput
+	CashSessionID  *uint
+	CloseSession   bool // si es false, genera la venta pero no cierra la mesa (cliente puede seguir consumiendo)
+	DiscountAmount float64 // descuento global en moneda (se reparte proporcionalmente entre ítems)
 }
 
 type PaymentInput struct {
@@ -800,17 +818,6 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 	var series database.TenantDocumentSeries
 	if err := s.db.First(&series, input.SeriesID).Error; err != nil {
 		return nil, errors.New("serie no encontrada")
-	}
-
-	// Validar total de pagos
-	var totalPaid float64
-	for _, p := range input.Payments {
-		totalPaid += p.Amount
-	}
-	roundedSession := roundFloat(sess.TotalAmount)
-	roundedPaid := roundFloat(totalPaid)
-	if roundedPaid < roundedSession {
-		return nil, fmt.Errorf("monto pagado (%.2f) es menor al total de la sesión (%.2f)", totalPaid, sess.TotalAmount)
 	}
 
 	// Construir ítems de venta desde las comandas (con tipo de afectación IGV para Lycet)
@@ -861,12 +868,46 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		}
 	}
 
-	// Calcular totales
+	// Calcular totales (con descuento global repartido proporcionalmente)
+	type pricedLine struct {
+		data  *saleItemData
+		gross float64
+	}
+	var lines []pricedLine
+	var grossTotal float64
+	for _, item := range itemMap {
+		_, _, iTotal := tax.CalcItem(item.UnitPrice, item.Quantity, 0, item.IgvAffectationType, item.PriceIncludesIgv, taxCfg)
+		lines = append(lines, pricedLine{data: item, gross: iTotal})
+		grossTotal += iTotal
+	}
+	discountAmount := money.RoundSunat(input.DiscountAmount)
+	if discountAmount < 0 {
+		discountAmount = 0
+	}
+	grossTotal = money.RoundSunat(grossTotal)
+	if discountAmount > grossTotal {
+		discountAmount = grossTotal
+	}
+
 	var subtotal, taxAmount, total float64
 	var saleItems []database.TenantSaleItem
-	for _, item := range itemMap {
-		iSub, iTax, iTotal := tax.CalcItem(item.UnitPrice, item.Quantity, 0, item.IgvAffectationType, item.PriceIncludesIgv, taxCfg)
-		subtotal += iSub; taxAmount += iTax; total += iTotal
+	remainingDisc := discountAmount
+	for i, ln := range lines {
+		itemDisc := 0.0
+		if discountAmount > 0 && grossTotal > 0 {
+			if i == len(lines)-1 {
+				itemDisc = remainingDisc
+			} else {
+				itemDisc = money.RoundSunat(discountAmount * (ln.gross / grossTotal))
+				remainingDisc = money.RoundSunat(remainingDisc - itemDisc)
+			}
+		}
+		item := ln.data
+		iSub, iTax, iTotal := tax.CalcItem(item.UnitPrice, item.Quantity, itemDisc, item.IgvAffectationType, item.PriceIncludesIgv, taxCfg)
+		subtotal = money.RoundSunat(subtotal + iSub)
+		taxAmount = money.RoundSunat(taxAmount + iTax)
+		total = money.RoundSunat(total + iTotal)
+		itemDisc = money.RoundSunat(itemDisc)
 		saleItems = append(saleItems, database.TenantSaleItem{
 			ProductID:          item.ProductID,
 			Code:               item.Code,
@@ -874,12 +915,21 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 			Unit:               item.Unit,
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
+			Discount:           itemDisc,
 			TaxRate:            item.TaxRate,
 			IgvAffectationType: item.IgvAffectationType,
 			Subtotal:           iSub,
 			TaxAmount:          iTax,
 			Total:              iTotal,
 		})
+	}
+
+	var totalPaid float64
+	for _, p := range input.Payments {
+		totalPaid += p.Amount
+	}
+	if !money.PaidCoversTotal(totalPaid, total) {
+		return nil, fmt.Errorf("monto pagado (%.2f) es menor al total (%.2f)", money.RoundDisplay(totalPaid), money.RoundDisplay(total))
 	}
 
 	// Generar número de venta
@@ -902,9 +952,9 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		Correlative:   correlative,
 		Number:        saleNumber,
 		IssueDate:     input.IssueDate,
-		Subtotal:      subtotal,
-		TaxAmount:     taxAmount,
-		Total:         total,
+		Subtotal:      money.RoundSunat(subtotal),
+		TaxAmount:     money.RoundSunat(taxAmount),
+		Total:         money.RoundSunat(total),
 		Currency:      currency,
 		PaymentMethod: input.Payments[0].Method, // método principal
 		Status:        "paid",
@@ -1099,7 +1149,7 @@ func (s *RestaurantService) RegisterPayments(saleID uint, payments []PaymentInpu
 		totalPaid += p.Amount
 	}
 
-	if roundFloat(totalPaid) < roundFloat(sale.Total) {
+	if !money.PaidCoversTotal(totalPaid, sale.Total) {
 		return fmt.Errorf("el total pagado (%.2f) es menor al total de la venta (%.2f)", totalPaid, sale.Total)
 	}
 
@@ -1180,6 +1230,3 @@ func (s *RestaurantService) resolveCashSessionForPayments(
 	return &sid, nil
 }
 
-func roundFloat(f float64) float64 {
-	return float64(int(f*100+0.5)) / 100
-}

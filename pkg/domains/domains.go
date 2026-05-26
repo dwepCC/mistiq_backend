@@ -91,3 +91,16 @@ func TenantURL(slug, rootDomain string) string {
 	}
 	return "https://" + host
 }
+
+// ResolveTenantAPIURL URL para clientes externos (Tukichef). En local (APP_DOMAIN=localhost)
+// TenantURL queda vacío; usar fallbackOrigin (p. ej. http://localhost:3000 del monolito).
+func ResolveTenantAPIURL(slug, rootDomain, fallbackOrigin string) string {
+	if u := TenantURL(slug, rootDomain); u != "" {
+		return u
+	}
+	fb := strings.TrimSpace(fallbackOrigin)
+	if fb == "" {
+		return ""
+	}
+	return strings.TrimRight(fb, "/")
+}

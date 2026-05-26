@@ -118,7 +118,11 @@ func Setup(app *fiber.App) {
 			}
 		}
 		subdomain := domains.TenantHost(tenant.Slug, config.AppConfig.AppDomain)
-		apiURL := domains.TenantURL(tenant.Slug, config.AppConfig.AppDomain)
+		fallbackAPI := ""
+		if domains.NormalizeRootDomain(config.AppConfig.AppDomain) == "localhost" {
+			fallbackAPI = config.AppConfig.DevTenantAPIOrigin()
+		}
+		apiURL := domains.ResolveTenantAPIURL(tenant.Slug, config.AppConfig.AppDomain, fallbackAPI)
 		return c.JSON(fiber.Map{
 			"slug":                 tenant.Slug,
 			"tenant_slug":          tenant.Slug,

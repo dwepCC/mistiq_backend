@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 	"tukifac/pkg/numeroletras"
 
 	"gorm.io/gorm"
@@ -18,6 +19,7 @@ type PrintData struct {
 	Series    string `json:"series"`
 	Number    string `json:"number"`
 	IssueDate string `json:"issue_date"`
+	IssueTime string `json:"issue_time,omitempty"` // HH:mm:ss
 	Currency  string `json:"currency"`
 	SunatHash string `json:"sunat_hash,omitempty"` // Hash firma XML (cuando ya enviado a SUNAT)
 	QRData    string `json:"qr_data"`              // String para generar QR según SUNAT
@@ -47,6 +49,10 @@ type PrintData struct {
 
 	// Pagos
 	Payments []PrintPayment `json:"payments"`
+
+	SellerName         string             `json:"seller_name,omitempty"`
+	PaymentCondition   string             `json:"payment_condition,omitempty"` // Contado, Crédito
+	BankAccounts       []PrintBankAccount `json:"bank_accounts,omitempty"`
 }
 
 type PrintClient struct {
@@ -61,7 +67,17 @@ type PrintCompany struct {
 	BusinessName string `json:"business_name"`
 	TradeName    string `json:"trade_name,omitempty"`
 	Address      string `json:"address,omitempty"`
+	Phone        string `json:"phone,omitempty"`
+	Email        string `json:"email,omitempty"`
+	Website      string `json:"website,omitempty"`
 	LogoURL      string `json:"logo_url,omitempty"`
+}
+
+type PrintBankAccount struct {
+	Name          string `json:"name,omitempty"`
+	BankName      string `json:"bank_name"`
+	AccountNumber string `json:"account_number"`
+	Currency      string `json:"currency"`
 }
 
 type PrintBranch struct {
@@ -102,7 +118,8 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		DocType:   sale.DocType,
 		Series:    sale.Series,
 		Number:    sale.Number,
-		IssueDate: sale.IssueDate.Format("2006-01-02"),
+		IssueDate: sale.IssueDate.Format("02/01/2006"),
+		IssueTime: sale.IssueDate.Format("15:04:05"),
 		Currency:  sale.Currency,
 		Subtotal:  sale.Subtotal,
 		TaxAmount: sale.TaxAmount,
@@ -116,6 +133,7 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		currency = "PEN"
 	}
 	pd.LegendText = numeroletras.MontoEnLetras(sale.Total, currency)
+	pd.PaymentCondition = "Contado"
 
 	// Serie → sunat_code
 	var series database.TenantDocumentSeries
@@ -148,7 +166,32 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 			BusinessName: company.BusinessName,
 			TradeName:    company.TradeName,
 			Address:      company.Address,
+			Phone:        strings.TrimSpace(company.Phone),
+			Email:        strings.TrimSpace(company.Email),
+			Website:      strings.TrimSpace(company.Website),
 			LogoURL:      company.LogoURL,
+		}
+	}
+
+	var bankAccounts []database.TenantBankAccount
+	if db.Where("active = ?", true).Order("id ASC").Find(&bankAccounts).Error == nil {
+		for _, ba := range bankAccounts {
+			if strings.TrimSpace(ba.AccountNumber) == "" && strings.TrimSpace(ba.BankName) == "" {
+				continue
+			}
+			pd.BankAccounts = append(pd.BankAccounts, PrintBankAccount{
+				Name:          ba.Name,
+				BankName:      ba.BankName,
+				AccountNumber: ba.AccountNumber,
+				Currency:      ba.Currency,
+			})
+		}
+	}
+
+	if sale.UserID > 0 {
+		var user database.TenantUser
+		if db.Select("name").First(&user, sale.UserID).Error == nil {
+			pd.SellerName = strings.TrimSpace(user.Name)
 		}
 	}
 
@@ -186,14 +229,18 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		if _, ok := affMap[code]; !ok {
 			affMap[code] = &PrintAffectTotal{Code: code, Description: desc}
 		}
-		affMap[code].Subtotal += it.Subtotal
-		affMap[code].TaxAmount += it.TaxAmount
-		affMap[code].Total += it.Total
+		affMap[code].Subtotal = money.RoundSunat(affMap[code].Subtotal + it.Subtotal)
+		affMap[code].TaxAmount = money.RoundSunat(affMap[code].TaxAmount + it.TaxAmount)
+		affMap[code].Total = money.RoundSunat(affMap[code].Total + it.Total)
 	}
 	if len(affMap) > 0 {
 		pd.TotalsByAffectation = make(map[string]PrintAffectTotal)
 		for k, v := range affMap {
-			pd.TotalsByAffectation[k] = *v
+			row := *v
+			row.Subtotal = money.RoundSunat(row.Subtotal)
+			row.TaxAmount = money.RoundSunat(row.TaxAmount)
+			row.Total = money.RoundSunat(row.Total)
+			pd.TotalsByAffectation[k] = row
 		}
 	}
 

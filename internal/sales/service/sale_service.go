@@ -9,6 +9,7 @@ import (
 
 	"tukifac/pkg/billingstate"
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 	"tukifac/pkg/sunat"
 	"tukifac/pkg/tax"
 	cashbanksvc "tukifac/internal/cashbank/service"
@@ -136,9 +137,9 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 			affType, item.PriceIncludesIgv, taxCfg,
 		)
 
-		subtotal += itemSub
-		taxAmount += itemTax
-		total += itemTotal
+		subtotal = money.RoundSunat(subtotal + itemSub)
+		taxAmount = money.RoundSunat(taxAmount + itemTax)
+		total = money.RoundSunat(total + itemTotal)
 
 		itemType := "product"
 		if item.ProductID != nil && *item.ProductID > 0 {
@@ -257,8 +258,9 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		for _, p := range payments {
 			sumPayments += p.Amount
 		}
-		if sumPayments < total-0.01 || sumPayments > total+0.01 {
-			return nil, fmt.Errorf("la suma de pagos (%.2f) no coincide con el total (%.2f)", sumPayments, total)
+		if !money.PaidCoversTotal(sumPayments, total) ||
+			money.RoundDisplay(sumPayments) > money.RoundDisplay(total)+money.PaymentTolerance {
+			return nil, fmt.Errorf("la suma de pagos (%.2f) no coincide con el total (%.2f)", money.RoundDisplay(sumPayments), money.RoundDisplay(total))
 		}
 	}
 	primaryMethod := input.PaymentMethod
@@ -278,9 +280,9 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		Number:               saleNumber,
 		IssueDate:            input.IssueDate,
 		DueDate:              input.DueDate,
-		Subtotal:             subtotal,
-		TaxAmount:            taxAmount,
-		Total:                total,
+		Subtotal:             money.RoundSunat(subtotal),
+		TaxAmount:            money.RoundSunat(taxAmount),
+		Total:                money.RoundSunat(total),
 		Currency:             currency,
 		PaymentMethod:        primaryMethod,
 		Notes:                input.Notes,

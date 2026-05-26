@@ -138,6 +138,18 @@ func (c *Config) IsDev() bool {
 	return c.AppEnv != "production"
 }
 
+// DevTenantAPIOrigin origen del API tenant en local (mismo proceso que la API central).
+func (c *Config) DevTenantAPIOrigin() string {
+	if u := strings.TrimSpace(c.APIPublicURL); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	port := strings.TrimSpace(c.ServerPort)
+	if port == "" {
+		port = "3000"
+	}
+	return "http://localhost:" + port
+}
+
 func (c *Config) IsProd() bool {
 	return c.AppEnv == "production"
 }

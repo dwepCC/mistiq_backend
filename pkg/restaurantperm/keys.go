@@ -5,7 +5,7 @@ const (
 	TablesView      = "t.v"
 	TablesOpen      = "t.o"
 	OrdersCreate    = "o.c"
-	OrdersCharge    = "o.ch"
+	OrdersCharge    = "o.ch" // cobrar / generar venta (POS, mesa, ventas)
 	KitchenView     = "k.v"
 	KitchenUpdate   = "k.u"
 	POSUse          = "p.u"

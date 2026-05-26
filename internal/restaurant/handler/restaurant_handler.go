@@ -348,6 +348,24 @@ func (h *RestaurantHandler) AddOrder(c fiber.Ctx) error {
 // COMANDAS
 // ================================================================
 
+// PATCH /api/restaurant/comandas/:id/notes
+func (h *RestaurantHandler) UpdateComandaNotes(c fiber.Ctx) error {
+	id, err := parseID(c)
+	if err != nil {
+		return err
+	}
+	var body struct {
+		Notes string `json:"notes"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	if err := svc(c).UpdateComandaNotes(id, body.Notes); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
 // PUT /api/restaurant/comandas/:id/status
 func (h *RestaurantHandler) UpdateComandaStatus(c fiber.Ctx) error {
 	id, err := parseID(c)
@@ -436,14 +454,15 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		return err
 	}
 	var body struct {
-		SeriesID      uint                     `json:"series_id"`
-		DocType       string                   `json:"doc_type"`
-		Currency      string                   `json:"currency"`
-		ContactID     *uint                    `json:"contact_id"`
-		CashSessionID *uint                    `json:"cash_session_id"`
-		IssueDate     string                   `json:"issue_date"`
-		CloseSession  *bool                    `json:"close_session"` // true = cerrar mesa tras cobrar; false = solo generar venta, mesa sigue abierta
-		Payments      []service.PaymentInput   `json:"payments"`
+		SeriesID       uint                   `json:"series_id"`
+		DocType        string                 `json:"doc_type"`
+		Currency       string                 `json:"currency"`
+		ContactID      *uint                  `json:"contact_id"`
+		CashSessionID  *uint                  `json:"cash_session_id"`
+		IssueDate      string                 `json:"issue_date"`
+		CloseSession   *bool                  `json:"close_session"` // true = cerrar mesa tras cobrar; false = solo generar venta, mesa sigue abierta
+		Payments       []service.PaymentInput `json:"payments"`
+		DiscountAmount float64                `json:"discount_amount"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -472,17 +491,18 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		et = claims.EmployeeType
 	}
 	sale, err := svc(c).BillTable(service.BillInput{
-		SessionID:     sessionID,
-		UserID:        uid(c),
-		EmployeeType:  et,
-		SeriesID:      body.SeriesID,
-		DocType:       body.DocType,
-		IssueDate:     issueDate,
-		Currency:      body.Currency,
-		ContactID:     body.ContactID,
-		Payments:      body.Payments,
-		CashSessionID: body.CashSessionID,
-		CloseSession:  closeSession,
+		SessionID:      sessionID,
+		UserID:         uid(c),
+		EmployeeType:   et,
+		SeriesID:       body.SeriesID,
+		DocType:        body.DocType,
+		IssueDate:      issueDate,
+		Currency:       body.Currency,
+		ContactID:      body.ContactID,
+		Payments:       body.Payments,
+		CashSessionID:  body.CashSessionID,
+		CloseSession:   closeSession,
+		DiscountAmount: body.DiscountAmount,
 	}, taxCfg)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
