@@ -79,6 +79,7 @@ func RequireProductsViewOrRestaurantCatalog() fiber.Handler {
 		restaurantperm.TablesOpen,
 		restaurantperm.POSUse,
 		restaurantperm.KitchenView,
+		restaurantperm.ProductsManage,
 	}
 	return func(c fiber.Ctx) error {
 		if claims, ok := c.Locals("tenant_claims").(*TenantClaims); ok && claims != nil {
@@ -95,6 +96,29 @@ func RequireProductsViewOrRestaurantCatalog() fiber.Handler {
 		}
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"error": "No tienes permiso para ver el catálogo de productos",
+		})
+	}
+}
+
+// RequireProductsManageOrTenantWrite permite gestionar catálogo (extras, modificadores, etc.)
+// con permiso restaurante g.p o permisos tenant products.create / products.edit / products.delete.
+func RequireProductsManageOrTenantWrite() fiber.Handler {
+	tenantWrite := []string{"products.create", "products.edit", "products.delete", "products.update"}
+	return func(c fiber.Ctx) error {
+		if claims, ok := c.Locals("tenant_claims").(*TenantClaims); ok && claims != nil {
+			for _, need := range tenantWrite {
+				for _, p := range claims.Permissions {
+					if p == need {
+						return c.Next()
+					}
+				}
+			}
+		}
+		if HasRestaurantPerm(c, restaurantperm.ProductsManage) {
+			return c.Next()
+		}
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "No tienes permiso para gestionar el catálogo de productos",
 		})
 	}
 }
