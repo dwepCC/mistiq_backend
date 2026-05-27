@@ -9,6 +9,7 @@ import (
 	"tukifac/internal/restaurant/staff"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
+	"tukifac/pkg/gormutil"
 	"tukifac/pkg/money"
 	"tukifac/pkg/tax"
 	cashbanksvc "tukifac/internal/cashbank/service"
@@ -26,20 +27,17 @@ func New(db *gorm.DB) *RestaurantService {
 }
 
 // restaurantLinePayableTotal es el importe a cobrar por una línea (cantidad × precio unitario)
-// según tipo de afectación SUNAT y si el precio del catálogo incluye o no IGV.
-func restaurantLinePayableTotal(db *gorm.DB, taxCfg tax.Config, productID *uint, unitPrice, quantity float64) float64 {
-	affType := "10"
-	priceIncludes := true
-	if productID != nil {
-		var p database.TenantProduct
-		if db.First(&p, *productID).Error == nil {
-			if p.IgvAffectationType != "" {
-				affType = p.IgvAffectationType
-			}
-			priceIncludes = p.PriceIncludesIgv
-		}
+// según tipo de afectación SUNAT y si el precio incluye o no IGV.
+func restaurantLinePayableTotal(
+	taxCfg tax.Config,
+	affType string,
+	priceIncludesIgv bool,
+	unitPrice, quantity float64,
+) float64 {
+	if strings.TrimSpace(affType) == "" {
+		affType = "10"
 	}
-	_, _, total := tax.CalcItem(unitPrice, quantity, 0, affType, priceIncludes, taxCfg)
+	_, _, total := tax.CalcItem(unitPrice, quantity, 0, affType, priceIncludesIgv, taxCfg)
 	return money.RoundSunat(total)
 }
 
@@ -533,6 +531,11 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 			if err := tx.Create(&c).Error; err != nil {
 				return err
 			}
+			// price_includes_igv=false debe persistirse explícitamente (GORM + default:true en columna).
+			if err := gormutil.PersistBoolWithDefault(tx, &c, "price_includes_igv", item.PriceIncludesIgv); err != nil {
+				return err
+			}
+			c.PriceIncludesIgv = item.PriceIncludesIgv
 			comandas = append(comandas, c)
 			_, _, lineTotal := tax.CalcItem(item.UnitPrice, item.Quantity, 0, affType, item.PriceIncludesIgv, taxCfg)
 			sessionTotal += money.RoundSunat(lineTotal)

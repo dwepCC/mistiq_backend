@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/gormutil"
 	"tukifac/pkg/money"
 	"tukifac/pkg/sunat"
 
@@ -362,6 +363,10 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, er
 	if err := s.db.Create(p).Error; err != nil {
 		return nil, err
 	}
+	if err := gormutil.PersistBoolWithDefault(s.db, p, "price_includes_igv", input.PriceIncludesIgv); err != nil {
+		return nil, err
+	}
+	p.PriceIncludesIgv = input.PriceIncludesIgv
 
 	if input.ModifierGroupIDs != nil {
 		s.syncModifierGroups(p.ID, *input.ModifierGroupIDs)
