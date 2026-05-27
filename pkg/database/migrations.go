@@ -1397,22 +1397,87 @@ func SeedTenant(db *gorm.DB, adminEmail, adminPassword, companyName, ruc, addres
 	return nil
 }
 
-// SeedPaymentMethodsIfEmpty siembra métodos de pago por defecto si la tabla está vacía.
+// SeedPaymentMethodsIfEmpty siembra métodos de pago y cuentas bancarias/billeteras por defecto.
+// Yape/Plin → billetera (wallet); transferencia/tarjeta → banco (bank); efectivo → caja.
 // Se ejecuta desde MigrateTenantSchema (CLI / alta de tenant), no en requests HTTP.
 func SeedPaymentMethodsIfEmpty(db *gorm.DB) error {
 	var pmCount int64
 	if err := db.Model(&TenantPaymentMethod{}).Count(&pmCount).Error; err != nil {
 		return nil // tabla puede no existir aún
 	}
-	if pmCount > 0 {
+	var baCount int64
+	if err := db.Model(&TenantBankAccount{}).Count(&baCount).Error; err != nil {
 		return nil
 	}
+	if pmCount > 0 && baCount > 0 {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if pmCount == 0 {
+			return seedDefaultPaymentMethodsAndAccounts(tx)
+		}
+		if baCount == 0 {
+			return backfillBankAccountsForPaymentMethods(tx)
+		}
+		return nil
+	})
+}
+
+func seedDefaultPaymentMethodsAndAccounts(db *gorm.DB) error {
+	accounts := []TenantBankAccount{
+		{Name: "Billetera Yape", Type: "wallet", PaymentMethod: "yape", Currency: "PEN", Active: true},
+		{Name: "Billetera Plin", Type: "wallet", PaymentMethod: "plin", Currency: "PEN", Active: true},
+		{Name: "Cuenta bancaria", Type: "bank", PaymentMethod: "transferencia", Currency: "PEN", Active: true},
+		{Name: "Terminal tarjetas", Type: "bank", PaymentMethod: "tarjeta", Currency: "PEN", Active: true},
+	}
+	if err := db.Create(&accounts).Error; err != nil {
+		return err
+	}
+	yapeID := accounts[0].ID
+	plinID := accounts[1].ID
+	transferID := accounts[2].ID
+	tarjetaID := accounts[3].ID
 	paymentMethods := []TenantPaymentMethod{
 		{Name: "Efectivo", Code: "cash", DestinationType: "cash", IsSystem: true, SortOrder: 0, Active: true},
-		{Name: "Yape", Code: "yape", DestinationType: "bank_account", IsSystem: false, SortOrder: 1, Active: true},
-		{Name: "Plin", Code: "plin", DestinationType: "bank_account", IsSystem: false, SortOrder: 2, Active: true},
-		{Name: "Transferencia", Code: "transferencia", DestinationType: "bank_account", IsSystem: false, SortOrder: 3, Active: true},
-		{Name: "Tarjeta", Code: "tarjeta", DestinationType: "bank_account", IsSystem: false, SortOrder: 4, Active: true},
+		{Name: "Yape", Code: "yape", DestinationType: "bank_account", BankAccountID: &yapeID, IsSystem: false, SortOrder: 1, Active: true},
+		{Name: "Plin", Code: "plin", DestinationType: "bank_account", BankAccountID: &plinID, IsSystem: false, SortOrder: 2, Active: true},
+		{Name: "Transferencia", Code: "transferencia", DestinationType: "bank_account", BankAccountID: &transferID, IsSystem: false, SortOrder: 3, Active: true},
+		{Name: "Tarjeta", Code: "tarjeta", DestinationType: "bank_account", BankAccountID: &tarjetaID, IsSystem: false, SortOrder: 4, Active: true},
 	}
 	return db.Create(&paymentMethods).Error
+}
+
+func backfillBankAccountsForPaymentMethods(db *gorm.DB) error {
+	var methods []TenantPaymentMethod
+	if err := db.Order("sort_order asc, id asc").Find(&methods).Error; err != nil {
+		return err
+	}
+	accountByCode := map[string]TenantBankAccount{
+		"yape":          {Name: "Billetera Yape", Type: "wallet", PaymentMethod: "yape", Currency: "PEN", Active: true},
+		"plin":          {Name: "Billetera Plin", Type: "wallet", PaymentMethod: "plin", Currency: "PEN", Active: true},
+		"transferencia": {Name: "Cuenta bancaria", Type: "bank", PaymentMethod: "transferencia", Currency: "PEN", Active: true},
+		"tarjeta":       {Name: "Terminal tarjetas", Type: "bank", PaymentMethod: "tarjeta", Currency: "PEN", Active: true},
+	}
+	created := map[string]uint{}
+	for code, acc := range accountByCode {
+		row := acc
+		if err := db.Create(&row).Error; err != nil {
+			return err
+		}
+		created[code] = row.ID
+	}
+	for i := range methods {
+		m := &methods[i]
+		if m.DestinationType != "bank_account" || m.BankAccountID != nil {
+			continue
+		}
+		accID, ok := created[m.Code]
+		if !ok {
+			continue
+		}
+		if err := db.Model(m).Update("bank_account_id", accID).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
