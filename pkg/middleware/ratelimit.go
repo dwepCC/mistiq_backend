@@ -57,7 +57,7 @@ func conditionalLimiter(match func(fiber.Ctx) bool, max int, keyFn func(fiber.Ct
 func skipRateLimitPaths(c fiber.Ctx) bool {
 	path := c.Path()
 	switch path {
-	case "/", "/health", "/metrics":
+	case "/", "/health", "/health/live", "/metrics":
 		return true
 	}
 	if strings.HasPrefix(path, "/uploads/") {

@@ -24,6 +24,7 @@ var TenantMigrations = []TenantMigration{
 	V050SaleUniqueIndexes{},
 	V051DocumentSeriesCategoryFix{},
 	V052SeriesGlobalUnique{},
+	V053DeliveryCompaniesTimestamps{},
 }
 
 // ByVersion mapa versión → migración.

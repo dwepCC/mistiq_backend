@@ -56,6 +56,7 @@ func Setup(app *fiber.App) {
 
 	// Health y métricas (sin TenantResolver, rate limit ni auth)
 	app.Get("/", health.Liveness)
+	app.Get("/health/live", health.Liveness)
 	app.Get("/health", health.Readiness)
 	app.Get("/metrics", health.Metrics)
 	app.Get("/fleet-health", health.FleetHealth)

@@ -12,8 +12,8 @@ import (
 
 const readinessTimeout = 2 * time.Second
 
-// Liveness responde si el proceso HTTP está activo (sin tocar MySQL).
-// Usar en balanceadores para "alive" barato.
+// Liveness responde si el proceso HTTP está activo (sin tocar MySQL ni Redis).
+// Usar en balanceadores y en clientes POS (GET /health/live) para heartbeat frecuente.
 func Liveness(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"app":    "Tukifac API",
