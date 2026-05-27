@@ -9,6 +9,7 @@ import (
 
 	"tukifac/pkg/billingstate"
 	"tukifac/pkg/database"
+	"tukifac/pkg/docseries"
 	"tukifac/pkg/money"
 	"tukifac/pkg/sunat"
 	"tukifac/pkg/tax"
@@ -81,17 +82,9 @@ type CreateSaleInput struct {
 	IssuedFromNotaSaleID      *uint // ID de la NV origen; se guarda en la nueva venta 01/03
 }
 
-// NextCorrelative retorna el siguiente correlativo para una serie y lo incrementa.
+// NextCorrelative retorna el siguiente correlativo para una serie y lo incrementa (transacción con bloqueo de fila).
 func (s *SaleService) NextCorrelative(seriesID uint) (uint, error) {
-	var series database.TenantDocumentSeries
-	if err := s.db.First(&series, seriesID).Error; err != nil {
-		return 0, errors.New("serie no encontrada")
-	}
-	next := series.Correlative
-	if err := s.db.Model(&series).Update("correlative", series.Correlative+1).Error; err != nil {
-		return 0, err
-	}
-	return next, nil
+	return docseries.ReserveNextStandalone(s.db, seriesID)
 }
 
 func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error) {
@@ -102,18 +95,10 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		return nil, errors.New("sucursal y usuario son requeridos")
 	}
 
-	// Obtener serie
-	var series database.TenantDocumentSeries
-	if err := s.db.First(&series, input.SeriesID).Error; err != nil {
-		return nil, errors.New("serie no encontrada")
-	}
-
-	correlative, err := s.NextCorrelative(input.SeriesID)
+	series, err := docseries.ValidateForBranch(s.db, input.SeriesID, input.BranchID)
 	if err != nil {
 		return nil, err
 	}
-
-	saleNumber := fmt.Sprintf("%s-%08d", series.Series, correlative)
 
 	// Usar config tributaria de la empresa; si no se pasó, cargar desde BD
 	taxCfg := input.TaxConfig
@@ -275,9 +260,6 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		CashSessionID:        input.CashSessionID,
 		SeriesID:             input.SeriesID,
 		DocType:              input.DocType,
-		Series:               series.Series,
-		Correlative:          correlative,
-		Number:               saleNumber,
 		IssueDate:            input.IssueDate,
 		DueDate:              input.DueDate,
 		Subtotal:             money.RoundSunat(subtotal),
@@ -297,6 +279,14 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 	skipPay := input.SkipPaymentDistribution || emitFromNV
 
 	return sale, s.db.Transaction(func(tx *gorm.DB) error {
+		correlative, seriesLocked, err := docseries.ReserveNext(tx, input.SeriesID)
+		if err != nil {
+			return err
+		}
+		sale.Series = seriesLocked.Series
+		sale.Correlative = correlative
+		sale.Number = fmt.Sprintf("%s-%08d", seriesLocked.Series, correlative)
+
 		if err := tx.Create(sale).Error; err != nil {
 			return err
 		}
@@ -340,8 +330,8 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				return err
 			}
 			if !skipPay {
-				desc := "Venta " + saleNumber
-				if err := cbSvc.RecordPayment(tx, p.Method, p.Amount, input.CashSessionID, saleNumber, desc, &sale.ID, input.UserID); err != nil {
+				desc := "Venta " + sale.Number
+				if err := cbSvc.RecordPayment(tx, p.Method, p.Amount, input.CashSessionID, sale.Number, desc, &sale.ID, input.UserID); err != nil {
 					return err
 				}
 			}
@@ -386,7 +376,7 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				Type:      "out",
 				Quantity:  item.Quantity,
 				Balance:   newQty,
-				Reference: "VENTA/" + saleNumber,
+				Reference: "VENTA/" + sale.Number,
 				UserID:    input.UserID,
 				CreatedAt: time.Now(),
 			})

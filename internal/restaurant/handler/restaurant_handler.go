@@ -194,6 +194,7 @@ func (h *RestaurantHandler) UpdateTable(c fiber.Ctx) error {
 		return err
 	}
 	var body struct {
+		FloorID  *uint  `json:"floor_id"`
 		Name     string `json:"name"`
 		Capacity int    `json:"capacity"`
 		Active   *bool  `json:"active"`
@@ -205,7 +206,7 @@ func (h *RestaurantHandler) UpdateTable(c fiber.Ctx) error {
 	if body.Active != nil {
 		active = *body.Active
 	}
-	if err := svc(c).UpdateTable(id, body.Name, body.Capacity, active); err != nil {
+	if err := svc(c).UpdateTable(id, body.FloorID, body.Name, body.Capacity, active); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

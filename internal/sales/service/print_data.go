@@ -195,10 +195,13 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		}
 	}
 
-	// Sucursal
+	// Sucursal: en comprobantes impresos/PDF la dirección es la de la sucursal de la venta.
 	var branch database.TenantBranch
 	if db.First(&branch, sale.BranchID).Error == nil {
 		pd.Branch = PrintBranch{Name: branch.Name, Address: branch.Address}
+		if addr := strings.TrimSpace(branch.Address); addr != "" {
+			pd.Company.Address = addr
+		}
 	}
 
 	// Items

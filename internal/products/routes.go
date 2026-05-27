@@ -48,4 +48,6 @@ func RegisterRoutes(api fiber.Router) {
 		h.ModifierGroupsAPI,
 	)
 	api.Post("/modifier-groups", middleware.RequireModule("products"), middleware.RequirePermission("products.create"), h.ModifierGroupCreateAPI)
+	api.Put("/modifier-groups/:id", middleware.RequireModule("products"), middleware.RequirePermission("products.update"), h.ModifierGroupUpdateAPI)
+	api.Delete("/modifier-groups/:id", middleware.RequireModule("products"), middleware.RequirePermission("products.update"), h.ModifierGroupDeleteAPI)
 }

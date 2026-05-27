@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 	"tukifac/pkg/sunat"
 
 	"gorm.io/gorm"
@@ -296,7 +297,8 @@ type ProductInput struct {
 	ImageURL           string
 	Active             bool
 	ActiveSet          bool // si true, Update actualiza el campo active
-	ModifierGroupIDs   []uint
+	// nil = no tocar vínculos (update parcial); no-nil = reemplazar asignación (puede ser slice vacío).
+	ModifierGroupIDs *[]uint
 }
 
 func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, error) {
@@ -361,8 +363,8 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, er
 		return nil, err
 	}
 
-	if len(input.ModifierGroupIDs) > 0 {
-		s.syncModifierGroups(p.ID, input.ModifierGroupIDs)
+	if input.ModifierGroupIDs != nil {
+		s.syncModifierGroups(p.ID, *input.ModifierGroupIDs)
 	}
 
 	return p, nil
@@ -457,11 +459,13 @@ func (s *ProductService) Update(id uint, input ProductInput) error {
 		return err
 	}
 
-	modIDs := input.ModifierGroupIDs
-	if strings.EqualFold(effType, "service") {
-		modIDs = nil
+	if input.ModifierGroupIDs != nil {
+		modIDs := *input.ModifierGroupIDs
+		if strings.EqualFold(effType, "service") {
+			modIDs = nil
+		}
+		s.syncModifierGroups(id, modIDs)
 	}
-	s.syncModifierGroups(id, modIDs)
 	return nil
 }
 
@@ -539,7 +543,13 @@ func (s *ProductService) GetProductModifierGroupIDs(productID uint) []uint {
 	return ids
 }
 
-func (s *ProductService) CreateModifierGroup(name string, required, multiSelect bool, options []string) (*ModifierGroupWithOptions, error) {
+// ModifierOptionInput opción de un grupo con precio adicional (variante o extra).
+type ModifierOptionInput struct {
+	Name       string
+	ExtraPrice float64
+}
+
+func (s *ProductService) CreateModifierGroup(name string, required, multiSelect bool, options []ModifierOptionInput) (*ModifierGroupWithOptions, error) {
 	if name == "" {
 		return nil, errors.New("nombre del grupo requerido")
 	}
@@ -547,16 +557,75 @@ func (s *ProductService) CreateModifierGroup(name string, required, multiSelect 
 	if err := s.db.Create(g).Error; err != nil {
 		return nil, err
 	}
-	opts := make([]database.TenantModifierOption, 0)
-	for _, optName := range options {
+	opts := s.createModifierOptions(g.ID, options)
+	return &ModifierGroupWithOptions{TenantModifierGroup: *g, Options: opts}, nil
+}
+
+func (s *ProductService) UpdateModifierGroup(id uint, name string, required, multiSelect bool, options []ModifierOptionInput) (*ModifierGroupWithOptions, error) {
+	if name == "" {
+		return nil, errors.New("nombre del grupo requerido")
+	}
+	var g database.TenantModifierGroup
+	if err := s.db.First(&g, id).Error; err != nil {
+		return nil, errors.New("grupo no encontrado")
+	}
+	if err := s.db.Model(&g).Updates(map[string]interface{}{
+		"name":         name,
+		"required":     required,
+		"multi_select": multiSelect,
+	}).Error; err != nil {
+		return nil, err
+	}
+	if err := s.db.Where("group_id = ?", id).Delete(&database.TenantModifierOption{}).Error; err != nil {
+		return nil, err
+	}
+	opts := s.createModifierOptions(id, options)
+	g.Name = name
+	g.Required = required
+	g.MultiSelect = multiSelect
+	return &ModifierGroupWithOptions{TenantModifierGroup: g, Options: opts}, nil
+}
+
+// DeleteModifierGroup elimina un grupo, sus opciones y vínculos con productos.
+// Los pedidos históricos conservan snapshot en modifiers_json.
+func (s *ProductService) DeleteModifierGroup(id uint) error {
+	var g database.TenantModifierGroup
+	if err := s.db.First(&g, id).Error; err != nil {
+		return errors.New("grupo no encontrado")
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("group_id = ?", id).Delete(&database.TenantModifierOption{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("group_id = ?", id).Delete(&database.TenantProductModifierGroup{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&g).Error
+	})
+}
+
+func (s *ProductService) createModifierOptions(groupID uint, options []ModifierOptionInput) []database.TenantModifierOption {
+	opts := make([]database.TenantModifierOption, 0, len(options))
+	for _, o := range options {
+		optName := strings.TrimSpace(o.Name)
 		if optName == "" {
 			continue
 		}
-		opt := database.TenantModifierOption{GroupID: g.ID, Name: optName, Active: true}
-		s.db.Create(&opt)
-		opts = append(opts, opt)
+		price := o.ExtraPrice
+		if price < 0 {
+			price = 0
+		}
+		opt := database.TenantModifierOption{
+			GroupID:    groupID,
+			Name:       optName,
+			ExtraPrice: money.RoundDisplay(price),
+			Active:     true,
+		}
+		if err := s.db.Create(&opt).Error; err == nil {
+			opts = append(opts, opt)
+		}
 	}
-	return &ModifierGroupWithOptions{TenantModifierGroup: *g, Options: opts}, nil
+	return opts
 }
 
 // ========= Series =========

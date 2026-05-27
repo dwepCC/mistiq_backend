@@ -8,6 +8,7 @@ import (
 
 	"tukifac/internal/restaurant/staff"
 	"tukifac/pkg/database"
+	"tukifac/pkg/docseries"
 	"tukifac/pkg/money"
 	"tukifac/pkg/tax"
 	cashbanksvc "tukifac/internal/cashbank/service"
@@ -230,10 +231,33 @@ func (s *RestaurantService) CreateTable(branchID, floorID uint, name string, cap
 	return t, err
 }
 
-func (s *RestaurantService) UpdateTable(id uint, name string, capacity int, active bool) error {
-	return s.db.Model(&database.TenantRestaurantTable{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"name": name, "capacity": capacity, "active": active,
-	}).Error
+func (s *RestaurantService) UpdateTable(id uint, floorID *uint, name string, capacity int, active bool) error {
+	var table database.TenantRestaurantTable
+	if err := s.db.First(&table, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("mesa no encontrada")
+		}
+		return err
+	}
+
+	updates := map[string]interface{}{
+		"name":     name,
+		"capacity": capacity,
+		"active":   active,
+	}
+
+	if floorID != nil && *floorID != table.FloorID {
+		if reason := s.tableDeleteBlockReason(&table); reason != "" {
+			return fmt.Errorf("no se puede cambiar de piso: %s", reason)
+		}
+		var floor database.TenantRestaurantFloor
+		if err := s.db.Where("id = ? AND branch_id = ?", *floorID, table.BranchID).First(&floor).Error; err != nil {
+			return errors.New("piso no pertenece a esta sucursal")
+		}
+		updates["floor_id"] = *floorID
+	}
+
+	return s.db.Model(&table).Updates(updates).Error
 }
 
 // tableDeleteBlockReason devuelve el motivo por el que no se puede eliminar la mesa, o "" si está permitido.
@@ -410,12 +434,34 @@ func (s *RestaurantService) GetActiveSessionByTable(tableID uint) (*database.Ten
 // ============================= PEDIDOS Y COMANDAS =============================
 
 type NewOrderItem struct {
-	ProductID   *uint   `json:"product_id"`
-	ProductCode string  `json:"product_code"`
-	ProductName string  `json:"product_name"`
-	Quantity    float64 `json:"quantity"`
-	UnitPrice   float64 `json:"unit_price"`
-	Notes       string  `json:"notes"`
+	ProductID          *uint   `json:"product_id"`
+	ProductCode        string  `json:"product_code"`
+	ProductName        string  `json:"product_name"`
+	Quantity           float64 `json:"quantity"`
+	UnitPrice          float64 `json:"unit_price"`
+	Notes              string  `json:"notes"`
+	ModifiersJSON      string  `json:"modifiers_json"`
+	IgvAffectationType string  `json:"igv_affectation_type"`
+	PriceIncludesIgv   bool    `json:"price_includes_igv"`
+}
+
+// comandaIgvForCalc devuelve afectación e «incluye IGV» de la línea (snapshot en comanda).
+func comandaIgvForCalc(db *gorm.DB, c *database.TenantComanda) (affType string, priceIncludes bool) {
+	affType = strings.TrimSpace(c.IgvAffectationType)
+	if affType == "" {
+		affType = "10"
+	}
+	priceIncludes = c.PriceIncludesIgv
+	if c.ProductID != nil && strings.TrimSpace(c.IgvAffectationType) == "" {
+		var p database.TenantProduct
+		if db.First(&p, *c.ProductID).Error == nil {
+			if p.IgvAffectationType != "" {
+				affType = p.IgvAffectationType
+			}
+			priceIncludes = p.PriceIncludesIgv
+		}
+	}
+	return affType, priceIncludes
 }
 
 func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint, items []NewOrderItem, notes string) (*OrderDetail, error) {
@@ -458,26 +504,38 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 			return err
 		}
 		taxCfg := tax.LoadFromDB(tx)
-		for _, item := range items {
+		for i := range items {
+			item := &items[i]
+			if err := resolveRestaurantOrderItem(tx, item); err != nil {
+				return err
+			}
 			prepArea := resolveProductPreparationArea(tx, item.ProductID)
 			// Cada ítem es una fila de comanda; la ronda (TenantTableOrder) es el ticket de cocina.
+			affType := strings.TrimSpace(item.IgvAffectationType)
+			if affType == "" {
+				affType = "10"
+			}
 			c := database.TenantComanda{
-				OrderID:         order.ID,
-				SessionID:       sessionID,
-				ProductID:       item.ProductID,
-				ProductCode:     item.ProductCode,
-				ProductName:     item.ProductName,
-				PreparationArea: prepArea,
-				Quantity:        item.Quantity,
-				UnitPrice:       item.UnitPrice,
-				Notes:           item.Notes,
-				Status:          "pendiente",
+				OrderID:            order.ID,
+				SessionID:          sessionID,
+				ProductID:            item.ProductID,
+				ProductCode:          item.ProductCode,
+				ProductName:          item.ProductName,
+				PreparationArea:      prepArea,
+				Quantity:             item.Quantity,
+				UnitPrice:            item.UnitPrice,
+				Notes:                item.Notes,
+				ModifiersJSON:        strings.TrimSpace(item.ModifiersJSON),
+				IgvAffectationType:   affType,
+				PriceIncludesIgv:     item.PriceIncludesIgv,
+				Status:               "pendiente",
 			}
 			if err := tx.Create(&c).Error; err != nil {
 				return err
 			}
 			comandas = append(comandas, c)
-			sessionTotal += restaurantLinePayableTotal(tx, taxCfg, item.ProductID, item.UnitPrice, item.Quantity)
+			_, _, lineTotal := tax.CalcItem(item.UnitPrice, item.Quantity, 0, affType, item.PriceIncludesIgv, taxCfg)
+			sessionTotal += money.RoundSunat(lineTotal)
 		}
 
 		// Actualizar total acumulado de la sesión
@@ -583,7 +641,9 @@ func (s *RestaurantService) CancelComanda(id uint, reason string, cancelledByID 
 		}
 		// Restar del total de la sesión (mismo criterio tributario que al agregar la comanda)
 		taxCfg := tax.LoadFromDB(tx)
-		deduct := restaurantLinePayableTotal(tx, taxCfg, c.ProductID, c.UnitPrice, c.Quantity)
+		affType, priceIncludes := comandaIgvForCalc(tx, &c)
+		_, _, deduct := tax.CalcItem(c.UnitPrice, c.Quantity, 0, affType, priceIncludes, taxCfg)
+		deduct = money.RoundSunat(deduct)
 		tx.Model(&database.TenantTableSession{}).Where("id = ?", c.SessionID).
 			UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", deduct))
 		return nil
@@ -603,6 +663,15 @@ func resolveProductPreparationArea(tx *gorm.DB, productID *uint) string {
 		return "cocina"
 	}
 	return area
+}
+
+// comandaSaleLineKey agrupa líneas de venta solo si comparten producto, snapshot de modificadores y precio unitario.
+func comandaSaleLineKey(c database.TenantComanda) string {
+	pid := uint(0)
+	if c.ProductID != nil {
+		pid = *c.ProductID
+	}
+	return fmt.Sprintf("%d|%s|%s|%.4f", pid, strings.TrimSpace(c.ProductCode), strings.TrimSpace(c.ModifiersJSON), c.UnitPrice)
 }
 
 // MarkComandaPrinted marca una línea de comanda como impresa.
@@ -814,10 +883,8 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 	}
 	input.CashSessionID = resolvedCash
 
-	// Obtener la serie
-	var series database.TenantDocumentSeries
-	if err := s.db.First(&series, input.SeriesID).Error; err != nil {
-		return nil, errors.New("serie no encontrada")
+	if _, err := docseries.ValidateForBranch(s.db, input.SeriesID, sess.BranchID); err != nil {
+		return nil, err
 	}
 
 	// Construir ítems de venta desde las comandas (con tipo de afectación IGV para Lycet)
@@ -831,29 +898,15 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		TaxRate            float64
 		IgvAffectationType string
 		PriceIncludesIgv   bool
+		ModifiersJSON      string
 	}
 	itemMap := make(map[string]*saleItemData)
 	for _, c := range comandas {
-		key := fmt.Sprintf("%d_%s", func() uint {
-			if c.ProductID != nil {
-				return *c.ProductID
-			}
-			return 0
-		}(), c.ProductName)
+		key := comandaSaleLineKey(c)
 		if existing, ok := itemMap[key]; ok {
 			existing.Quantity += c.Quantity
 		} else {
-			affType := "10"
-			priceIncludesIgv := true
-			if c.ProductID != nil {
-				var p database.TenantProduct
-				if s.db.First(&p, *c.ProductID).Error == nil {
-					if p.IgvAffectationType != "" {
-						affType = p.IgvAffectationType
-					}
-					priceIncludesIgv = p.PriceIncludesIgv
-				}
-			}
+			affType, priceIncludesIgv := comandaIgvForCalc(s.db, &c)
 			itemMap[key] = &saleItemData{
 				ProductID:          c.ProductID,
 				Code:               c.ProductCode,
@@ -864,6 +917,7 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 				TaxRate:            taxCfg.EffectiveRate(affType),
 				IgvAffectationType: affType,
 				PriceIncludesIgv:   priceIncludesIgv,
+				ModifiersJSON:      strings.TrimSpace(c.ModifiersJSON),
 			}
 		}
 	}
@@ -921,6 +975,7 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 			Subtotal:           iSub,
 			TaxAmount:          iTax,
 			Total:              iTotal,
+			ModifiersJSON:      item.ModifiersJSON,
 		})
 	}
 
@@ -932,25 +987,24 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		return nil, fmt.Errorf("monto pagado (%.2f) es menor al total (%.2f)", money.RoundDisplay(totalPaid), money.RoundDisplay(total))
 	}
 
-	// Generar número de venta
-	correlative := series.Correlative
-	saleNumber := fmt.Sprintf("%s-%08d", series.Series, correlative)
 	currency := input.Currency
 	if currency == "" {
 		currency = "PEN"
 	}
 
-	sale := &database.TenantSale{
+	var sale *database.TenantSale
+	var seriesRow database.TenantDocumentSeries
+	var correlative uint
+	var saleNumber string
+
+	sale = &database.TenantSale{
 		BranchID:            sess.BranchID,
 		UserID:              input.UserID,
 		ContactID:           input.ContactID,
 		RestaurantSessionID: &input.SessionID,
 		CashSessionID:       input.CashSessionID,
-		SeriesID:      input.SeriesID,
-		DocType:       input.DocType,
-		Series:        series.Series,
-		Correlative:   correlative,
-		Number:        saleNumber,
+		SeriesID:            input.SeriesID,
+		DocType:             input.DocType,
 		IssueDate:     input.IssueDate,
 		Subtotal:      money.RoundSunat(subtotal),
 		TaxAmount:     money.RoundSunat(taxAmount),
@@ -963,8 +1017,15 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 
 	now := time.Now()
 	return sale, s.db.Transaction(func(tx *gorm.DB) error {
-		// Incrementar correlativo
-		tx.Model(&series).Update("correlative", series.Correlative+1)
+		var err error
+		correlative, seriesRow, err = docseries.ReserveNext(tx, input.SeriesID)
+		if err != nil {
+			return err
+		}
+		saleNumber = fmt.Sprintf("%s-%08d", seriesRow.Series, correlative)
+		sale.Series = seriesRow.Series
+		sale.Correlative = correlative
+		sale.Number = saleNumber
 
 		if err := tx.Create(sale).Error; err != nil {
 			return err

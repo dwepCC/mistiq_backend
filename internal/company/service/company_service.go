@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/docseries"
 	"tukifac/pkg/facturador"
 
 	"gorm.io/gorm"
@@ -193,6 +194,25 @@ func (s *CompanyService) ListSeries(branchID uint) ([]database.TenantDocumentSer
 	return series, err
 }
 
+func (s *CompanyService) assertSeriesCodeUnique(seriesName string, excludeID uint) error {
+	code := docseries.NormalizeSeriesCode(seriesName)
+	if code == "" {
+		return errors.New("código de serie inválido")
+	}
+	q := s.db.Model(&database.TenantDocumentSeries{}).Where("series = ?", code)
+	if excludeID > 0 {
+		q = q.Where("id != ?", excludeID)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return err
+	}
+	if n > 0 {
+		return docseries.ErrSeriesDuplicate
+	}
+	return nil
+}
+
 func (s *CompanyService) CreateSeries(branchID uint, docType, sunatCode, category, seriesName string) error {
 	if seriesName == "" || docType == "" {
 		return errors.New("serie y tipo de documento son requeridos")
@@ -202,6 +222,10 @@ func (s *CompanyService) CreateSeries(branchID uint, docType, sunatCode, categor
 	}
 	if sunatCode == "" {
 		sunatCode = "01"
+	}
+	seriesName = docseries.NormalizeSeriesCode(seriesName)
+	if err := s.assertSeriesCodeUnique(seriesName, 0); err != nil {
+		return err
 	}
 	return s.db.Create(&database.TenantDocumentSeries{
 		BranchID:    branchID,
@@ -215,6 +239,12 @@ func (s *CompanyService) CreateSeries(branchID uint, docType, sunatCode, categor
 }
 
 func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, docType, sunatCode, category string, correlative *uint) error {
+	seriesName = docseries.NormalizeSeriesCode(seriesName)
+	if seriesName != "" {
+		if err := s.assertSeriesCodeUnique(seriesName, id); err != nil {
+			return err
+		}
+	}
 	updates := map[string]interface{}{"series": seriesName, "active": active}
 	if docType != "" {
 		updates["doc_type"] = docType

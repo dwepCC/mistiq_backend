@@ -71,6 +71,8 @@ func RegisterRoutes(api fiber.Router) {
 // RegisterSalePaymentRoutes registra los endpoints de pagos bajo /api/sales
 func RegisterSalePaymentRoutes(api fiber.Router) {
 	h := handler.New()
-	api.Post("/sales/:id/payments", middleware.RequireModule("sales"), h.RegisterPayments)
-	api.Get("/sales/:id/payments", middleware.RequireModule("sales"), h.GetSalePayments)
+	mod := middleware.RequireModule("sales")
+	loadRest := middleware.LoadRestaurantPermissions()
+	api.Post("/sales/:id/payments", mod, loadRest, middleware.RequireSalesAccess("create"), h.RegisterPayments)
+	api.Get("/sales/:id/payments", mod, loadRest, middleware.RequireSalesAccess("view"), h.GetSalePayments)
 }

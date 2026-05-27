@@ -94,11 +94,12 @@ type PrecuentaPayload struct {
 }
 
 type PrecuentaLine struct {
-	ProductName string  `json:"product_name"`
-	Quantity    float64 `json:"quantity"`
-	UnitPrice   float64 `json:"unit_price"`
-	LineTotal   float64 `json:"line_total"`
-	Notes       string  `json:"notes"`
+	ProductName   string  `json:"product_name"`
+	Quantity      float64 `json:"quantity"`
+	UnitPrice     float64 `json:"unit_price"`
+	LineTotal     float64 `json:"line_total"`
+	Notes         string  `json:"notes"`
+	ModifiersJSON string  `json:"modifiers_json,omitempty"`
 }
 
 func normalizeOrderType(t string, tableID *uint) string {
@@ -370,28 +371,18 @@ func (s *RestaurantService) GetPrecuenta(sessionID uint) (*PrecuentaPayload, err
 			if c.CancelledAt != nil {
 				continue
 			}
-			lineSub, lineTax, lineTotal := tax.CalcItem(c.UnitPrice, c.Quantity, 0, "10", true, taxCfg)
-			affType := "10"
-			priceIncludes := true
-			if c.ProductID != nil {
-				var p database.TenantProduct
-				if s.db.First(&p, *c.ProductID).Error == nil {
-					if p.IgvAffectationType != "" {
-						affType = p.IgvAffectationType
-					}
-					priceIncludes = p.PriceIncludesIgv
-					lineSub, lineTax, lineTotal = tax.CalcItem(c.UnitPrice, c.Quantity, 0, affType, priceIncludes, taxCfg)
-				}
-			}
+			affType, priceIncludes := comandaIgvForCalc(s.db, &c)
+			lineSub, lineTax, lineTotal := tax.CalcItem(c.UnitPrice, c.Quantity, 0, affType, priceIncludes, taxCfg)
 			subtotal += lineSub
 			taxAmount += lineTax
 			total += lineTotal
 			lines = append(lines, PrecuentaLine{
-				ProductName: c.ProductName,
-				Quantity:    c.Quantity,
-				UnitPrice:   c.UnitPrice,
-				LineTotal:   lineTotal,
-				Notes:       c.Notes,
+				ProductName:   c.ProductName,
+				Quantity:      c.Quantity,
+				UnitPrice:     c.UnitPrice,
+				LineTotal:     lineTotal,
+				Notes:         c.Notes,
+				ModifiersJSON: strings.TrimSpace(c.ModifiersJSON),
 			})
 		}
 	}

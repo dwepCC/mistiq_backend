@@ -101,7 +101,28 @@ location /api/ {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Origin $http_origin;
 }
+
+# Imágenes y archivos tenant (sin esto, /uploads cae en index.html de la SPA → login)
+location /uploads/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location /storage/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
 ```
+
+**Alternativa (recomendada si no quieres proxy /uploads en cada subdominio tenant):** el frontend resuelve imágenes contra `https://api.tukifac.com/uploads/...` (host API). Las URLs en BD siguen siendo relativas (`/uploads/tenants/{RUC}/...`).
 
 Crítico: `proxy_set_header Host $host` para que el backend reciba `demo.tukifac.com` y resuelva `subdomain=demo`.
 

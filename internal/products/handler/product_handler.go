@@ -229,7 +229,7 @@ func (h *ProductHandler) CreateAPI(c fiber.Ctx) error {
 		PreparationArea:    body.PreparationArea,
 		ImageURL:           body.ImageURL,
 		Active:             true,
-		ModifierGroupIDs:   body.ModifierGroupIDs,
+		ModifierGroupIDs:   &body.ModifierGroupIDs,
 	}
 	p, err := service.NewProductService(db(c)).Create(input)
 	if err != nil {
@@ -300,7 +300,7 @@ func (h *ProductHandler) UpdateAPI(c fiber.Ctx) error {
 		PreparationArea    string  `json:"preparation_area"`
 		ImageURL           string  `json:"image_url"`
 		Active             *bool   `json:"active"`
-		ModifierGroupIDs   []uint  `json:"modifier_group_ids"`
+		ModifierGroupIDs   *[]uint `json:"modifier_group_ids"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -539,20 +539,52 @@ func (h *ProductHandler) ModifierGroupsAPI(c fiber.Ctx) error {
 
 // ModifierGroupCreateAPI crea un grupo de modificadores inline.
 func (h *ProductHandler) ModifierGroupCreateAPI(c fiber.Ctx) error {
-	var body struct {
-		Name        string   `json:"name"`
-		Required    bool     `json:"required"`
-		MultiSelect bool     `json:"multi_select"`
-		Options     []string `json:"options"`
-	}
+	var body modifierGroupBody
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
-	g, err := service.NewProductService(db(c)).CreateModifierGroup(body.Name, body.Required, body.MultiSelect, body.Options)
+	opts, err := body.parsedOptions()
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	g, err := service.NewProductService(db(c)).CreateModifierGroup(body.Name, body.Required, body.MultiSelect, opts)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "group": g})
+}
+
+// ModifierGroupUpdateAPI actualiza grupo y opciones (incluye extra_price por opción).
+func (h *ProductHandler) ModifierGroupUpdateAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body modifierGroupBody
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	opts, err := body.parsedOptions()
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	g, err := service.NewProductService(db(c)).UpdateModifierGroup(uint(id), body.Name, body.Required, body.MultiSelect, opts)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "group": g})
+}
+
+// ModifierGroupDeleteAPI elimina un grupo de modificadores.
+func (h *ProductHandler) ModifierGroupDeleteAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := service.NewProductService(db(c)).DeleteModifierGroup(uint(id)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }
 
 func buildProductInput(c fiber.Ctx, taxCfg tax.Config) service.ProductInput {
@@ -605,6 +637,6 @@ func buildProductInput(c fiber.Ctx, taxCfg tax.Config) service.ProductInput {
 		MinStock:           minStock,
 		ImageURL:           c.FormValue("image_url"),
 		Active:             c.FormValue("active") == "1",
-		ModifierGroupIDs:   modGroupIDs,
+		ModifierGroupIDs:   &modGroupIDs,
 	}
 }

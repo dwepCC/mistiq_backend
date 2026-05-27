@@ -19,6 +19,11 @@ var TenantMigrations = []TenantMigration{
 	V045RestaurantKitchenRounds{},
 	V046TableOrderPrintedAtDatetime{},
 	V047SaleAmountsSunatPrecision{},
+	V048ComandaModifiersJSON{},
+	V049ComandaIgvSnapshot{},
+	V050SaleUniqueIndexes{},
+	V051DocumentSeriesCategoryFix{},
+	V052SeriesGlobalUnique{},
 }
 
 // ByVersion mapa versión → migración.

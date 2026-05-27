@@ -1122,7 +1122,10 @@ type TenantComanda struct {
 	Quantity         float64    `gorm:"type:decimal(15,3);not null" json:"quantity"`
 	UnitPrice        float64    `gorm:"type:decimal(15,2);not null" json:"unit_price"`
 	Notes            string     `gorm:"size:500" json:"notes"`                     // instrucciones especiales (sin cebolla, etc.)
-	Status           string     `gorm:"size:20;default:'pendiente'" json:"status"` // pendiente, preparacion, lista, entregada
+	ModifiersJSON        string `gorm:"type:text" json:"modifiers_json"` // variantes y extras [{ option_id, option_name, extra_price, type, ... }]
+	IgvAffectationType   string `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
+	PriceIncludesIgv     bool   `gorm:"default:true" json:"price_includes_igv"`
+	Status               string `gorm:"size:20;default:'pendiente'" json:"status"` // pendiente, preparacion, lista, entregada
 	Printed          bool       `gorm:"default:false" json:"printed"`
 	PrintedAt        *time.Time `json:"printed_at"`
 	PrintedByID      *uint      `gorm:"index" json:"printed_by_id"`
