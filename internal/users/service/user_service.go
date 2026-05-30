@@ -49,13 +49,14 @@ func (s *UserService) GetByID(id uint) (*database.TenantUser, error) {
 }
 
 type CreateUserInput struct {
-	RoleID   uint   `json:"role_id"`
-	BranchID *uint  `json:"branch_id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Phone    string `json:"phone"`
-	Active   bool   `json:"active"`
+	RoleID    uint   `json:"role_id"`
+	BranchID  *uint  `json:"branch_id"`
+	BranchIDs []uint `json:"branch_ids"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Password  string `json:"password"`
+	Phone     string `json:"phone"`
+	Active    bool   `json:"active"`
 }
 
 func (s *UserService) Create(input CreateUserInput) (*database.TenantUser, error) {
@@ -93,17 +94,28 @@ func (s *UserService) Create(input CreateUserInput) (*database.TenantUser, error
 	if err := s.db.Create(user).Error; err != nil {
 		return nil, err
 	}
+	branchIDs := input.BranchIDs
+	if len(branchIDs) == 0 && input.BranchID != nil && *input.BranchID > 0 {
+		branchIDs = []uint{*input.BranchID}
+	}
+	if len(branchIDs) > 0 && branch.UserBranchesReady(s.db) {
+		if err := branch.SetUserAssignedBranches(s.db, user.ID, branchIDs, false); err != nil {
+			return nil, err
+		}
+		_ = s.db.First(user, user.ID)
+	}
 	return user, nil
 }
 
 type UpdateUserInput struct {
-	RoleID   uint   `json:"role_id"`
-	BranchID *uint  `json:"branch_id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Phone    string `json:"phone"`
-	Active   bool   `json:"active"`
+	RoleID    uint   `json:"role_id"`
+	BranchID  *uint  `json:"branch_id"`
+	BranchIDs []uint `json:"branch_ids"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Password  string `json:"password"`
+	Phone     string `json:"phone"`
+	Active    bool   `json:"active"`
 }
 
 func (s *UserService) Update(id uint, input UpdateUserInput) error {
@@ -127,7 +139,15 @@ func (s *UserService) Update(id uint, input UpdateUserInput) error {
 			updates["can_switch_branch"] = branch.IsTenantAdmin(role.Name)
 		}
 	}
-	if user.BranchID != nil && input.BranchID != nil && *user.BranchID != *input.BranchID {
+	branchIDs := input.BranchIDs
+	if len(branchIDs) == 0 && input.BranchID != nil && *input.BranchID > 0 {
+		branchIDs = []uint{*input.BranchID}
+	}
+	if len(branchIDs) > 0 && branch.UserBranchesReady(s.db) {
+		if err := branch.SetUserAssignedBranches(s.db, id, branchIDs, true); err != nil {
+			return err
+		}
+	} else if user.BranchID != nil && input.BranchID != nil && *user.BranchID != *input.BranchID {
 		_ = branch.BumpSessionVersion(s.db, id)
 	} else if (user.BranchID == nil) != (input.BranchID == nil) {
 		_ = branch.BumpSessionVersion(s.db, id)
