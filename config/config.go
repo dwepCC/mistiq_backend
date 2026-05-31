@@ -85,9 +85,9 @@ type Config struct {
 	// Alias env: ROOT_DOMAIN (tiene prioridad sobre APP_DOMAIN).
 	AppDomain string
 
-	// URL pública del API (CORS). Ej: https://api.tukifac.com
+	// URL pública del API (CORS). Ej: https://api.bendey.cloud
 	APIPublicURL string
-	// Host del API sin esquema (alternativa a API_PUBLIC_URL). Ej: api.tukifac.com
+	// Host del API sin esquema (alternativa a API_PUBLIC_URL). Ej: api.bendey.cloud
 	APIHost string
 
 	// Subdominios reservados (no son tenants): api, app, www, admin, central + extras en .env

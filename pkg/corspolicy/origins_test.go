@@ -11,7 +11,7 @@ func TestMatcherTukifacRootDomain(t *testing.T) {
 	cfg := &config.Config{
 		AppEnv:             "production",
 		AppDomain:          "tukifac.com",
-		APIPublicURL:       "https://api.tukifac.com",
+		APIPublicURL:       "https://api.bendey.cloud",
 		FrontendURL:        "https://app.tukifac.com",
 		CentralFrontendURL: "https://app.tukifac.com",
 		ReservedSubdomains: domains.MergeReserved(nil),
@@ -20,7 +20,7 @@ func TestMatcherTukifacRootDomain(t *testing.T) {
 
 	for _, o := range []string{
 		"https://app.tukifac.com",
-		"https://api.tukifac.com",
+		"https://api.bendey.cloud",
 		"https://tenant1.tukifac.com",
 		"https://empresa.tukifac.com",
 	} {
@@ -64,7 +64,7 @@ func TestMatcherProductionAllowsNativeShell(t *testing.T) {
 	cfg := &config.Config{
 		AppEnv:             "production",
 		AppDomain:          "tukifac.com",
-		APIPublicURL:       "https://api.tukifac.com",
+		APIPublicURL:       "https://api.bendey.cloud",
 		FrontendURL:        "https://app.tukifac.com",
 		CentralFrontendURL: "https://app.tukifac.com",
 		ReservedSubdomains: domains.MergeReserved(nil),
@@ -87,7 +87,7 @@ func TestMatcherProductionDeniesLocalhostSubdomains(t *testing.T) {
 	cfg := &config.Config{
 		AppEnv:             "production",
 		AppDomain:          "tukifac.com",
-		APIPublicURL:       "https://api.tukifac.com",
+		APIPublicURL:       "https://api.bendey.cloud",
 		FrontendURL:        "https://app.tukifac.com",
 		CentralFrontendURL: "https://app.tukifac.com",
 		ReservedSubdomains: domains.MergeReserved(nil),

@@ -9,7 +9,7 @@ func TestExtractSubdomainTukifac(t *testing.T) {
 		want string
 	}{
 		{"tenant1.tukifac.com", "tenant1"},
-		{"api.tukifac.com", "api"},
+		{"api.bendey.cloud", "api"},
 		{"app.tukifac.com", "app"},
 		{"www.tukifac.com", "www"},
 		{"tukifac.com", ""},

@@ -44,7 +44,7 @@ func TestResolveTenantSlug_centralHostLoginFallback(t *testing.T) {
 		AppDomain:          "tukifac.com",
 		ReservedSubdomains: []string{"api", "app", "www", "admin", "central"},
 	}
-	slug, reason := resolveTenantSlug("api.tukifac.com", "empresa1", "", "/api/login", cfg)
+	slug, reason := resolveTenantSlug("api.bendey.cloud", "empresa1", "", "/api/login", cfg)
 	if slug != "empresa1" || reason != "central_host_header_fallback" {
 		t.Fatalf("legacy fallback slug=%q reason=%q", slug, reason)
 	}

@@ -12,7 +12,7 @@ https://demo.tukifac.com/api/*
 backend Go :3000
 ```
 
-- Frontend tenant **no** debe apuntar rutas autenticadas a `api.tukifac.com`.
+- Frontend tenant **no** debe apuntar rutas autenticadas a `api.bendey.cloud`.
 - Resolver: `frontend_tenant/src/config/apiBaseUrl.ts`.
 - `X-Tenant-Slug` **ignorado** para resolver (solo validación si se envía).
 - Header ≠ subdominio → **403** `TENANT_ISOLATION_VIOLATION`.
@@ -20,7 +20,7 @@ backend Go :3000
 ### Panel central
 
 ```
-https://app.tukifac.com → https://api.tukifac.com/api/*
+https://app.tukifac.com → https://api.bendey.cloud/api/*
 ```
 
 (Superadmin; frontend en `frontend_central`.)
@@ -28,7 +28,7 @@ https://app.tukifac.com → https://api.tukifac.com/api/*
 ### Tukichef (Android / Tauri)
 
 ```
-1. RUC → GET api.tukifac.com/api/public/tenant-by-ruc
+1. RUC → GET api.bendey.cloud/api/public/tenant-by-ruc
 2. Respuesta: { slug, api_url: "https://empresa1.tukifac.com", subdomain, tenant_version }
 3. Guardar api_url en localStorage (tenantApiUrl)
 4. Login y API → https://empresa1.tukifac.com/api/*
@@ -76,7 +76,7 @@ Invalidación: `InvalidateTenantCache(slug)` tras cambios de plan/permisos/suspe
 2. **Purge Redis selectiva** — `SCAN tukifac:tenant:{slug}:*` si hubo incidente.
 3. **Monitoreo** — alertas en logs `tenant_security_violation`.
 4. **Postman** — JWT tenant A + Host empresa2 → 403.
-5. **App** — verificar que peticiones van a `https://{slug}.tukifac.com`, no solo a `api.tukifac.com`.
+5. **App** — verificar que peticiones van a `https://{slug}.tukifac.com`, no solo a `api.bendey.cloud`.
 6. **Nginx** — wildcard `*.tukifac.com`: SPA en `/`, proxy `/api` al Go con `Host` preservado (ver abajo).
 
 ## Nginx Proxy Manager (producción tukifac.com)
@@ -85,7 +85,7 @@ Tres proxy hosts (orden de especificidad):
 
 | Host | Destino | Notas |
 |------|---------|-------|
-| `api.tukifac.com` | backend Go `:3000` | Panel central / superadmin / bootstrap |
+| `api.bendey.cloud` | backend Go `:3000` | Panel central / superadmin / bootstrap |
 | `app.tukifac.com` | SPA `frontend_central` | Sin proxy `/api` al Go |
 | `*.tukifac.com` | SPA tenant + proxy `/api` | Excluir `api` y `app` con hosts dedicados |
 
@@ -122,7 +122,7 @@ location /storage/ {
 }
 ```
 
-**Alternativa (recomendada si no quieres proxy /uploads en cada subdominio tenant):** el frontend resuelve imágenes contra `https://api.tukifac.com/uploads/...` (host API). Las URLs en BD siguen siendo relativas (`/uploads/tenants/{RUC}/...`).
+**Alternativa (recomendada si no quieres proxy /uploads en cada subdominio tenant):** el frontend resuelve imágenes contra `https://api.bendey.cloud/uploads/...` (host API). Las URLs en BD siguen siendo relativas (`/uploads/tenants/{RUC}/...`).
 
 Crítico: `proxy_set_header Host $host` para que el backend reciba `demo.tukifac.com` y resuelva `subdomain=demo`.
 
@@ -145,4 +145,4 @@ go test -race ./pkg/middleware/...
 ## Riesgos residuales
 
 - `/uploads/*` sin auth (archivos por URL).
-- Login legacy en `api.tukifac.com` + header (deprecado; log `tenant_resolve_central_host_header`).
+- Login legacy en `api.bendey.cloud` + header (deprecado; log `tenant_resolve_central_host_header`).

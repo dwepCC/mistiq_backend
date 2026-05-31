@@ -50,7 +50,7 @@ func Slugify(s string) string {
 
 // ExtractSubdomain extrae el subdominio de un host dado el dominio raíz (APP_DOMAIN / ROOT_DOMAIN).
 // Ej: host="empresa1.tukifac.com", domain="tukifac.com" → "empresa1"
-// Ej: host="api.tukifac.com", domain="tukifac.com" → "api" (luego IsReservedSubdomain lo ignora)
+// Ej: host="api.bendey.cloud", domain="tukifac.com" → "api" (luego IsReservedSubdomain lo ignora)
 // Ej: host="empresa1.localhost", domain="localhost" → "empresa1"
 func ExtractSubdomain(host, appDomain string) string {
 	// Eliminar puerto

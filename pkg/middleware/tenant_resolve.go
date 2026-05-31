@@ -42,7 +42,7 @@ func resolveTenantSlug(host, headerSlug, cookieSlug, path string, cfg *config.Co
 		return subdomainSlug, ""
 	}
 
-	// Host central (api.tukifac.com, app.tukifac.com) — la app NO debería operar aquí salvo bootstrap.
+	// Host central (api.bendey.cloud, app.tukifac.com) — la app NO debería operar aquí salvo bootstrap.
 	if headerSlug != "" && allowHeaderFallbackOnCentralHost(path) {
 		return headerSlug, "central_host_header_fallback"
 	}
