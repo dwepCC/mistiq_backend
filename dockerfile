@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     go build \
     -trimpath \
     -ldflags="-s -w" \
-    -o /out/tukifac-api .
+    -o /out/bendey-api .
 
 FROM alpine:3.21
 
@@ -35,7 +35,7 @@ LABEL org.opencontainers.image.description="Tukifac Multi-tenant SaaS API"
 
 WORKDIR /app
 
-COPY --from=builder --chmod=755 /out/tukifac-api ./tukifac-api
+COPY --from=builder --chmod=755 /out/bendey-api ./bendey-api
 COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN chmod 755 /app/docker-entrypoint.sh \
@@ -54,4 +54,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
 
 ENTRYPOINT ["dumb-init", "--", "/app/docker-entrypoint.sh"]
 
-CMD ["./tukifac-api"]
+CMD ["./bendey-api"]
