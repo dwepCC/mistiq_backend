@@ -14,8 +14,7 @@ on:
         type: boolean
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: dwepcc/bendey_backend
+  IMAGE_SHA: ghcr.io/dwepcc/bendey_backend:latest
 
 concurrency:
   group: deploy-production
@@ -73,7 +72,7 @@ jobs:
       - name: Deploy SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE_SHA: ghcr.io/${{ github.repository }}:latest
+          IMAGE_SHA: ghcr.io/dwepcc/bendey_backend:latest
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
