@@ -83,13 +83,13 @@ jobs:
           script: |
             set -euo pipefail
 
-            cd /opt/tukifac
+            cd /opt/bendey
 
             echo "Login GHCR..."
             echo "${{ secrets.VPS_GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             echo "Updating image..."
-            sed -i "s|^TUKIFAC_IMAGE=.*|TUKIFAC_IMAGE=${IMAGE_SHA}|" .env
+            sed -i "s|^BENDEY_IMAGE=.*|BENDEY_IMAGE=${IMAGE_SHA}|" .env
 
             echo "Pulling image..."
             docker compose -f docker-compose.production.yml pull backend-go
@@ -102,7 +102,7 @@ jobs:
 
             if [ "$SKIP_MIGRATE" = "0" ]; then
               echo "Running migrate-central (fleet is separate cron)..."
-              docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./tukifac-api migrate-central
+              docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./bendey-api migrate-central
             fi
 
             echo "Restarting container..."
@@ -132,5 +132,5 @@ jobs:
         run: |
           echo "Deploy failed"
           echo "Run in VPS:"
-          echo "cd /opt/tukifac"
+          echo "cd /opt/bendey"
           echo "bash deploy/scripts/rollback.sh"

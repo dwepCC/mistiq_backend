@@ -1,8 +1,8 @@
-# Tukifac Backend — producción
-# Ubicación en VPS: /opt/tukifac/docker-compose.production.yml
+# Bendey Backend — producción
+# Ubicación en VPS: /opt/bendey/bendey_go/docker-compose.production.yml
 #
 # MySQL y facturador son servicios EXTERNOS (otros VPS).
-# Redis: contenedor tukifac-redis en la misma red Docker (ver REDIS_URL en .env).
+# Redis: contenedor bendey-redis en la misma red Docker (ver REDIS_URL en .env).
 # Nginx Proxy Manager → http://127.0.0.1:3000 (no exponer 3000 al público).
 #
 # Entrypoint: solo API (sin migraciones al arrancar).
@@ -10,12 +10,12 @@
 # Fleet tenants (cron): deploy/scripts/migrate-fleet.sh
 #   migrate-fleet-cron → bump-target + migrate-fleet + backfills registrados (tenantbackfills)
 
-name: tukifac-backend
+name: bendey-backend
 
 services:
   backend-go:
-    image: ${TUKIFAC_IMAGE:?Define TUKIFAC_IMAGE en .env}
-    container_name: tukifac-backend-go
+    image: ${BENDEY_IMAGE:?Define BENDEY_IMAGE en .env}
+    container_name: bendey-backend-go
     restart: unless-stopped
     stop_grace_period: 30s
     env_file:
