@@ -10,19 +10,19 @@ import (
 func TestMatcherTukifacRootDomain(t *testing.T) {
 	cfg := &config.Config{
 		AppEnv:             "production",
-		AppDomain:          "tukifac.com",
+		AppDomain:          "bendey.cloud",
 		APIPublicURL:       "https://api.bendey.cloud",
-		FrontendURL:        "https://app.tukifac.com",
-		CentralFrontendURL: "https://app.tukifac.com",
+		FrontendURL:        "https://app.bendey.cloud",
+		CentralFrontendURL: "https://app.bendey.cloud",
 		ReservedSubdomains: domains.MergeReserved(nil),
 	}
 	m := NewMatcher(cfg)
 
 	for _, o := range []string{
-		"https://app.tukifac.com",
+		"https://app.bendey.cloud",
 		"https://api.bendey.cloud",
-		"https://tenant1.tukifac.com",
-		"https://empresa.tukifac.com",
+		"https://tenant1.bendey.cloud",
+		"https://empresa.bendey.cloud",
 	} {
 		if !m.Allow(o) {
 			t.Errorf("expected allowed: %s", o)
@@ -31,7 +31,7 @@ func TestMatcherTukifacRootDomain(t *testing.T) {
 
 	for _, o := range []string{
 		"https://app.tukifac.cloud",
-		"http://app.tukifac.com",
+		"http://app.bendey.cloud",
 	} {
 		if m.Allow(o) {
 			t.Errorf("expected denied: %s", o)
@@ -63,10 +63,10 @@ func TestMatcherDevLocalhost(t *testing.T) {
 func TestMatcherProductionAllowsNativeShell(t *testing.T) {
 	cfg := &config.Config{
 		AppEnv:             "production",
-		AppDomain:          "tukifac.com",
+		AppDomain:          "bendey.cloud",
 		APIPublicURL:       "https://api.bendey.cloud",
-		FrontendURL:        "https://app.tukifac.com",
-		CentralFrontendURL: "https://app.tukifac.com",
+		FrontendURL:        "https://app.bendey.cloud",
+		CentralFrontendURL: "https://app.bendey.cloud",
 		ReservedSubdomains: domains.MergeReserved(nil),
 	}
 	m := NewMatcher(cfg)
@@ -86,10 +86,10 @@ func TestMatcherProductionAllowsNativeShell(t *testing.T) {
 func TestMatcherProductionDeniesLocalhostSubdomains(t *testing.T) {
 	cfg := &config.Config{
 		AppEnv:             "production",
-		AppDomain:          "tukifac.com",
+		AppDomain:          "bendey.cloud",
 		APIPublicURL:       "https://api.bendey.cloud",
-		FrontendURL:        "https://app.tukifac.com",
-		CentralFrontendURL: "https://app.tukifac.com",
+		FrontendURL:        "https://app.bendey.cloud",
+		CentralFrontendURL: "https://app.bendey.cloud",
 		ReservedSubdomains: domains.MergeReserved(nil),
 	}
 	m := NewMatcher(cfg)

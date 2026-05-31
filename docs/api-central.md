@@ -15,7 +15,7 @@ Genera un token JWT para el Super Admin.
 **Request body:**
 ```json
 {
-  "email": "admin@tukifac.com",
+  "email": "admin@bendey.cloud",
   "password": "secreto123"
 }
 ```
@@ -27,7 +27,7 @@ Genera un token JWT para el Super Admin.
   "expires_in": 28800,
   "user": {
     "id": 1,
-    "email": "admin@tukifac.com",
+    "email": "admin@bendey.cloud",
     "role": "superadmin"
   }
 }

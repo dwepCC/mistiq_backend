@@ -11,7 +11,7 @@ import (
 // Matcher decide si un Origin del navegador puede recibir Access-Control-Allow-Origin.
 type Matcher struct {
 	exact     map[string]struct{}
-	baseHosts []string // dominio raíz → permite https://tenant1.tukifac.com
+	baseHosts []string // dominio raíz → permite https://tenant1.bendey.cloud
 	allowHTTP bool
 }
 
@@ -36,7 +36,7 @@ func NewMatcher(cfg *config.Config) *Matcher {
 		addExact(raw)
 	}
 
-	// Solo el dominio raíz habilita tenants por subdominio (*.tukifac.com).
+	// Solo el dominio raíz habilita tenants por subdominio (*.bendey.cloud).
 	if root := domains.NormalizeRootDomain(cfg.AppDomain); root != "" && root != "localhost" {
 		m.baseHosts = append(m.baseHosts, root)
 	}

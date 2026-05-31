@@ -81,7 +81,7 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string
 
-	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. tukifac.com).
+	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. bendey.cloud).
 	// Alias env: ROOT_DOMAIN (tiene prioridad sobre APP_DOMAIN).
 	AppDomain string
 
@@ -219,7 +219,7 @@ func Load() error {
 		SMTPPort:     getEnvInt("SMTP_PORT", 587),
 		SMTPUser:     getEnv("SMTP_USER", ""),
 		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
-		SMTPFrom:     getEnv("SMTP_FROM", "noreply@tukifac.com"),
+		SMTPFrom:     getEnv("SMTP_FROM", "noreply@bendey.cloud"),
 
 		AppDomain:          resolveRootDomain(),
 		APIPublicURL:       strings.TrimSpace(getEnv("API_PUBLIC_URL", "")),

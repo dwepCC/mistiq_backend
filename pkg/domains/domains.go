@@ -16,7 +16,7 @@ func NormalizeHost(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
 }
 
-// NormalizeRootDomain es el dominio raíz de tenants (ej. tukifac.com).
+// NormalizeRootDomain es el dominio raíz de tenants (ej. bendey.cloud).
 func NormalizeRootDomain(raw string) string {
 	return NormalizeHost(raw)
 }
@@ -73,7 +73,7 @@ func OriginFromHost(host string) string {
 	return "https://" + host
 }
 
-// TenantHost devuelve el host del tenant: {slug}.{root} → empresa1.tukifac.com
+// TenantHost devuelve el host del tenant: {slug}.{root} → empresa1.bendey.cloud
 func TenantHost(slug, rootDomain string) string {
 	slug = strings.ToLower(strings.TrimSpace(slug))
 	root := NormalizeRootDomain(rootDomain)

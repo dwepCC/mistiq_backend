@@ -10,6 +10,6 @@ import (
 
 func TestMain(m *testing.M) {
 	logger.Init(&config.Config{LogLevel: "error", AppEnv: "development"})
-	config.AppConfig = &config.Config{JWTSecret: "test-secret", AppEnv: "development", AppDomain: "tukifac.com"}
+	config.AppConfig = &config.Config{JWTSecret: "test-secret", AppEnv: "development", AppDomain: "bendey.cloud"}
 	os.Exit(m.Run())
 }

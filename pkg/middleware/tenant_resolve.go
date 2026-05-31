@@ -12,8 +12,8 @@ const MinTenantJWTVersion uint = 1
 
 // resolveTenantSlug aplica política host/header según entorno.
 //
-// Caso A — Web producción: {slug}.tukifac.com → solo subdominio (header ignorado salvo validación).
-// Caso B — App/Tauri/Capacitor: request a {slug}.tukifac.com + X-Tenant-Slug redundante → host manda.
+// Caso A — Web producción: {slug}.bendey.cloud → solo subdominio (header ignorado salvo validación).
+// Caso B — App/Tauri/Capacitor: request a {slug}.bendey.cloud + X-Tenant-Slug redundante → host manda.
 // Caso C — Dev localhost: X-Tenant-Slug o subdominio .localhost.
 //
 // Hosts centrales (api, app): sin tenant salvo rutas de bootstrap (login legacy con header).
@@ -42,7 +42,7 @@ func resolveTenantSlug(host, headerSlug, cookieSlug, path string, cfg *config.Co
 		return subdomainSlug, ""
 	}
 
-	// Host central (api.bendey.cloud, app.tukifac.com) — la app NO debería operar aquí salvo bootstrap.
+	// Host central (api.bendey.cloud, app.bendey.cloud) — la app NO debería operar aquí salvo bootstrap.
 	if headerSlug != "" && allowHeaderFallbackOnCentralHost(path) {
 		return headerSlug, "central_host_header_fallback"
 	}

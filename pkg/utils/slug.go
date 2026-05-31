@@ -13,7 +13,7 @@ import (
 var nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]+`)
 
 // NormalizeSubdomain deja solo letras minúsculas y números (sin guiones).
-// Útil para que el usuario elija un subdominio corto: empresadeplasticos → empresadeplasticos.tukifac.com
+// Útil para que el usuario elija un subdominio corto: empresadeplasticos → empresadeplasticos.bendey.cloud
 // Devuelve error si queda vacío o si tiene longitud inválida (2-63 caracteres).
 func NormalizeSubdomain(s string) (string, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
@@ -49,8 +49,8 @@ func Slugify(s string) string {
 }
 
 // ExtractSubdomain extrae el subdominio de un host dado el dominio raíz (APP_DOMAIN / ROOT_DOMAIN).
-// Ej: host="empresa1.tukifac.com", domain="tukifac.com" → "empresa1"
-// Ej: host="api.bendey.cloud", domain="tukifac.com" → "api" (luego IsReservedSubdomain lo ignora)
+// Ej: host="empresa1.bendey.cloud", domain="bendey.cloud" → "empresa1"
+// Ej: host="api.bendey.cloud", domain="bendey.cloud" → "api" (luego IsReservedSubdomain lo ignora)
 // Ej: host="empresa1.localhost", domain="localhost" → "empresa1"
 func ExtractSubdomain(host, appDomain string) string {
 	// Eliminar puerto

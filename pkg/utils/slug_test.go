@@ -3,16 +3,16 @@ package utils
 import "testing"
 
 func TestExtractSubdomainTukifac(t *testing.T) {
-	root := "tukifac.com"
+	root := "bendey.cloud"
 	cases := []struct {
 		host string
 		want string
 	}{
-		{"tenant1.tukifac.com", "tenant1"},
+		{"tenant1.bendey.cloud", "tenant1"},
 		{"api.bendey.cloud", "api"},
-		{"app.tukifac.com", "app"},
-		{"www.tukifac.com", "www"},
-		{"tukifac.com", ""},
+		{"app.bendey.cloud", "app"},
+		{"www.bendey.cloud", "www"},
+		{"bendey.cloud", ""},
 		{"localhost", ""},
 		{"empresa.localhost", "empresa"},
 	}

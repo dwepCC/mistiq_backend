@@ -42,7 +42,7 @@ func TestValidateTenantBinding_rejectsMissingTenantID(t *testing.T) {
 }
 
 func TestConcurrentTenantLocalsIsolation(t *testing.T) {
-	config.AppConfig = &config.Config{AppEnv: "production", AppDomain: "tukifac.com"}
+	config.AppConfig = &config.Config{AppEnv: "production", AppDomain: "bendey.cloud"}
 
 	const n = 100
 	var wg sync.WaitGroup
