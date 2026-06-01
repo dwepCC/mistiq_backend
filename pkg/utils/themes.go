@@ -32,7 +32,7 @@ var themes = map[string]ThemeData{
 	},
 	"blue": {
 		Key: "blue", Label: "Azul corporativo", Preview: "#2563eb",
-		SidebarBg: "#172554", NavActive: "#2563eb",
+		SidebarBg: "#1e3a8a", NavActive: "#2563eb",
 		C50: "#eff6ff", C100: "#dbeafe", C200: "#bfdbfe",
 		C300: "#93c5fd", C400: "#60a5fa", C500: "#3b82f6",
 		C600: "#2563eb", C700: "#1d4ed8", C800: "#1e40af",
@@ -96,17 +96,17 @@ var themes = map[string]ThemeData{
 	},
 }
 
-// GetTheme retorna el tema por clave; si no existe, retorna verde corporativo por defecto.
+// GetTheme retorna el tema por clave; si no existe, retorna azul corporativo por defecto.
 func GetTheme(key string) ThemeData {
 	if t, ok := themes[key]; ok {
 		return t
 	}
-	return themes["green"]
+	return themes["blue"]
 }
 
 // AllThemes retorna todos los temas disponibles en orden para la UI.
 func AllThemes() []ThemeData {
-	keys := []string{"green", "blue", "violet", "emerald", "rose", "orange", "teal", "sky", "slate"}
+	keys := []string{"blue", "teal", "violet", "emerald", "rose", "orange", "sky", "slate"}
 	result := make([]ThemeData, 0, len(keys))
 	for _, k := range keys {
 		result = append(result, themes[k])
