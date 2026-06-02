@@ -723,6 +723,8 @@ type TenantSale struct {
 	ContactName string `gorm:"-" json:"contact_name"`
 	// ID de la venta electrónica (01/03) emitida desde esta NV; solo listados NV.
 	ElectronicIssueSaleID *uint `gorm:"-" json:"electronic_issue_sale_id,omitempty"`
+	// Payments se rellena al listar (tenant_sale_payments); no es columna en BD.
+	Payments []TenantSalePayment `gorm:"-" json:"payments,omitempty"`
 }
 
 type TenantSaleItem struct {

@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"software.sslmate.com/src/go-pkcs12"
 )
 
 // Client es el cliente para el API del facturador Lycet.
@@ -1030,6 +1029,13 @@ func PEMToBase64(pemContent string) string {
 // PEM con clave privada + certificado(s), normalizado para multi-tenant.
 func PrepareGreenterCertificateBase64(pfxBase64, password, privateKeyBase64, certificateBase64 string) (string, error) {
 	if strings.TrimSpace(pfxBase64) != "" {
+		raw, err := DecodeCertificatePayloadBase64(pfxBase64)
+		if err != nil {
+			return "", fmt.Errorf("pfx_base64 inválido: %w", err)
+		}
+		if isLikelyCombinedPEM(raw) {
+			return encodeGreenterCombinedPEM(normalizePEMWithBagAttributes(raw))
+		}
 		return PfxToCombinedPEMBase64(pfxBase64, password)
 	}
 	if strings.TrimSpace(privateKeyBase64) != "" || strings.TrimSpace(certificateBase64) != "" {
@@ -1047,7 +1053,7 @@ func BuildCombinedPEMBase64(privateKeyBase64, certificateBase64 string) (string,
 		if b64 == "" {
 			continue
 		}
-		raw, err := base64.StdEncoding.DecodeString(b64)
+		raw, err := DecodeCertificatePayloadBase64(b64)
 		if err != nil {
 			return "", fmt.Errorf("PEM inválido (base64): %w", err)
 		}
@@ -1064,56 +1070,32 @@ func BuildCombinedPEMBase64(privateKeyBase64, certificateBase64 string) (string,
 
 // PfxToCombinedPEMBase64 convierte certificado .pfx/.p12 (base64) a PEM combinado para Lycet.
 func PfxToCombinedPEMBase64(pfxBase64, password string) (string, error) {
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(pfxBase64))
+	raw, err := DecodeCertificatePayloadBase64(pfxBase64)
 	if err != nil {
-		return "", fmt.Errorf("pfx_base64 inválido: %w", err)
+		return "", err
 	}
-	blocks, err := pkcs12.ToPEM(raw, password)
+	if isLikelyCombinedPEM(raw) {
+		return encodeGreenterCombinedPEM(normalizePEMWithBagAttributes(raw))
+	}
+	der, err := extractPKCS12DER(raw)
 	if err != nil {
-		return "", fmt.Errorf("no se pudo abrir el PFX (revise la contraseña): %w", err)
+		return "", err
 	}
-	var keyParts []string
-	var certParts []string
-	for _, block := range blocks {
-		if block == nil {
-			continue
-		}
-		part := strings.TrimSpace(string(pem.EncodeToMemory(block)))
-		if part == "" {
-			continue
-		}
-		switch block.Type {
-		case "PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY":
-			if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err != nil {
-				if pkcs1, err2 := x509.ParsePKCS1PrivateKey(block.Bytes); err2 == nil {
-					block = &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(pkcs1)}
-				}
+
+	blocks, err := pfxDERToPEMBlocks(der, password)
+	if err != nil {
+		// PFX en BER, cifrados legacy (OpenSSL 3) o variantes SUNAT: intentar openssl en el servidor.
+		if opensslBlocks, oerr := pfxDERToPEMBlocksOpenSSL(der, password); oerr == nil {
+			blocks = opensslBlocks
+		} else {
+			msg := err.Error()
+			if strings.Contains(msg, "indefinite length") || strings.Contains(msg, "not DER") {
+				return "", fmt.Errorf("no se pudo abrir el PFX: formato ASN.1 no DER (común en exportaciones antiguas). Convierta con «openssl pkcs12 -in cert.p12 -out cert.pem -nodes -legacy» o use modo PEM en el panel: %w", err)
 			}
-			part := strings.TrimSpace(string(pem.EncodeToMemory(block)))
-			if part != "" {
-				keyParts = append(keyParts, part)
-			}
-		case "ENCRYPTED PRIVATE KEY":
-			dec, err := x509.DecryptPEMBlock(block, []byte(password))
-			if err != nil {
-				return "", fmt.Errorf("no se pudo desencriptar la clave del PFX (revise la contraseña): %w", err)
-			}
-			keyParts = append(keyParts, strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{
-				Type:  "PRIVATE KEY",
-				Bytes: dec,
-			}))))
-		case "CERTIFICATE":
-			certParts = append(certParts, part)
+			return "", fmt.Errorf("no se pudo abrir el PFX (revise la contraseña): %w", err)
 		}
 	}
-	if len(keyParts) == 0 {
-		return "", fmt.Errorf("el PFX no contiene clave privada")
-	}
-	if len(certParts) == 0 {
-		return "", fmt.Errorf("el PFX no contiene certificado")
-	}
-	combined := strings.Join(keyParts, "\n") + "\n" + strings.Join(certParts, "\n")
-	return encodeGreenterCombinedPEM([]byte(combined))
+	return pkcs12BlocksToCombinedPEM(blocks, password)
 }
 
 func encodeGreenterCombinedPEM(raw []byte) (string, error) {

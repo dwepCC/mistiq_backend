@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -481,6 +482,7 @@ type SaleListSummary struct {
 	PaymentTotals  []struct {
 		Method string  `json:"method"`
 		Total  float64 `json:"total"`
+		Count  int64   `json:"count"`
 	} `json:"payment_totals"`
 }
 
@@ -651,7 +653,79 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 			sales[i].IssueDate = time.Date(d.Year(), d.Month(), d.Day(), 12, 0, 0, 0, loc)
 		}
 	}
+	s.attachPaymentsToSales(sales)
 	return sales, total, summary, nil
+}
+
+// attachPaymentsToSales carga tenant_sale_payments para el listado.
+// Las NOTA_CREDITO sin filas propias heredan los pagos de la venta original (montos negativos).
+func (s *SaleService) attachPaymentsToSales(sales []database.TenantSale) {
+	if len(sales) == 0 {
+		return
+	}
+	ids := make([]uint, len(sales))
+	for i := range sales {
+		ids[i] = sales[i].ID
+	}
+	var payments []database.TenantSalePayment
+	if err := s.db.Where("sale_id IN ?", ids).Find(&payments).Error; err != nil {
+		return
+	}
+	bySale := make(map[uint][]database.TenantSalePayment, len(sales))
+	for _, p := range payments {
+		bySale[p.SaleID] = append(bySale[p.SaleID], p)
+	}
+
+	var ncWithoutPayments []database.TenantSale
+	for _, sale := range sales {
+		if sale.DocType == "NOTA_CREDITO" && len(bySale[sale.ID]) == 0 && sale.OriginalSaleID != nil && *sale.OriginalSaleID > 0 {
+			ncWithoutPayments = append(ncWithoutPayments, sale)
+		}
+	}
+	if len(ncWithoutPayments) > 0 {
+		origIDs := make([]uint, 0, len(ncWithoutPayments))
+		origByID := make(map[uint]database.TenantSale, len(ncWithoutPayments))
+		for _, nc := range ncWithoutPayments {
+			origIDs = append(origIDs, *nc.OriginalSaleID)
+		}
+		var origSales []database.TenantSale
+		if s.db.Select("id", "total").Where("id IN ?", origIDs).Find(&origSales).Error == nil {
+			for _, o := range origSales {
+				origByID[o.ID] = o
+			}
+		}
+		var origPayments []database.TenantSalePayment
+		if s.db.Where("sale_id IN ?", origIDs).Find(&origPayments).Error == nil {
+			origPayBySale := make(map[uint][]database.TenantSalePayment)
+			for _, p := range origPayments {
+				origPayBySale[p.SaleID] = append(origPayBySale[p.SaleID], p)
+			}
+			for _, nc := range ncWithoutPayments {
+				if nc.OriginalSaleID == nil {
+					continue
+				}
+				orig, ok := origByID[*nc.OriginalSaleID]
+				if !ok {
+					continue
+				}
+				scale := 1.0
+				if orig.Total > 0 {
+					scale = nc.Total / orig.Total
+				}
+				for _, p := range origPayBySale[*nc.OriginalSaleID] {
+					bySale[nc.ID] = append(bySale[nc.ID], database.TenantSalePayment{
+						SaleID: nc.ID,
+						Method: p.Method,
+						Amount: -math.Abs(p.Amount * scale),
+					})
+				}
+			}
+		}
+	}
+
+	for i := range sales {
+		sales[i].Payments = bySale[sales[i].ID]
+	}
 }
 
 // saleListSummary agrega montos sobre el mismo conjunto filtrado que List (sin paginar).
@@ -695,16 +769,20 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 	out.CountCancelled = row.CountCancelled
 	out.CountActive = row.CountActive
 
-	// Totales por método: si hay filas en tenant_sale_pagos, usar montos por línea; si no, el campo cabecera payment_method.
+	// Totales por método desde tenant_sale_payments (montos netos; NOTA_CREDITO resta).
 	type payRow struct {
 		Method string  `gorm:"column:method"`
 		Total  float64 `gorm:"column:total"`
+		Count  int64   `gorm:"column:cnt"`
 	}
 	byMethod := make(map[string]float64)
+	byMethodCount := make(map[string]map[uint]struct{})
+
+	signedAmount := `CASE WHEN ts.doc_type = 'NOTA_CREDITO' THEN -ABS(tsp.amount) ELSE tsp.amount END`
 
 	var fromPayments []payRow
 	err = s.db.Table("tenant_sale_payments tsp").
-		Select("LOWER(TRIM(tsp.method)) AS method, COALESCE(SUM(tsp.amount), 0) AS total").
+		Select("LOWER(TRIM(tsp.method)) AS method, COALESCE(SUM("+signedAmount+"), 0) AS total").
 		Joins("JOIN tenant_sales ts ON ts.id = tsp.sale_id").
 		Where("ts.id IN (?)", idSub).
 		Where("ts.status != ?", "cancelled").
@@ -721,12 +799,80 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		byMethod[m] += p.Total
 	}
 
+	// NOTA_CREDITO sin filas de pago: restar pagos de la venta original (proporcional).
+	type ncOrigRow struct {
+		Method   string  `gorm:"column:method"`
+		Amount   float64 `gorm:"column:amount"`
+		NCSaleID uint    `gorm:"column:nc_sale_id"`
+	}
+	var ncOrigRows []ncOrigRow
+	err = s.db.Table("tenant_sales nc").
+		Select(`LOWER(TRIM(tsp.method)) AS method,
+			-ABS(tsp.amount) * (nc.total / NULLIF(orig.total, 0)) AS amount,
+			nc.id AS nc_sale_id`).
+		Joins("JOIN tenant_sales orig ON orig.id = nc.original_sale_id").
+		Joins("JOIN tenant_sale_payments tsp ON tsp.sale_id = orig.id").
+		Where("nc.id IN (?)", idSub).
+		Where("nc.doc_type = ?", "NOTA_CREDITO").
+		Where("nc.status != ?", "cancelled").
+		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp2 WHERE tsp2.sale_id = nc.id)").
+		Scan(&ncOrigRows).Error
+	if err != nil {
+		return out, err
+	}
+	for _, r := range ncOrigRows {
+		m := strings.TrimSpace(r.Method)
+		if m == "" {
+			m = "sin_definir"
+		}
+		byMethod[m] += r.Amount
+	}
+
+	type saleMethodRow struct {
+		Method string `gorm:"column:method"`
+		SaleID uint   `gorm:"column:sale_id"`
+	}
+	var saleMethodRows []saleMethodRow
+	err = s.db.Table("tenant_sale_payments tsp").
+		Select("LOWER(TRIM(tsp.method)) AS method, tsp.sale_id AS sale_id").
+		Joins("JOIN tenant_sales ts ON ts.id = tsp.sale_id").
+		Where("ts.id IN (?)", idSub).
+		Where("ts.status != ?", "cancelled").
+		Scan(&saleMethodRows).Error
+	if err != nil {
+		return out, err
+	}
+	for _, r := range saleMethodRows {
+		m := strings.TrimSpace(r.Method)
+		if m == "" {
+			m = "sin_definir"
+		}
+		if byMethodCount[m] == nil {
+			byMethodCount[m] = make(map[uint]struct{})
+		}
+		byMethodCount[m][r.SaleID] = struct{}{}
+	}
+	for _, r := range ncOrigRows {
+		m := strings.TrimSpace(r.Method)
+		if m == "" {
+			m = "sin_definir"
+		}
+		if byMethodCount[m] == nil {
+			byMethodCount[m] = make(map[uint]struct{})
+		}
+		byMethodCount[m][r.NCSaleID] = struct{}{}
+	}
+
+	signedHeaderTotal := `CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN -ABS(tenant_sales.total) ELSE tenant_sales.total END`
+
 	var fromHeader []payRow
 	err = s.db.Model(&database.TenantSale{}).
-		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, COALESCE(SUM(tenant_sales.total), 0) AS total`).
+		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method,
+			COALESCE(SUM(` + signedHeaderTotal + `), 0) AS total`).
 		Where("tenant_sales.id IN (?)", idSub).
 		Where("tenant_sales.status != ?", "cancelled").
 		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp WHERE tsp.sale_id = tenant_sales.id)").
+		Where(`NOT (tenant_sales.doc_type = 'NOTA_CREDITO' AND tenant_sales.original_sale_id IS NOT NULL)`).
 		Group(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir')))`).
 		Scan(&fromHeader).Error
 	if err != nil {
@@ -740,23 +886,54 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		byMethod[m] += p.Total
 	}
 
+	type headerSaleRow struct {
+		Method string `gorm:"column:method"`
+		SaleID uint   `gorm:"column:sale_id"`
+	}
+	var headerSaleRows []headerSaleRow
+	err = s.db.Model(&database.TenantSale{}).
+		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, tenant_sales.id AS sale_id`).
+		Where("tenant_sales.id IN (?)", idSub).
+		Where("tenant_sales.status != ?", "cancelled").
+		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp WHERE tsp.sale_id = tenant_sales.id)").
+		Where(`NOT (tenant_sales.doc_type = 'NOTA_CREDITO' AND tenant_sales.original_sale_id IS NOT NULL)`).
+		Scan(&headerSaleRows).Error
+	if err != nil {
+		return out, err
+	}
+	for _, r := range headerSaleRows {
+		m := strings.TrimSpace(r.Method)
+		if m == "" {
+			m = "sin_definir"
+		}
+		if byMethodCount[m] == nil {
+			byMethodCount[m] = make(map[uint]struct{})
+		}
+		byMethodCount[m][r.SaleID] = struct{}{}
+	}
+
 	type kv struct {
 		method string
 		total  float64
+		count  int64
 	}
 	pairs := make([]kv, 0, len(byMethod))
 	for m, t := range byMethod {
-		pairs = append(pairs, kv{m, t})
+		cnt := int64(len(byMethodCount[m]))
+		pairs = append(pairs, kv{m, t, cnt})
 	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].total > pairs[j].total })
-	if len(pairs) > 12 {
-		pairs = pairs[:12]
-	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].total == pairs[j].total {
+			return pairs[i].method < pairs[j].method
+		}
+		return pairs[i].total > pairs[j].total
+	})
 	for _, p := range pairs {
 		out.PaymentTotals = append(out.PaymentTotals, struct {
 			Method string  `json:"method"`
 			Total  float64 `json:"total"`
-		}{Method: p.method, Total: p.total})
+			Count  int64   `json:"count"`
+		}{Method: p.method, Total: p.total, Count: p.count})
 	}
 	return out, nil
 }
