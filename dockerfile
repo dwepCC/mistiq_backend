@@ -24,6 +24,7 @@ FROM alpine:3.21
 
 RUN apk add --no-cache \
     ca-certificates \
+    openssl \
     tzdata \
     wget \
     dumb-init \
