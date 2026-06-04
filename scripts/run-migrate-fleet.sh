@@ -2,11 +2,11 @@
 # Cron local: migrate-fleet-cron (flock + lock Redis/DB en API).
 set -euo pipefail
 
-LOCKFILE="${MIGRATE_LOCKFILE:-/tmp/tukifac-migrate-fleet.lock}"
+LOCKFILE="${MIGRATE_LOCKFILE:-/tmp/mistiq-migrate-fleet.lock}"
 TIMEOUT="${MIGRATE_TIMEOUT_SEC:-3600}"
-LOG_DIR="${MIGRATE_LOG_DIR:-/var/log/tukifac}"
+LOG_DIR="${MIGRATE_LOG_DIR:-/var/log/mistiq}"
 LOG_FILE="${LOG_DIR}/migrate-fleet.log"
-API_BIN="${TUKIFAC_API_BIN:-./tukifac-api}"
+API_BIN="${MISTIQ_API_BIN:-./mistiq-api}"
 WORKERS="${MIGRATE_WORKERS:-4}"
 LIMIT="${MIGRATE_LIMIT:-100}"
 

@@ -14,7 +14,7 @@ on:
         type: boolean
 
 env:
-  IMAGE_SHA: ghcr.io/dwepcc/bendey_backend:latest
+  IMAGE_SHA: ghcr.io/dwepcc/mistiq_backend:latest
 
 concurrency:
   group: deploy-production
@@ -47,7 +47,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/dwepcc/mistiq_backend
           tags: |
             type=raw,value=latest
             type=sha
@@ -56,7 +56,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
+          file: dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -72,7 +72,7 @@ jobs:
       - name: Deploy SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE_SHA: ghcr.io/dwepcc/bendey_backend:latest
+          IMAGE_SHA: ghcr.io/dwepcc/mistiq_backend:latest
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -82,13 +82,13 @@ jobs:
           script: |
             set -euo pipefail
 
-            cd /opt/bendey
+            cd /opt/mistiq
 
             echo "Login GHCR..."
             echo "${{ secrets.VPS_GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             echo "Updating image..."
-            sed -i "s|^BENDEY_IMAGE=.*|BENDEY_IMAGE=${IMAGE_SHA}|" .env
+            sed -i "s|^MISTIQ_IMAGE=.*|MISTIQ_IMAGE=${IMAGE_SHA}|" .env
 
             echo "Pulling image..."
             docker compose -f docker-compose.production.yml pull backend-go
@@ -101,7 +101,7 @@ jobs:
 
             if [ "$SKIP_MIGRATE" = "0" ]; then
               echo "Running migrate-central (fleet is separate cron)..."
-              docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./bendey-api migrate-central
+              docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./mistiq-api migrate-central
             fi
 
             echo "Restarting container..."
@@ -131,5 +131,5 @@ jobs:
         run: |
           echo "Deploy failed"
           echo "Run in VPS:"
-          echo "cd /opt/bendey"
+          echo "cd /opt/mistiq"
           echo "bash deploy/scripts/rollback.sh"

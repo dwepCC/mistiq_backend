@@ -1,10 +1,10 @@
-# Deploy — Tukifac Backend
+# Deploy — Mistiq Backend
 
-Archivos de despliegue en el VPS (`/opt/tukifac/`):
+Archivos de despliegue en el VPS (`/opt/mistiq/`):
 
 | Archivo / carpeta | Origen en repo |
 |-------------------|----------------|
-| `docker-compose.production.yml` | `backend_go/docker-compose.production.yml` |
+| `docker-compose.production.yml` | raíz del repo |
 | `.env` | copiar de `.env.production.example` (no commitear) |
 | `deploy/scripts/*` | esta carpeta |
 | `data/uploads`, `data/storage` | creados por `vps-init-dirs.sh` |
@@ -12,7 +12,7 @@ Archivos de despliegue en el VPS (`/opt/tukifac/`):
 ## Comandos rápidos (en el VPS)
 
 ```bash
-cd /opt/tukifac
+cd /opt/mistiq
 
 # Deploy completo (migrate-central → restart → health; sin migrate en entrypoint)
 bash deploy/scripts/deploy.sh
@@ -44,12 +44,12 @@ Documentación completa: **[docs/MIGRATIONS-SaaS.md](../docs/MIGRATIONS-SaaS.md)
 ### Cron recomendado
 
 ```bash
-chmod +x /opt/tukifac/deploy/scripts/migrate-fleet.sh
-mkdir -p /var/log/tukifac
+chmod +x /opt/mistiq/deploy/scripts/migrate-fleet.sh
+mkdir -p /opt/mistiq/logs
 ```
 
 ```cron
-*/5 * * * * /opt/tukifac/deploy/scripts/migrate-fleet.sh >> /var/log/tukifac/cron-migrate.log 2>&1
+*/5 * * * * /opt/mistiq/deploy/scripts/migrate-fleet.sh >> /opt/mistiq/logs/cron-migrate.log 2>&1
 ```
 
 ### Panel operativo
@@ -59,6 +59,6 @@ Super Admin → **Fleet Migrations** (`/fleet-migrations`)
 ## CI/CD
 
 GitHub Actions: `.github/workflows/deploy-production.yml`  
-Imagen: `ghcr.io/<org>/<repo>:<sha>` y `:latest`
+Imagen: `ghcr.io/dwepcc/mistiq_backend:<sha>` y `:latest`
 
 Documentación VPS: [docs/DEPLOY-VPS-UBUNTU.md](../docs/DEPLOY-VPS-UBUNTU.md)

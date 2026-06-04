@@ -3,7 +3,7 @@
 #   sudo bash deploy/scripts/vps-init-dirs.sh
 set -euo pipefail
 
-BASE="${TUKIFAC_BASE:-/opt/tukifac}"
+BASE="${MISTIQ_BASE:-/opt/mistiq}"
 DEPLOY_USER="${DEPLOY_USER:-$USER}"
 
 echo "==> Creando estructura en ${BASE}"
@@ -38,6 +38,6 @@ Siguiente paso:
   1. Copiar docker-compose.production.yml y crear .env
   2. docker compose -f docker-compose.production.yml pull
   3. docker compose -f docker-compose.production.yml up -d
-  4. docker exec tukifac-backend-go ./tukifac-api migrate
+  4. docker exec mistiq-backend-go ./mistiq-api migrate
 
 EOF

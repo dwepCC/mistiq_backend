@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Cron: migrate-fleet-cron con lock (flock en host + Redis/DB en API).
-# Uso: */5 * * * * /opt/tukifac/deploy/scripts/migrate-fleet.sh
+# Uso: */5 * * * * /opt/mistiq/deploy/scripts/migrate-fleet.sh
 set -euo pipefail
 
-BASE_DIR="${TUKIFAC_BASE:-/opt/tukifac}"
+BASE_DIR="${MISTIQ_BASE:-/opt/mistiq}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
-CONTAINER="${TUKIFAC_CONTAINER:-tukifac-backend-go}"
-LOCKFILE="${MIGRATE_LOCKFILE:-/tmp/tukifac-migrate-fleet.lock}"
+CONTAINER="${MISTIQ_CONTAINER:-mistiq-backend-go}"
+LOCKFILE="${MIGRATE_LOCKFILE:-/tmp/mistiq-migrate-fleet.lock}"
 TIMEOUT="${MIGRATE_TIMEOUT_SEC:-3600}"
-LOG_DIR="${MIGRATE_LOG_DIR:-/opt/tukifac/logs}"
+LOG_DIR="${MIGRATE_LOG_DIR:-/opt/mistiq/logs}"
 LOG_FILE="${LOG_DIR}/migrate-fleet.log"
 WORKERS="${MIGRATE_WORKERS:-4}"
 LIMIT="${MIGRATE_LIMIT:-100}"
@@ -33,7 +33,7 @@ echo "$(date -Iseconds) [start] migrate-fleet-cron workers=${WORKERS} limit=${LI
 set +e
 
 timeout "${TIMEOUT}" docker exec "${CONTAINER}" \
-  ./tukifac-api migrate-fleet-cron \
+  ./mistiq-api migrate-fleet-cron \
   --workers="${WORKERS}" \
   --limit="${LIMIT}" >> "${LOG_FILE}" 2>&1
 
