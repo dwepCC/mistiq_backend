@@ -306,6 +306,8 @@ type NotePayload struct {
 	TipoMoneda      string             `json:"tipoMoneda"`
 	CodMotivo       string             `json:"codMotivo"`       // Catálogo SUNAT ej. "01" Anulación de la operación
 	DesMotivo       string             `json:"desMotivo"`       // Descripción del motivo
+	TipDocAfectado  string             `json:"tipDocAfectado,omitempty"` // "01" Factura, "03" Boleta (Greenter XML BillingReference)
+	NumDocfectado   string             `json:"numDocfectado,omitempty"`  // Serie-número doc. afectado (typo Greenter)
 	RelDocs         []NoteRelDoc       `json:"relDocs"`         // Documentos afectados (al menos uno)
 	MtoOperGravadas float64            `json:"mtoOperGravadas"`
 	MtoOperExoneradas float64          `json:"mtoOperExoneradas,omitempty"`

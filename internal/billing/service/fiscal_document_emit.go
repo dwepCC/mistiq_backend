@@ -168,12 +168,37 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 	}
 
 	var relDocs []facturador.NoteRelDoc
+	var tipDocAfectado, numDocfectado string
 	if hasOrig {
-		tipoDocAfectado := "03"
-		if orig.DocType == "FACTURA" || getSeriesSunatCode(s.db, orig.SeriesID) == "01" {
-			tipoDocAfectado = "01"
+		tipDocAfectado = strings.TrimSpace(getSeriesSunatCode(s.db, orig.SeriesID))
+		if tipDocAfectado == "" {
+			switch strings.ToUpper(strings.TrimSpace(orig.DocType)) {
+			case "FACTURA":
+				tipDocAfectado = "01"
+			default:
+				tipDocAfectado = "03"
+			}
 		}
-		relDocs = []facturador.NoteRelDoc{{TipoDoc: tipoDocAfectado, NroDoc: fmt.Sprintf("%s-%d", orig.Series, orig.Correlative)}}
+		if tipDocAfectado != "01" && tipDocAfectado != "03" {
+			if strings.ToUpper(strings.TrimSpace(orig.DocType)) == "FACTURA" {
+				tipDocAfectado = "01"
+			} else {
+				tipDocAfectado = "03"
+			}
+		}
+		numDocfectado = fmt.Sprintf("%s-%d", orig.Series, orig.Correlative)
+		relDocs = []facturador.NoteRelDoc{{TipoDoc: tipDocAfectado, NroDoc: numDocfectado}}
+	}
+	if len(relDocs) == 0 {
+		return nil, errors.New("la nota debe referenciar la factura o boleta afectada (documento original)")
+	}
+	if !noteSeriesMatchesAffected(noteSale.Series, tipoDoc, tipDocAfectado) {
+		return nil, fmt.Errorf(
+			"la serie %s no corresponde: para anular una %s use serie %s (SUNAT exige prefijo distinto por tipo de comprobante afectado)",
+			noteSale.Series,
+			affectedDocumentLabel(tipDocAfectado),
+			expectedNoteSeriesExample(tipoDoc, tipDocAfectado),
+		)
 	}
 
 	var items []database.TenantSaleItem
@@ -273,13 +298,13 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 		Serie:             noteSale.Series,
 		Correlativo:       fmt.Sprintf("%d", noteSale.Correlative),
 		FechaEmision:      facturador.FormatFiscalDateTime(noteSale.IssueDate),
-		FormaPago:         &facturador.InvoiceFormaPago{Tipo: "Contado"},
 		Company:           facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
 		Client:            facturador.InvoiceClient{TipoDoc: clientTipoDoc, NumDoc: clientNumDoc, RznSocial: clientRazon, Address: clientAddr},
 		TipoMoneda:        tipoMoneda,
 		CodMotivo:         codMotivo,
 		DesMotivo:         desMotivo,
-		RelDocs:           relDocs,
+		TipDocAfectado:    tipDocAfectado,
+		NumDocfectado:     numDocfectado,
 		MtoOperGravadas:   mtoOperGravadas,
 		MtoOperExoneradas: mtoOperExoneradas,
 		MtoOperInafectas:  mtoOperInafectas,

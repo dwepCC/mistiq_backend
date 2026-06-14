@@ -421,8 +421,9 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 		return nil, nil, errors.New("para nota de crédito electrónica debe asignar un cliente con dirección y ubigeo en la venta original")
 	}
 	var ncSeries database.TenantDocumentSeries
-	if err := s.db.Where("branch_id = ? AND category = ? AND active = ?", orig.BranchID, "nota_credito", true).First(&ncSeries).Error; err != nil {
-		return nil, nil, errors.New("no hay serie de nota de crédito configurada para esta sucursal — configure una serie con categoría Nota de crédito")
+	ncSeries, err := findNoteSeriesForReferencedSale(s.db, orig.BranchID, "nota_credito", "07", orig)
+	if err != nil {
+		return nil, nil, err
 	}
 	saleSvc := salesvc.NewSaleService(s.db)
 	nextCorr, err := saleSvc.NextCorrelative(ncSeries.ID)
@@ -487,9 +488,7 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 	inv := database.TenantInvoice{
 		SaleID:          ncSale.ID,
 		NotePayloadJSON: string(notePayloadJSON),
-		PipelineStatus:  billingstate.PENDING_QUEUE,
-		JobStatus:       "pending",
-		SunatStatus:     "pending",
+		// DRAFT + job pending (defaults BD): EnqueueSendToSUNAT pasa el guard fiscal y encola.
 	}
 	if err := s.db.Create(&inv).Error; err != nil {
 		return nil, nil, fmt.Errorf("crear registro fiscal NC: %w", err)
@@ -529,8 +528,9 @@ func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint) (*database.
 		return nil, nil, errors.New("debe asignar un cliente con dirección y ubigeo en la venta original")
 	}
 	var ndSeries database.TenantDocumentSeries
-	if err := s.db.Where("branch_id = ? AND category = ? AND active = ?", orig.BranchID, "nota_debito", true).First(&ndSeries).Error; err != nil {
-		return nil, nil, errors.New("no hay serie de nota de débito configurada para esta sucursal")
+	ndSeries, err := findNoteSeriesForReferencedSale(s.db, orig.BranchID, "nota_debito", "08", orig)
+	if err != nil {
+		return nil, nil, err
 	}
 	saleSvc := salesvc.NewSaleService(s.db)
 	nextCorr, err := saleSvc.NextCorrelative(ndSeries.ID)
@@ -594,9 +594,6 @@ func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint) (*database.
 	inv := database.TenantInvoice{
 		SaleID:          ndSale.ID,
 		NotePayloadJSON: string(notePayloadJSON),
-		PipelineStatus:  billingstate.PENDING_QUEUE,
-		JobStatus:       "pending",
-		SunatStatus:     "pending",
 	}
 	if err := s.db.Create(&inv).Error; err != nil {
 		return nil, nil, fmt.Errorf("crear registro fiscal ND: %w", err)
@@ -882,7 +879,7 @@ func (s *BillingService) ListSummaries() ([]database.TenantSunatSummary, error) 
 // No usa fallbacks "-": SUNAT exige dirección completa y nombres reales de departamento/provincia/distrito.
 func (s *BillingService) getCompanyConfigAndAddress() (*database.TenantCompanyConfig, facturador.InvoiceAddress, error) {
 	var cfg database.TenantCompanyConfig
-	if err := s.db.Select("id", "ruc", "business_name", "trade_name", "address", "ubigeo").First(&cfg).Error; err != nil {
+	if err := s.db.Select("id", "ruc", "business_name", "trade_name", "address", "ubigeo", "tax_rate").First(&cfg).Error; err != nil {
 		return nil, facturador.InvoiceAddress{}, err
 	}
 	ubigueo := strings.TrimSpace(cfg.Ubigeo)
