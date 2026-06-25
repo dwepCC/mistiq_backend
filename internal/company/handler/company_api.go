@@ -1,12 +1,16 @@
 package handler
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"tukifac/internal/company/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/tenantstorage"
+	"tukifac/pkg/uploadlimits"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -37,20 +41,88 @@ func (h *CompanyHandler) UpdateConfigAPI(c fiber.Ctx) error {
 			c.Locals("tenant_ruc", ruc)
 		}
 	}
-	// Si el tenant tiene SUNAT conectado, sincronizar logo con Lycet y actualizar BD central
+	// Solo sincronizar logo con Lycet cuando el usuario envió un logo (acción explícita).
+	// Guardar dirección/teléfono/etc. no debe tocar credenciales ni metadatos fiscales en el facturador.
 	if svc.IsSunatEnabled() {
 		logoBase64 := extractBase64FromDataURL(input.LogoURL)
-		syncSvc := svc
-		if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
-			syncSvc = svc.WithSaaSContext(t.ID, t.Slug)
+		if logoBase64 != "" {
+			syncSvc := svc
+			if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
+				syncSvc = svc.WithSaaSContext(t.ID, t.Slug)
+			}
+			_ = syncSvc.SyncFacturadorConfigWithFiles("", "", logoBase64, "", "", "", "")
 		}
-		_ = syncSvc.SyncFacturadorConfigWithFiles("", "", logoBase64, "", "", "", "")
 		if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
 			_ = database.CentralDB.Model(&database.Tenant{}).Where("id = ?", t.ID).Update("logo_url", input.LogoURL).Error
 		}
 	}
 	cfg, _ := svc.GetConfig()
 	return c.JSON(fiber.Map{"success": true, "data": cfg})
+}
+
+// PUT /api/company/receipt-wallet — QR Yape/Plin en comprobantes locales.
+func (h *CompanyHandler) UpdateReceiptWalletAPI(c fiber.Ctx) error {
+	var body struct {
+		WalletProvider        string `json:"wallet_provider"`
+		WalletPhone           string `json:"wallet_phone"`
+		WalletQrURL           string `json:"wallet_qr_url"`
+		WalletShowOnA4        bool   `json:"wallet_show_on_a4"`
+		WalletShowOnTicket    bool   `json:"wallet_show_on_ticket"`
+		ReceiptBankAccountIDs []uint `json:"receipt_bank_account_ids"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+	svc := service.NewCompanyService(db(c))
+	if err := svc.SaveReceiptWallet(
+		body.WalletProvider, body.WalletPhone, body.WalletQrURL,
+		body.WalletShowOnA4, body.WalletShowOnTicket,
+		body.ReceiptBankAccountIDs,
+	); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	cfg, _ := svc.GetConfig()
+	return c.JSON(fiber.Map{"success": true, "data": cfg})
+}
+
+// UploadReceiptWalletQRAPI POST /api/company/receipt-wallet/qr — imagen en uploads/tenants/{RUC}/receipts/.
+func (h *CompanyHandler) UploadReceiptWalletQRAPI(c fiber.Ctx) error {
+	ruc, err := tenantstorage.ResolveTenantRUC(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	file, err := c.FormFile("image")
+	if err != nil || file == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "envía un archivo en el campo 'image'"})
+	}
+	if file.Size > uploadlimits.MaxFileBytes {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "la imagen no debe superar 10 MB"})
+	}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	allowed := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".webp": true}
+	if !allowed[ext] {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "formato no permitido. Usa JPG, PNG o WebP"})
+	}
+
+	dir := tenantstorage.TenantUploadDir(ruc, "receipts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("no se pudo crear carpeta %s: %v", dir, err),
+		})
+	}
+	filename := "wallet-qr" + ext
+	savePath := filepath.Join(dir, filename)
+	if err := c.SaveFile(file, savePath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("error guardando QR en %s: %v", savePath, err),
+		})
+	}
+	imageURL := tenantstorage.TenantUploadPublicURL(ruc, "receipts", filename)
+	svc := service.NewCompanyService(db(c))
+	if err := svc.UpdateWalletQrURL(imageURL); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "wallet_qr_url": imageURL})
 }
 
 // extractBase64FromDataURL obtiene el payload base64 de un data URL (ej. "data:image/png;base64,iVBORw...").

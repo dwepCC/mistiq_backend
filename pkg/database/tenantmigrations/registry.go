@@ -1,7 +1,8 @@
 package tenantmigrations
 
-// TenantMigrations migraciones ordenadas (> baseline V30). Solo versiones nuevas.
+// TenantMigrations migraciones ordenadas. V001 = esquema base; V031+ = incrementales históricos.
 var TenantMigrations = []TenantMigration{
+	V001BaselineSchema{},
 	V031MultiBranch{},
 	V032RestaurantOrders{},
 	V033DeliveryDriversTimestamps{},
@@ -31,7 +32,25 @@ var TenantMigrations = []TenantMigration{
 	V057BranchFiscalDomicile{},
 	V058CompanyAdditionalNotes{},
 	V059UserBranches{},
-	V060NoteSeriesBoleta{},
+	V060ReceiptPaymentWallet{},
+	V061ProductBranchID{},
+	V062CreditNoteBCSeries{},
+	V063ReceiptBankAccountIDs{},
+	V064TableOpenSessionUnique{},
+	V065ContactFiscalFlags{},
+	V066SaleFiscalContext{},
+	V067SaleCurrencyOperation{},
+	V068SaleDetraccion{},
+	V069DetractionPaymentMethod{},
+	V070ReceivablesP3{},
+	V071SunatUnitCodes{},
+	V072CompanyFiscalDomicile{},
+	V073Quotations{},
+	V074PaymentMethodKinds{},
+	V075SplitFinancialDomains{},
+	V076SaleOrigin{},
+	V077GuiaSeriesSeed{},
+	V078GreFleetCatalog{},
 }
 
 // ByVersion mapa versión → migración.

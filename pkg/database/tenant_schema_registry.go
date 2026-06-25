@@ -20,7 +20,7 @@ func InitTenantSchemaVersions() (created, skipped int, err error) {
 	if err := CentralDB.Find(&tenants).Error; err != nil {
 		return 0, 0, err
 	}
-	baseline := TenantSchemaBaselineVersion
+	target := TenantSchemaTargetVersion()
 	for _, t := range tenants {
 		var existing TenantSchemaVersion
 		err := CentralDB.Where("tenant_id = ?", t.ID).First(&existing).Error
@@ -33,9 +33,9 @@ func InitTenantSchemaVersions() (created, skipped int, err error) {
 		}
 		row := TenantSchemaVersion{
 			TenantID:       t.ID,
-			CurrentVersion: baseline,
-			TargetVersion:  baseline,
-			Status:         TenantSchemaStatusCompleted,
+			CurrentVersion: TenantSchemaBaselineVersion,
+			TargetVersion:  target,
+			Status:         TenantSchemaStatusPending,
 		}
 		if err := CentralDB.Create(&row).Error; err != nil {
 			return created, skipped, err
@@ -87,7 +87,31 @@ func UpsertTenantSchemaVersion(tenantID uint, current, target int, status string
 	}).Create(&row).Error
 }
 
-// MarkTenantSchemaCompleted tras migración OK.
+// SyncTenantSchemaCurrentVersion actualiza current_version desde el historial probado.
+func SyncTenantSchemaCurrentVersion(tenantID uint, provenVersion int, status string) error {
+	if CentralDB == nil {
+		return errors.New("BD central no conectada")
+	}
+	now := time.Now()
+	updates := map[string]interface{}{
+		"current_version": provenVersion,
+		"status":          status,
+		"updated_at":      now,
+	}
+	if status == TenantSchemaStatusCompleted {
+		updates["last_migrated_at"] = now
+		updates["migration_lock"] = nil
+		updates["lock_expires_at"] = nil
+		updates["last_error"] = nil
+		updates["next_retry_at"] = nil
+		updates["attempts"] = 0
+	}
+	return CentralDB.Model(&TenantSchemaVersion{}).
+		Where("tenant_id = ?", tenantID).
+		Updates(updates).Error
+}
+
+// MarkTenantSchemaCompleted tras migración OK (preferir engine.MarkTenantSchemaCompletedFromHistory).
 func MarkTenantSchemaCompleted(tenantID uint, version int) error {
 	now := time.Now()
 	return CentralDB.Model(&TenantSchemaVersion{}).
@@ -151,7 +175,7 @@ func ListPendingSchemaTenants(limit int, activeOnly bool) ([]PendingTenantRow, e
 		Select("tsv.tenant_id, t.slug, t.db_name, tsv.current_version, tsv.target_version").
 		Joins("INNER JOIN tenants AS t ON t.id = tsv.tenant_id AND t.deleted_at IS NULL").
 		Where("tsv.current_version < tsv.target_version").
-		Where("tsv.status IN ?", []string{TenantSchemaStatusPending, TenantSchemaStatusFailed}).
+		Where("tsv.status IN ?", []string{TenantSchemaStatusPending, TenantSchemaStatusFailed, TenantSchemaStatusDrifted}).
 		Where("(tsv.migration_lock IS NULL OR tsv.lock_expires_at IS NULL OR tsv.lock_expires_at < ?)", now)
 	if HasTenantSchemaNextRetryColumn() {
 		q = q.Where("(tsv.next_retry_at IS NULL OR tsv.next_retry_at <= ?)", now)

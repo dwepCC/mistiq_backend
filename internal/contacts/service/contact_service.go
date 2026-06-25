@@ -83,6 +83,10 @@ type ContactInput struct {
 	ContactPerson  string
 	Notes          string
 	ContactPersons []ContactPersonInput
+	EsAgenteDeRetencion             *bool
+	EsAgenteDePercepcion            *bool
+	EsAgenteDePercepcionCombustible *bool
+	EsBuenContribuyente             *bool
 }
 
 func validateContactPersons(persons []ContactPersonInput) error {
@@ -134,19 +138,23 @@ func (s *ContactService) Create(input ContactInput) (*database.TenantContact, er
 
 	addr, ubi := database.NormalizeTenantContactAddressUbigeo(input.Address, input.Ubigeo)
 	contact := &database.TenantContact{
-		Type:          input.Type,
-		DocType:       input.DocType,
-		DocNumber:     input.DocNumber,
-		BusinessName:  input.BusinessName,
-		TradeName:     input.TradeName,
-		Address:       addr,
-		Ubigeo:        ubi,
-		Phone:         input.Phone,
-		Email:         input.Email,
-		PhotoURL:      strings.TrimSpace(input.PhotoURL),
-		ContactPerson: input.ContactPerson,
-		Notes:         input.Notes,
-		Active:        true,
+		Type:                            input.Type,
+		DocType:                         input.DocType,
+		DocNumber:                       input.DocNumber,
+		BusinessName:                    input.BusinessName,
+		TradeName:                       input.TradeName,
+		Address:                         addr,
+		Ubigeo:                          ubi,
+		Phone:                           input.Phone,
+		Email:                           input.Email,
+		PhotoURL:                        strings.TrimSpace(input.PhotoURL),
+		ContactPerson:                   input.ContactPerson,
+		Notes:                           input.Notes,
+		EsAgenteDeRetencion:             boolOrDefault(input.EsAgenteDeRetencion, false),
+		EsAgenteDePercepcion:            boolOrDefault(input.EsAgenteDePercepcion, false),
+		EsAgenteDePercepcionCombustible: boolOrDefault(input.EsAgenteDePercepcionCombustible, false),
+		EsBuenContribuyente:             boolOrDefault(input.EsBuenContribuyente, false),
+		Active:                          true,
 	}
 	if contact.Type == "" {
 		contact.Type = "customer"
@@ -169,21 +177,26 @@ func (s *ContactService) Update(id uint, input ContactInput) error {
 		return err
 	}
 	addr, ubi := database.NormalizeTenantContactAddressUbigeo(input.Address, input.Ubigeo)
+	updates := map[string]interface{}{
+		"type":                               input.Type,
+		"doc_type":                           input.DocType,
+		"doc_number":                         input.DocNumber,
+		"business_name":                      input.BusinessName,
+		"trade_name":                         input.TradeName,
+		"address":                            addr,
+		"ubigeo":                             ubi,
+		"phone":                              input.Phone,
+		"email":                              input.Email,
+		"photo_url":                          strings.TrimSpace(input.PhotoURL),
+		"contact_person":                     input.ContactPerson,
+		"notes":                              input.Notes,
+		"es_agente_de_retencion":             boolOrDefault(input.EsAgenteDeRetencion, false),
+		"es_agente_de_percepcion":            boolOrDefault(input.EsAgenteDePercepcion, false),
+		"es_agente_de_percepcion_combustible": boolOrDefault(input.EsAgenteDePercepcionCombustible, false),
+		"es_buen_contribuyente":              boolOrDefault(input.EsBuenContribuyente, false),
+	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&database.TenantContact{}).Where("id = ?", id).Updates(map[string]interface{}{
-			"type":           input.Type,
-			"doc_type":       input.DocType,
-			"doc_number":     input.DocNumber,
-			"business_name":  input.BusinessName,
-			"trade_name":     input.TradeName,
-			"address":        addr,
-			"ubigeo":         ubi,
-			"phone":          input.Phone,
-			"email":          input.Email,
-			"photo_url":      strings.TrimSpace(input.PhotoURL),
-			"contact_person": input.ContactPerson,
-			"notes":          input.Notes,
-		}).Error; err != nil {
+		if err := tx.Model(&database.TenantContact{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}
 		return s.replaceContactPersons(tx, id, input.ContactPersons)
@@ -272,4 +285,11 @@ func (s *ContactService) EnsureDefaultClient() (*database.TenantContact, error) 
 		return nil, err
 	}
 	return contact, nil
+}
+
+func boolOrDefault(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
 }

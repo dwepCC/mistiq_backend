@@ -264,6 +264,8 @@ func (h *TenantHandler) GetSunatConfigAPI(c fiber.Ctx) error {
 	pseTokenConfigured := false
 	solConfigured := false
 	certificateConfigured := false
+	greClientConfigured := false
+	greClientID := ""
 	sunatSolUser := ""
 	pseUser := ""
 	certificateFile := ""
@@ -292,6 +294,8 @@ func (h *TenantHandler) GetSunatConfigAPI(c fiber.Ctx) error {
 			pseTokenConfigured = st.PSETokenConfigured
 			solConfigured = st.SOLConfigured
 			certificateConfigured = st.CertificateConfigured
+			greClientConfigured = st.GreClientConfigured
+			greClientID = strings.TrimSpace(st.GreClientID)
 		}
 	}
 	return c.JSON(fiber.Map{
@@ -319,6 +323,8 @@ func (h *TenantHandler) GetSunatConfigAPI(c fiber.Ctx) error {
 		"certificate_file":       certificateFile,
 		"logo_file":              logoFile,
 		"logo_configured":        logoFile != "",
+		"gre_client_configured":  greClientConfigured,
+		"gre_client_id":          greClientID,
 	})
 }
 
@@ -351,6 +357,8 @@ func (h *TenantHandler) UpdateSunatConfigAPI(c fiber.Ctx) error {
 		PSEToken       string  `json:"pse_token"`
 		PSEUser        string  `json:"pse_user"`
 		PSEPassword    string  `json:"pse_password"`
+		GreClientID    string  `json:"gre_client_id"`
+		GreClientSecret string `json:"gre_client_secret"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
@@ -371,8 +379,12 @@ func (h *TenantHandler) UpdateSunatConfigAPI(c fiber.Ctx) error {
 		if provider == "" {
 			provider = "validapse"
 		}
-	} else if connType == "" {
+		if fiscal.ResolvePSEBaseURL(provider) == "" {
+			provider = "validapse"
+		}
+	} else {
 		connType = "bearer"
+		provider = "sunat"
 	}
 
 	cfg, err := svc.GetConfig()
@@ -411,17 +423,19 @@ func (h *TenantHandler) UpdateSunatConfigAPI(c fiber.Ctx) error {
 
 	if config.AppConfig.FacturadorBaseURL != "" && config.AppConfig.FacturadorToken != "" {
 		status, syncErr := svc.SyncFiscalToFacturador(companysvc.FiscalSyncInput{
-			SendMode:       sendMode,
-			Provider:       provider,
-			ConnectionType: connType,
-			SOLUser:        body.SunatSolUser,
-			SOLPass:        body.SunatSolPass,
-			CertificateB64: certB64,
-			PSEBaseURL:     pseBaseURL,
-			PSEUser:        body.PSEUser,
-			PSEPassword:    psePassword,
-			PSEToken:       pseToken,
-			Enabled:        body.SunatEnabled,
+			SendMode:        sendMode,
+			Provider:        provider,
+			ConnectionType:  connType,
+			SOLUser:         body.SunatSolUser,
+			SOLPass:         body.SunatSolPass,
+			CertificateB64:  certB64,
+			PSEBaseURL:      pseBaseURL,
+			PSEUser:         body.PSEUser,
+			PSEPassword:     psePassword,
+			PSEToken:        pseToken,
+			GreClientID:     body.GreClientID,
+			GreClientSecret: body.GreClientSecret,
+			Enabled:         body.SunatEnabled,
 		})
 		if syncErr != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": syncErr.Error()})

@@ -29,7 +29,7 @@ func TenantResolver() fiber.Handler {
 		c.Locals("tenant_subdomain_slug", subdomainSlug)
 		c.Locals("tenant_header_slug", strings.TrimSpace(headerSlug))
 
-		slug, blockReason := resolveTenantSlug(host, headerSlug, cookieSlug, c.Path(), config.AppConfig)
+		slug, blockReason := resolveTenantSlug(host, headerSlug, cookieSlug, c.Query("tenant_slug"), c.Path(), config.AppConfig)
 		if blockReason == "header_subdomain_mismatch" {
 			return tenantSecurityForbidden(c, blockReason)
 		}

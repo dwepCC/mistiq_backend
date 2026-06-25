@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"tukifac/pkg/tax"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -145,54 +147,79 @@ func (s *RestaurantService) OpenSession(in OpenSessionInput) (*database.TenantTa
 
 func (s *RestaurantService) OpenTableExtended(in OpenSessionInput) (*database.TenantTableSession, error) {
 	tableID := in.TableID
-	if tableID != nil {
-		var table database.TenantRestaurantTable
-		if err := s.db.First(&table, *tableID).Error; err != nil {
-			return nil, errors.New("mesa no encontrada")
-		}
-		if table.Status != "libre" {
-			return nil, fmt.Errorf("la mesa '%s' ya está ocupada", table.Name)
-		}
-	}
-
 	orderType := normalizeOrderType(in.OrderType, tableID)
 	now := time.Now()
-	sess := &database.TenantTableSession{
-		TableID:           tableID,
-		StaffID:           in.StaffID,
-		UserID:            in.UserID,
-		BranchID:          in.BranchID,
-		Guests:            in.Guests,
-		OpenedAt:          now,
-		Status:            "open",
-		OrderType:         orderType,
-		OrderStatus:       initialOrderStatus(orderType, in.SaveAsDraft),
-		ContactID:         in.ContactID,
-		CustomerName:      in.CustomerName,
-		CustomerPhone:     in.CustomerPhone,
-		DeliveryDriverID:  in.DeliveryDriverID,
-		DeliveryAddress:   in.DeliveryAddress,
-		DeliveryReference: in.DeliveryReference,
-		EstimatedMinutes:  in.EstimatedMinutes,
-		Notes:             in.Notes,
-	}
+	var result *database.TenantTableSession
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if tableID != nil {
+			var table database.TenantRestaurantTable
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&table, *tableID).Error; err != nil {
+				return errors.New("mesa no encontrada")
+			}
+			if table.BranchID != in.BranchID {
+				return errors.New("la mesa no pertenece a esta sucursal")
+			}
+
+			existing, err := s.findOpenSessionForTableLocked(tx, *tableID)
+			if err != nil {
+				return err
+			}
+			if existing != nil {
+				log.Printf("[restaurant] mesa id=%d ya tiene sesión open id=%d — reutilizando", *tableID, existing.ID)
+				if err := s.syncTableStatusFromOpenSession(tx, *tableID); err != nil {
+					return err
+				}
+				result = existing
+				return nil
+			}
+		}
+
+		sess := &database.TenantTableSession{
+			TableID:           tableID,
+			StaffID:           in.StaffID,
+			UserID:            in.UserID,
+			BranchID:          in.BranchID,
+			Guests:            in.Guests,
+			OpenedAt:          now,
+			Status:            sessionStatusOpen,
+			OrderType:         orderType,
+			OrderStatus:       initialOrderStatus(orderType, in.SaveAsDraft),
+			ContactID:         in.ContactID,
+			CustomerName:      in.CustomerName,
+			CustomerPhone:     in.CustomerPhone,
+			DeliveryDriverID:  in.DeliveryDriverID,
+			DeliveryAddress:   in.DeliveryAddress,
+			DeliveryReference: in.DeliveryReference,
+			EstimatedMinutes:  in.EstimatedMinutes,
+			Notes:             in.Notes,
+		}
 		code, err := s.generateOrderCode(tx, in.BranchID, now)
 		if err != nil {
 			return err
 		}
 		sess.OrderCode = code
 		if err := tx.Create(sess).Error; err != nil {
+			if tableID != nil && isDuplicateOpenSessionError(err) {
+				existing, err2 := s.findOpenSessionForTableLocked(tx, *tableID)
+				if err2 != nil {
+					return err2
+				}
+				if existing != nil {
+					log.Printf("[restaurant] carrera al abrir mesa id=%d — sesión existente id=%d", *tableID, existing.ID)
+					result = existing
+					return s.syncTableStatusFromOpenSession(tx, *tableID)
+				}
+			}
 			return err
 		}
+		result = sess
 		if tableID != nil {
-			tx.Model(&database.TenantRestaurantTable{}).Where("id = ?", *tableID).
-				Update("status", "ocupada")
+			return s.syncTableStatusFromOpenSession(tx, *tableID)
 		}
 		return nil
 	})
-	return sess, err
+	return result, err
 }
 
 func (s *RestaurantService) syncSessionOrderStatus(tx *gorm.DB, sessionID uint) error {

@@ -81,13 +81,13 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string
 
-	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. bendey.cloud).
+	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. tukifac.com).
 	// Alias env: ROOT_DOMAIN (tiene prioridad sobre APP_DOMAIN).
 	AppDomain string
 
-	// URL pública del API (CORS). Ej: https://api.bendey.cloud
+	// URL pública del API (CORS). Ej: https://api.tukifac.com
 	APIPublicURL string
-	// Host del API sin esquema (alternativa a API_PUBLIC_URL). Ej: api.bendey.cloud
+	// Host del API sin esquema (alternativa a API_PUBLIC_URL). Ej: api.tukifac.com
 	APIHost string
 
 	// Subdominios reservados (no son tenants): api, app, www, admin, central + extras en .env
@@ -219,7 +219,7 @@ func Load() error {
 		SMTPPort:     getEnvInt("SMTP_PORT", 587),
 		SMTPUser:     getEnv("SMTP_USER", ""),
 		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
-		SMTPFrom:     getEnv("SMTP_FROM", "noreply@bendey.cloud"),
+		SMTPFrom:     getEnv("SMTP_FROM", "noreply@tukifac.com"),
 
 		AppDomain:          resolveRootDomain(),
 		APIPublicURL:       strings.TrimSpace(getEnv("API_PUBLIC_URL", "")),

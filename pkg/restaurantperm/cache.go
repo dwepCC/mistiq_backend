@@ -13,6 +13,9 @@ import (
 
 const cacheTTL = 15 * time.Minute
 
+// PermissionSchemaVersion incrementar al cambiar plantillas EmployeeTypeToKeys / LegacyRoleToKeys.
+const PermissionSchemaVersion uint = 2
+
 type memEntry struct {
 	keys    []string
 	expires time.Time
@@ -29,7 +32,7 @@ func cacheKey(tenantSlug string, tenantID, userID, version uint) string {
 	if slug == "" {
 		slug = fmt.Sprintf("id%d", tenantID)
 	}
-	return fmt.Sprintf("%stenant:%s:rp:%d:%d:v%d", tenantcache.TenantKeyPrefix, slug, tenantID, userID, version)
+	return fmt.Sprintf("%stenant:%s:rp:%d:%d:v%d:ps%d", tenantcache.TenantKeyPrefix, slug, tenantID, userID, version, PermissionSchemaVersion)
 }
 
 func memKey(tenantSlug string, tenantID, userID, version uint) string {

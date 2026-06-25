@@ -89,3 +89,13 @@ func (h *ConsultaHandler) PublicConsultaRUCAPI(c fiber.Ctx) error {
 	}
 	return c.JSON(result)
 }
+
+// GET /api/consulta/tipo-cambio?fecha=YYYY-MM-DD — TC SUNAT (tenant autenticado).
+func (h *ConsultaHandler) TipoCambioAPI(c fiber.Ctx) error {
+	fecha := c.Query("fecha")
+	result, err := h.svc.ConsultaTipoCambio(fecha)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(result)
+}

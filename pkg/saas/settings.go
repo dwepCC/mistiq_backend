@@ -29,6 +29,7 @@ type PlatformSettings struct {
 	PortalURLOverride              string                `json:"portal_url_override"` // vacío = flujo interno /subscription
 	Support                        SupportConfig         `json:"support"`
 	OperationsKeyConfigured        bool                  `json:"operations_key_configured"`
+	UpdatedAt                      string                `json:"updated_at,omitempty"`
 }
 
 // SupportConfig contacto para tenants.
@@ -141,6 +142,9 @@ func LoadSettings() (PlatformSettings, error) {
 		Phone:    row.SupportPhone,
 	}
 	out.OperationsKeyConfigured = strings.TrimSpace(row.OperationsKeyHash) != ""
+	if !row.UpdatedAt.IsZero() {
+		out.UpdatedAt = row.UpdatedAt.UTC().Format(time.RFC3339)
+	}
 	return out, nil
 }
 

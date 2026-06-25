@@ -230,6 +230,9 @@ func (s *BillingService) SyncSaleWithSSOT(saleID uint) SSOTSyncOutcome {
 		if inv.PipelineStatus != before {
 			NotifyBillingStatusUpdated(s.centralTenantID, saleID, inv.PipelineStatus, inv.SunatMessage)
 		}
+		if st, _ := s.GetBillingStatus(saleID); st != nil {
+			s.PostFiscalAcceptSideEffects(saleID, st.Pipeline)
+		}
 	}
 
 	st, _ := s.GetBillingStatus(saleID)

@@ -188,8 +188,8 @@ func seedDocumentSeries(tx *gorm.DB, branchID uint) error {
 		{BranchID: branchID, DocType: "NOTA_CREDITO", SunatCode: "07", Category: "nota_credito", Series: "FC01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_CREDITO", SunatCode: "07", Category: "nota_credito", Series: "BC01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_DEBITO", SunatCode: "08", Category: "nota_debito", Series: "FD01", Correlative: 1, Active: true},
-		{BranchID: branchID, DocType: "NOTA_DEBITO", SunatCode: "08", Category: "nota_debito", Series: "BD01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "GUIA_REMISION", SunatCode: "09", Category: "guia_remision", Series: "T001", Correlative: 1, Active: true},
+		{BranchID: branchID, DocType: "GUIA_TRANSPORTISTA", SunatCode: "31", Category: "guia_transportista", Series: "V001", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "RETENCION", SunatCode: "20", Category: "retencion", Series: "R001", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "PERCEPCION", SunatCode: "40", Category: "percepcion", Series: "P001", Correlative: 1, Active: true},
 	}

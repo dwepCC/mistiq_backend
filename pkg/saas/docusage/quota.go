@@ -87,6 +87,14 @@ func CanEmitElectronicDocument(tenantID uint) error {
 	return ErrQuotaExceeded
 }
 
+// GuardCountableSunatQuota bloquea crear comprobantes que consumen cupo (01, 03, 07, …) sin documentos disponibles.
+func GuardCountableSunatQuota(tenantID uint, sunatCode string) error {
+	if tenantID == 0 || !IsCountableSunatCode(sunatCode) {
+		return nil
+	}
+	return CanEmitElectronicDocument(tenantID)
+}
+
 // ReserveElectronicDocument consume cupo de forma transaccional e idempotente.
 func ReserveElectronicDocument(in ReserveInput) error {
 	if in.TenantID == 0 || in.DocumentType == "" || in.DocumentID == 0 {

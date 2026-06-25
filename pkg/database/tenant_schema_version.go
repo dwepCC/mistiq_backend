@@ -9,6 +9,7 @@ const (
 	TenantSchemaStatusCompleted = "completed"
 	TenantSchemaStatusFailed    = "failed"
 	TenantSchemaStatusPaused    = "paused"
+	TenantSchemaStatusDrifted   = "drifted"
 )
 
 // TenantSchemaVersion registro central del esquema de cada tenant.

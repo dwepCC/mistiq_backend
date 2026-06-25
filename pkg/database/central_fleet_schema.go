@@ -18,7 +18,7 @@ func EnsureCentralFleetSchema() error {
 			ensureCentralFleetSchemaErr = errors.New("BD central no conectada")
 			return
 		}
-		if err := CentralDB.AutoMigrate(&TenantSchemaVersion{}, &FleetMigrationState{}); err != nil {
+		if err := CentralDB.AutoMigrate(&TenantSchemaVersion{}, &FleetMigrationState{}, &MigrationBatchJob{}); err != nil {
 			ensureCentralFleetSchemaErr = err
 			return
 		}

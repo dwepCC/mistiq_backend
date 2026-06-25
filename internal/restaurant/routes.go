@@ -58,14 +58,25 @@ func RegisterRoutes(api fiber.Router) {
 	r.Post("/table-orders/:id/printed", middleware.RequireRestaurantPerm(restaurantperm.TablesOpen), h.MarkTableOrderPrinted)
 	r.Post("/sessions/:id/bill", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.BillSession)
 	r.Post("/sessions/:id/close", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.CloseSession)
-	r.Post("/sessions/:id/cancel", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.CancelSession)
+	r.Post("/sessions/:id/cancel", middleware.RequireAnyRestaurantPerm(restaurantperm.OrdersCharge, restaurantperm.OrdersCancel, restaurantperm.SettingsManage), h.CancelSession)
+	r.Post("/sessions/:id/cancel-comandas", middleware.RequireAnyRestaurantPerm(restaurantperm.SettingsManage, restaurantperm.OrdersCancel), h.CancelAllComandas)
 
 	r.Patch("/comandas/:id/notes", middleware.RequireAnyRestaurantPerm(restaurantperm.TablesOpen, restaurantperm.OrdersCreate, restaurantperm.POSUse), h.UpdateComandaNotes)
 	r.Put("/comandas/:id/status", middleware.RequireRestaurantPerm(restaurantperm.KitchenUpdate), h.UpdateComandaStatus)
 	r.Post("/comandas/:id/print", middleware.RequireRestaurantPerm(restaurantperm.KitchenView), h.PrintComanda)
-	r.Delete("/comandas/:id", middleware.RequireRestaurantPerm(restaurantperm.SettingsManage), h.CancelComanda)
+	r.Delete("/comandas/:id", middleware.RequireAnyRestaurantPerm(restaurantperm.SettingsManage, restaurantperm.OrdersCancel), h.CancelComanda)
 
 	r.Get("/kitchen", middleware.RequireRestaurantPerm(restaurantperm.KitchenView), h.KitchenView)
+
+	r.Get("/dashboard",
+		middleware.RequireAnyRestaurantPerm(
+			restaurantperm.OrdersCharge,
+			restaurantperm.CashView,
+			restaurantperm.SettingsManage,
+			restaurantperm.TablesView,
+		),
+		h.Dashboard,
+	)
 }
 
 // RegisterSalePaymentRoutes registra los endpoints de pagos bajo /api/sales

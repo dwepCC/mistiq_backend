@@ -2,6 +2,8 @@ package routes
 
 import (
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"tukifac/config"
@@ -13,13 +15,18 @@ import (
 	"tukifac/internal/cashbank"
 	"tukifac/internal/company"
 	consultaHandler "tukifac/internal/consulta/handler"
+	catalogs "tukifac/internal/catalogs"
 	"tukifac/internal/contacts"
 	"tukifac/internal/dashboard"
+	"tukifac/internal/fleet"
 	"tukifac/internal/inventory"
 	"tukifac/internal/memberships"
 	"tukifac/internal/modules"
+	"tukifac/internal/paymentcatalog"
 	"tukifac/internal/products"
 	"tukifac/internal/purchases"
+	"tukifac/internal/quotations"
+	"tukifac/internal/receivables"
 	"tukifac/internal/restaurant"
 	"tukifac/internal/sales"
 	"tukifac/internal/tenantportal"
@@ -31,6 +38,7 @@ import (
 	"tukifac/pkg/domains"
 	"tukifac/pkg/health"
 	"tukifac/pkg/middleware"
+	"tukifac/pkg/storagepaths"
 	"tukifac/pkg/tenantstorage"
 
 	"github.com/gofiber/fiber/v3"
@@ -89,7 +97,19 @@ func Setup(app *fiber.App) {
 		if p == "" {
 			return c.Status(fiber.StatusNotFound).SendString("not found")
 		}
-		return c.SendFile("./storage/" + p)
+		path := storagepaths.FilePath(p)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "archivo no encontrado"})
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		// QR SaaS y assets editables: no cachear agresivamente (reemplazo mantiene misma ruta legacy).
+		if strings.HasPrefix(filepath.ToSlash(p), "saas/") {
+			c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+			c.Set("Pragma", "no-cache")
+		}
+		return c.SendFile(path)
 	})
 
 	// Middleware global de resolución de tenant por subdominio / header
@@ -187,6 +207,9 @@ func Setup(app *fiber.App) {
 	tenantAPI.Get("/ubigeo/provincias", ubigeoTenant.ProvinciasAPI)
 	tenantAPI.Get("/ubigeo/distritos", ubigeoTenant.DistritosAPI)
 
+	tenantAPI.Get("/consulta/tipo-cambio", consultaH.TipoCambioAPI)
+	catalogs.RegisterRoutes(tenantAPI)
+
 	tenantportal.RegisterRoutes(tenantAPI)
 	dashboard.RegisterRoutes(tenantAPI)
 	company.RegisterRoutes(tenantAPI)
@@ -195,10 +218,14 @@ func Setup(app *fiber.App) {
 	products.RegisterRoutes(tenantAPI)
 	inventory.RegisterRoutes(tenantAPI)
 	sales.RegisterRoutes(tenantAPI)
+	quotations.RegisterRoutes(tenantAPI)
 	memberships.RegisterRoutes(tenantAPI)
 	billing.RegisterRoutes(tenantAPI)
+	fleet.RegisterRoutes(tenantAPI)
 	purchases.RegisterRoutes(tenantAPI)
 	cashbank.RegisterRoutes(tenantAPI)
+	paymentcatalog.RegisterRoutes(tenantAPI)
+	receivables.RegisterRoutes(tenantAPI)
 	restaurant.RegisterRoutes(tenantAPI)
 	restaurant.RegisterSalePaymentRoutes(tenantAPI)
 	modules.RegisterRoutes(tenantAPI)

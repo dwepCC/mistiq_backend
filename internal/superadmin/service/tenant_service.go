@@ -9,6 +9,7 @@ import (
 	usersvc "tukifac/internal/users/service"
 	"tukifac/config"
 	"tukifac/pkg/database"
+	"tukifac/pkg/database/engine"
 	"tukifac/pkg/middleware"
 	"tukifac/pkg/saas"
 	"tukifac/pkg/tenantrubro"
@@ -105,16 +106,9 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 		Rubro: rubro,
 	}
 
-	// 2–4. BD + migrate + seed (transacción en BD tenant)
-	if err = database.ProvisionTenantDB(dbName, seedIn); err != nil {
+	// 2–4. BD vacía + migraciones versionadas + seed
+	if err = engine.ProvisionTenantDB(dbName, tenant.ID, slug, seedIn); err != nil {
 		return nil, err
-	}
-
-	if err = database.UpsertTenantSchemaVersion(
-		tenant.ID, database.TenantSchemaTargetVersion(), database.TenantSchemaTargetVersion(),
-		database.TenantSchemaStatusCompleted,
-	); err != nil {
-		return nil, fmt.Errorf("registro tenant_schema_versions: %w", err)
 	}
 
 	tenantDB, err := database.GetTenantDB(dbName)
@@ -337,7 +331,7 @@ func (s *TenantService) RunMigrations(tenantID uint) error {
 	if err != nil {
 		return err
 	}
-	if err := database.MigrateTenantSchema(tenant.DBName); err != nil {
+	if err := engine.MigrateTenantIncremental(tenant.ID, tenant.Slug, tenant.DBName); err != nil {
 		return fmt.Errorf("migrando esquema: %w", err)
 	}
 	tenantDB, err := database.GetTenantDB(tenant.DBName)
@@ -363,7 +357,8 @@ func (s *TenantService) RunMigrations(tenantID uint) error {
 
 // RunMigrationsAll ejecuta migraciones para todos los tenants activos (no detiene en el primero fallido).
 func (s *TenantService) RunMigrationsAll() (database.MigrateSummary, error) {
-	summary := database.MigrateTenantsBatch(true, nil)
+	esummary := engine.MigrateTenantsBatch(true, nil)
+	summary := database.MigrateSummary{Success: esummary.Success, Failed: esummary.Failed}
 	for _, f := range summary.Failed {
 		if f.Slug == "(list)" {
 			return summary, f.Err

@@ -31,7 +31,10 @@ func matchesStation(st *database.TenantRestaurantStaff, allowedTypes []string) b
 		if strings.EqualFold(et, a) {
 			return true
 		}
-		if a == "vendedor" && et == "cashier" {
+		if a == "vendedor" && (et == "cashier" || et == "cajero") {
+			return true
+		}
+		if a == "cashier" && (et == "cajero" || et == "vendedor") {
 			return true
 		}
 		if a == "mozo" && (et == "waiter" || et == "driver") {

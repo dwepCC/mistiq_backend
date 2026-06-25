@@ -7,6 +7,8 @@ import (
 	"tukifac/config"
 	"tukifac/pkg/database"
 	"tukifac/pkg/saas"
+	"tukifac/pkg/tenantctx"
+	"tukifac/pkg/tenantstorage"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/golang-jwt/jwt/v5"
@@ -122,6 +124,13 @@ func TenantAuthAPI() fiber.Handler {
 		if err := validateTenantJWTClaims(claims); err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": err.Error(),
+				"code":  "TOKEN_TENANT_INVALID",
+			})
+		}
+
+		if err := bindTenantFromJWTClaimsIfMissing(c, claims); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Empresa del token no encontrada",
 				"code":  "TOKEN_TENANT_INVALID",
 			})
 		}
@@ -276,6 +285,35 @@ func RequireRestaurantAdminOrTenantAdmin() fiber.Handler {
 			"error": "Se requiere permiso de administración del restaurante",
 		})
 	}
+}
+
+// bindTenantFromJWTClaimsIfMissing resuelve tenant cuando EventSource/SSE u otros clientes
+// no envían subdominio ni X-Tenant-Slug (p. ej. localhost en dev). El JWT ya fue validado;
+// ValidateTenantBinding verifica coherencia slug/db/id.
+func bindTenantFromJWTClaimsIfMissing(c fiber.Ctx, claims *TenantClaims) error {
+	if _, ok := tenantctx.Tenant(c); ok {
+		return nil
+	}
+	if claims == nil {
+		return fmt.Errorf("claims requeridos")
+	}
+	slug := strings.TrimSpace(claims.TenantSlug)
+	if slug == "" {
+		return nil
+	}
+	tenant, err := LookupTenantBySlug(slug)
+	if err != nil {
+		return err
+	}
+	tenantDB, err := database.GetTenantDB(tenant.DBName)
+	if err != nil {
+		return err
+	}
+	tenantctx.Bind(c, tenant, tenantDB)
+	if ruc := tenantstorage.SanitizeRUC(tenant.RUC); ruc != "" {
+		c.Locals("tenant_ruc", ruc)
+	}
+	return nil
 }
 
 // RequireRole verifica que el usuario tenga uno de los roles especificados

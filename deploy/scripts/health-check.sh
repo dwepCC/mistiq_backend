@@ -2,9 +2,9 @@
 # Verifica liveness y readiness del backend.
 set -euo pipefail
 
-BASE_DIR="${MISTIQ_BASE:-/opt/mistiq}"
+BASE_DIR="${TUKIFAC_BASE:-/opt/tukifac}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
-CONTAINER="${MISTIQ_CONTAINER:-mistiq-backend-go}"
+CONTAINER="${TUKIFAC_CONTAINER:-tukifac-backend-go}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3000/health}"
 MAX_WAIT="${MAX_WAIT:-90}"
 INTERVAL="${INTERVAL:-3}"

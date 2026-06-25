@@ -147,6 +147,9 @@ func BuildStatusView(inv *database.TenantInvoice, sale *database.TenantSale) Sta
 	v.Status = p
 	v.SunatCode = strings.TrimSpace(inv.SunatCDRCode)
 	v.SunatMessage = inv.SunatMessage
+	if v.SunatMessage == "" && strings.TrimSpace(inv.JobLastError) != "" {
+		v.SunatMessage = strings.TrimSpace(inv.JobLastError)
+	}
 	v.CDRReceived = strings.TrimSpace(inv.CDRURL) != "" && inv.CDRURL != "(CDR recibido)"
 	v.XMLSigned = strings.TrimSpace(inv.XMLURL) != "" || strings.TrimSpace(inv.SunatHash) != ""
 	v.RetryCount = inv.RetryCount

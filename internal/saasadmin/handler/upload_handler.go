@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"tukifac/pkg/saas"
+	"tukifac/pkg/storagepaths"
 	"tukifac/pkg/uploadlimits"
 
 	"github.com/gofiber/fiber/v3"
@@ -31,12 +33,21 @@ func (h *SettingsHandler) UploadQR(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "archivo máximo 10 MB"})
 	}
 
-	dir := filepath.Join("storage", "saas")
-	_ = os.MkdirAll(dir, 0755)
-	filename := fmt.Sprintf("qr_%s%s", kind, ext)
+	dir := storagepaths.SaasDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("no se pudo crear carpeta %s: %v", dir, err),
+		})
+	}
+	removeSaasQrFiles(dir, kind)
+
+	// Nombre único por subida: evita caché del navegador/CDN al recargar (misma ruta = imagen vieja).
+	filename := fmt.Sprintf("qr_%s_%d%s", kind, time.Now().Unix(), ext)
 	savePath := filepath.Join(dir, filename)
 	if err := c.SaveFile(file, savePath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "error guardando QR"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("error guardando QR en %s: %v", savePath, err),
+		})
 	}
 
 	publicURL := "/storage/saas/" + filename
@@ -57,4 +68,22 @@ func (h *SettingsHandler) UploadQR(c fiber.Ctx) error {
 		"kind":    kind,
 		"url":     publicURL,
 	})
+}
+
+// removeSaasQrFiles elimina QR anteriores del mismo tipo (yape/plin) en storage/saas.
+func removeSaasQrFiles(dir, kind string) {
+	prefix := "qr_" + kind
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, prefix) {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }

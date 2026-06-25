@@ -102,13 +102,31 @@ func ValidateBranchIDsExist(db *gorm.DB, branchIDs []uint) error {
 	return nil
 }
 
+// ResolveDisplayBranchIDs sucursales para UI: asignaciones N:N o home_branch_id legacy.
+func ResolveDisplayBranchIDs(db *gorm.DB, userID uint, homeBranchID, legacyBranchID *uint) ([]uint, error) {
+	ids, err := GetUserAssignedBranchIDs(db, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) > 0 {
+		return ids, nil
+	}
+	if homeBranchID != nil && *homeBranchID > 0 {
+		return []uint{*homeBranchID}, nil
+	}
+	if legacyBranchID != nil && *legacyBranchID > 0 {
+		return []uint{*legacyBranchID}, nil
+	}
+	return nil, nil
+}
+
 // SetUserAssignedBranches reemplaza asignaciones y actualiza home / can_switch.
 func SetUserAssignedBranches(db *gorm.DB, userID uint, branchIDs []uint, bumpSession bool) error {
 	if userID == 0 {
 		return errors.New("usuario inválido")
 	}
 	if !UserBranchesReady(db) {
-		return errors.New("migración de sucursales por usuario pendiente")
+		return errors.New("esquema de sucursales por usuario no disponible; ejecute migrate-fleet")
 	}
 	if err := ValidateBranchIDsExist(db, branchIDs); err != nil {
 		return err

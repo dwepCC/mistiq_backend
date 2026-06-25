@@ -21,6 +21,9 @@ const (
 	BulkImportBatchSize   = 50
 )
 
+// ErrInitialStockWithoutManageStock conflicto control_stock=no con stock_inicial>0 (alias legible).
+const ErrInitialStockWithoutManageStock = InitialStockRequiresManageStock
+
 // BulkImportItem fila normalizada para importación masiva.
 type BulkImportItem struct {
 	RowNumber          int     `json:"row_number"`
@@ -47,6 +50,7 @@ type BulkImportFail struct {
 
 type BulkImportResult struct {
 	Created         int              `json:"created"`
+	Updated         int              `json:"updated"`
 	StockRegistered int              `json:"stock_registered"`
 	Failed          []BulkImportFail `json:"failed"`
 }
@@ -89,35 +93,26 @@ func (s *ProductService) bulkImport(items []BulkImportItem, opts bulkImportRunOp
 		return nil, fmt.Errorf("máximo %d filas por solicitud", BulkImportMaxItems)
 	}
 	needsBranch := false
+	needsBranchForRestaurant := false
 	for _, item := range items {
 		if item.InitialStock > 0 {
 			needsBranch = true
-			break
+		}
+		if item.IsRestaurant || opts.ForceRestaurant {
+			needsBranchForRestaurant = true
 		}
 	}
 	if needsBranch && opts.BranchID == 0 {
 		return nil, errors.New("sucursal activa requerida cuando hay stock_inicial")
 	}
+	if needsBranchForRestaurant && opts.BranchID == 0 {
+		return nil, errors.New("sucursal activa requerida para productos de restaurante (asignación a carta Tukichef)")
+	}
 
 	taxCfg := tax.LoadFromDB(s.db)
 	result := &BulkImportResult{Failed: make([]BulkImportFail, 0)}
 	catCache := make(map[string]uint)
-	codesInDB := make(map[string]struct{})
-	codesInFile := make(map[string]int)
-
-	for _, item := range items {
-		code := strings.TrimSpace(item.Code)
-		if code != "" {
-			if prev, ok := codesInFile[code]; ok {
-				result.Failed = append(result.Failed, BulkImportFail{
-					Row: item.RowNumber, Name: item.Name,
-					Error: fmt.Sprintf("código duplicado en fila %d", prev),
-				})
-				continue
-			}
-			codesInFile[code] = item.RowNumber
-		}
-	}
+	codesProcessedInBatch := make(map[string]struct{})
 
 	for i := 0; i < len(items); i++ {
 		if BulkImportBatchPause > 0 && i > 0 && i%BulkImportBatchSize == 0 {
@@ -138,21 +133,42 @@ func (s *ProductService) bulkImport(items []BulkImportItem, opts bulkImportRunOp
 		}
 
 		code := strings.TrimSpace(item.Code)
-		if code == "" {
-			code = generateImportEAN13(codesInDB, codesInFile)
+		autoCode := code == ""
+		if autoCode {
+			code = generateImportEAN13(codesProcessedInBatch, nil)
 		}
-		if _, dup := codesInDB[code]; dup {
+
+		var existing database.TenantProduct
+		hasExisting := false
+		if !autoCode {
+			var found *database.TenantProduct
+			var err error
+			if (item.IsRestaurant || opts.ForceRestaurant) && opts.BranchID > 0 {
+				found, err = s.GetByCodeInBranch(code, opts.BranchID)
+			} else {
+				found, err = s.GetByCode(code)
+			}
+			if err != nil {
+				result.Failed = append(result.Failed, BulkImportFail{
+					Row: item.RowNumber, Name: item.Name, Error: err.Error(),
+				})
+				continue
+			}
+			if found != nil {
+				existing = *found
+				hasExisting = true
+			}
+		}
+
+		if !item.ManageStock && item.InitialStock > 0 {
 			result.Failed = append(result.Failed, BulkImportFail{
-				Row: item.RowNumber, Name: item.Name,
-				Error: fmt.Sprintf("el código %q ya existe", code),
+				Row:   item.RowNumber,
+				Name:  item.Name,
+				Error: InitialStockRequiresManageStock,
 			})
 			continue
 		}
-
 		manageStock := item.ManageStock
-		if item.InitialStock > 0 {
-			manageStock = true
-		}
 		isRestaurant := item.IsRestaurant
 		if opts.ForceRestaurant {
 			isRestaurant = true
@@ -168,8 +184,9 @@ func (s *ProductService) bulkImport(items []BulkImportItem, opts bulkImportRunOp
 		}
 
 		var catID *uint
-		if cn := strings.TrimSpace(item.CategoryName); cn != "" {
-			id, err := s.resolveCategoryIDByName(cn, catCache)
+		categoryProvided := strings.TrimSpace(item.CategoryName) != ""
+		if categoryProvided {
+			id, err := s.resolveCategoryIDByName(item.CategoryName, catCache)
 			if err != nil {
 				result.Failed = append(result.Failed, BulkImportFail{
 					Row: item.RowNumber, Name: item.Name, Error: err.Error(),
@@ -179,13 +196,22 @@ func (s *ProductService) bulkImport(items []BulkImportItem, opts bulkImportRunOp
 			if id > 0 {
 				catID = &id
 			}
+		} else if hasExisting {
+			catID = existing.CategoryID
 		}
 
 		catalogType := strings.TrimSpace(strings.ToLower(item.CatalogType))
 		if catalogType == "" {
-			catalogType = "product"
+			if hasExisting && strings.TrimSpace(existing.Type) != "" {
+				catalogType = strings.ToLower(strings.TrimSpace(existing.Type))
+			} else {
+				catalogType = "product"
+			}
 		}
 		unit := sunat.NormalizeUnit(item.Unit, catalogType)
+		if strings.TrimSpace(item.Unit) == "" && hasExisting && existing.Unit != "" {
+			unit = existing.Unit
+		}
 
 		input := ProductInput{
 			CategoryID:         catID,
@@ -199,27 +225,44 @@ func (s *ProductService) bulkImport(items []BulkImportItem, opts bulkImportRunOp
 			PriceIncludesIgv:   item.PriceIncludesIgv,
 			ManageStock:        manageStock,
 			IsRestaurant:       isRestaurant,
+			BranchID:           branchIDForImport(isRestaurant, opts.BranchID),
 			PreparationArea:    prepArea,
 			Active:             true,
 			TaxRate:            taxCfg.EffectiveRate(igvType),
 		}
+		if hasExisting {
+			input.PurchasePrice = existing.PurchasePrice
+			input.ManageSeries = existing.ManageSeries
+			input.HasVariants = existing.HasVariants
+			input.HasModifiers = existing.HasModifiers
+			input.MinStock = existing.MinStock
+			input.ImageURL = existing.ImageURL
+		}
 
-		var createdID uint
+		var productID uint
+		isNewProduct := !hasExisting
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			ps := NewProductService(tx)
-			p, err := ps.Create(input)
-			if err != nil {
-				return err
-			}
-			createdID = p.ID
 			inv := invsvc.NewInventoryService(tx)
-			if item.InitialStock > 0 && p.ManageStock && opts.BranchID > 0 {
+			if hasExisting {
+				if err := ps.Update(existing.ID, input); err != nil {
+					return err
+				}
+				productID = existing.ID
+			} else {
+				p, err := ps.Create(input)
+				if err != nil {
+					return err
+				}
+				productID = p.ID
+			}
+			if item.InitialStock > 0 && manageStock && opts.BranchID > 0 && isNewProduct {
 				return inv.RecordInitialStock(
-					p.ID, opts.BranchID, item.InitialStock, opts.UserID, opts.StockNotes,
+					productID, opts.BranchID, item.InitialStock, opts.UserID, opts.StockNotes,
 				)
 			}
-			if opts.ForceRestaurant && opts.BranchID > 0 {
-				return inv.EnsureProductBranchLink(p.ID, opts.BranchID)
+			if isRestaurant && opts.BranchID > 0 {
+				return inv.EnsureProductBranchLink(productID, opts.BranchID)
 			}
 			return nil
 		})
@@ -230,15 +273,26 @@ func (s *ProductService) bulkImport(items []BulkImportItem, opts bulkImportRunOp
 			continue
 		}
 
-		codesInDB[code] = struct{}{}
-		result.Created++
-		if item.InitialStock > 0 && manageStock {
+		codesProcessedInBatch[code] = struct{}{}
+		if hasExisting {
+			result.Updated++
+		} else {
+			result.Created++
+		}
+		if isNewProduct && item.InitialStock > 0 && manageStock {
 			result.StockRegistered++
 		}
-		_ = createdID
+		_ = productID
 	}
 
 	return result, nil
+}
+
+func branchIDForImport(isRestaurant bool, branchID uint) uint {
+	if isRestaurant && branchID > 0 {
+		return branchID
+	}
+	return 0
 }
 
 func (s *ProductService) resolveCategoryIDByName(name string, cache map[string]uint) (uint, error) {
@@ -266,7 +320,7 @@ func (s *ProductService) resolveCategoryIDByName(name string, cache map[string]u
 	return created.ID, nil
 }
 
-func generateImportEAN13(usedDB map[string]struct{}, usedFile map[string]int) string {
+func generateImportEAN13(usedCodes map[string]struct{}, _ map[string]int) string {
 	for attempt := 0; attempt < 32; attempt++ {
 		raw := fmt.Sprintf("%d%d", time.Now().UnixNano(), rand.Intn(1_000_000))
 		base12 := raw
@@ -287,10 +341,7 @@ func generateImportEAN13(usedDB map[string]struct{}, usedFile map[string]int) st
 		}
 		check := (10 - (sum % 10)) % 10
 		code := base12 + fmt.Sprintf("%d", check)
-		if _, inFile := usedFile[code]; inFile {
-			continue
-		}
-		if _, inDB := usedDB[code]; inDB {
+		if _, used := usedCodes[code]; used {
 			continue
 		}
 		return code

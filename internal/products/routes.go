@@ -15,6 +15,12 @@ func RegisterRoutes(api fiber.Router) {
 		middleware.RequireProductsViewOrRestaurantCatalog(),
 		h.SearchAPI,
 	)
+	api.Get("/products/lookup-by-code",
+		middleware.RequireModule("products"),
+		middleware.LoadRestaurantPermissions(),
+		middleware.RequireProductsViewOrRestaurantCatalog(),
+		h.LookupByCodeAPI,
+	)
 	api.Get("/products/:id/serials",
 		middleware.RequireModule("products"),
 		middleware.LoadRestaurantPermissions(),
@@ -30,6 +36,12 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/products", middleware.RequireModule("products"), middleware.RequirePermission("products.create"), h.CreateAPI)
 	api.Post("/products/bulk-import/restaurant", middleware.RequireModule("products"), middleware.RequirePermission("products.create"), h.BulkImportRestaurantAPI)
 	api.Post("/products/bulk-import/catalog", middleware.RequireModule("products"), middleware.RequirePermission("products.create"), h.BulkImportCatalogAPI)
+	api.Post("/products/bulk-delete/restaurant",
+		middleware.RequireModule("products"),
+		middleware.LoadRestaurantPermissions(),
+		middleware.RequirePermission("products.delete"),
+		h.BulkDeleteRestaurantAPI,
+	)
 	api.Put("/products/:id", middleware.RequireModule("products"), middleware.RequirePermission("products.edit"), h.UpdateAPI)
 	api.Patch("/products/:id/toggle", middleware.RequireModule("products"), middleware.RequirePermission("products.edit"), h.ToggleAPI)
 	api.Delete("/products/:id", middleware.RequireModule("products"), middleware.RequirePermission("products.delete"), h.DeleteAPI)

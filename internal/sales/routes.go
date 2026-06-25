@@ -19,4 +19,5 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/sales/:id/issue-electronic", mod, middleware.RequireModule("billing"), loadRest, h.IssueElectronicFromNotaAPI)
 	api.Post("/sales/:id/cancel", mod, loadRest, h.CancelAPI)
 	api.Get("/sales/:id", mod, loadRest, middleware.RequireSalesAccess("view"), h.GetAPI)
+	api.Post("/sales/:id/email-receipt", mod, loadRest, middleware.RequireSalesAccess("view"), h.EmailReceiptAPI)
 }

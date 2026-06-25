@@ -20,9 +20,11 @@ func enrichFiscalPayloadJSON(payloadJSON, tipoDoc, documentKind string) string {
 	if documentKind != "" {
 		m["_meta"] = map[string]string{"document_kind": documentKind}
 	}
+	// NC/ND en cola antigua: relDocs sin tipDocAfectado → XML SUNAT con DocumentTypeCode vacío.
 	if documentKind == "note" {
-		normalizeNoteRelDocs(m)
-		stripNoteFormaPago(m)
+		ensureNoteAffectedDocFields(m)
+		delete(m, "formaPago") // SUNAT 3246: PaymentMeansID "Contado" no aplica en notas.
+		stripNoteBillingDuplicateRelDocs(m)
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -31,40 +33,62 @@ func enrichFiscalPayloadJSON(payloadJSON, tipoDoc, documentKind string) string {
 	return string(b)
 }
 
-// normalizeNoteRelDocs copia relDocs[0] a tipDocAfectado/numDocfectado (Greenter los usa en BillingReference XML).
-func normalizeNoteRelDocs(m map[string]interface{}) {
-	tip, _ := m["tipDocAfectado"].(string)
-	num, _ := m["numDocfectado"].(string)
-	if strings.TrimSpace(tip) != "" && strings.TrimSpace(num) != "" {
+func ensureNoteAffectedDocFields(m map[string]interface{}) {
+	if m == nil {
 		return
 	}
-	relDocs, ok := m["relDocs"].([]interface{})
-	if !ok || len(relDocs) == 0 {
+	if s, _ := m["tipDocAfectado"].(string); strings.TrimSpace(s) != "" {
 		return
 	}
-	first, ok := relDocs[0].(map[string]interface{})
+	rel, ok := m["relDocs"].([]interface{})
+	if !ok || len(rel) == 0 {
+		return
+	}
+	first, ok := rel[0].(map[string]interface{})
 	if !ok {
 		return
 	}
-	if strings.TrimSpace(tip) == "" {
-		if v, ok := first["tipoDoc"].(string); ok && strings.TrimSpace(v) != "" {
-			m["tipDocAfectado"] = strings.TrimSpace(v)
-		}
+	if td, ok := first["tipoDoc"].(string); ok && strings.TrimSpace(td) != "" {
+		m["tipDocAfectado"] = strings.TrimSpace(td)
 	}
-	if strings.TrimSpace(num) == "" {
-		if v, ok := first["nroDoc"].(string); ok && strings.TrimSpace(v) != "" {
-			m["numDocfectado"] = strings.TrimSpace(v)
-		}
-	}
-	tip, _ = m["tipDocAfectado"].(string)
-	num, _ = m["numDocfectado"].(string)
-	if strings.TrimSpace(tip) != "" && strings.TrimSpace(num) != "" {
-		delete(m, "relDocs")
+	if nd, ok := first["nroDoc"].(string); ok && strings.TrimSpace(nd) != "" {
+		m["numDocfectado"] = strings.TrimSpace(nd)
 	}
 }
 
-// stripNoteFormaPago elimina formaPago/cuotas: la guía SUNAT de NC/ND UBL 2.1 no admite PaymentMeansID "Contado".
-func stripNoteFormaPago(m map[string]interface{}) {
-	delete(m, "formaPago")
-	delete(m, "cuotas")
+// stripNoteBillingDuplicateRelDocs quita relDocs que repiten el comprobante en BillingReference (obs. SUNAT 4009).
+func stripNoteBillingDuplicateRelDocs(m map[string]interface{}) {
+	if m == nil {
+		return
+	}
+	tip, _ := m["tipDocAfectado"].(string)
+	num, _ := m["numDocfectado"].(string)
+	tip = strings.TrimSpace(tip)
+	num = strings.TrimSpace(num)
+	if tip == "" || num == "" {
+		return
+	}
+	rel, ok := m["relDocs"].([]interface{})
+	if !ok || len(rel) == 0 {
+		return
+	}
+	var kept []interface{}
+	for _, item := range rel {
+		doc, ok := item.(map[string]interface{})
+		if !ok {
+			kept = append(kept, item)
+			continue
+		}
+		td, _ := doc["tipoDoc"].(string)
+		nd, _ := doc["nroDoc"].(string)
+		if strings.TrimSpace(td) == tip && strings.TrimSpace(nd) == num {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == 0 {
+		delete(m, "relDocs")
+		return
+	}
+	m["relDocs"] = kept
 }

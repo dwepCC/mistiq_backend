@@ -13,3 +13,19 @@ func SetSUNATLegend1000(legends *[]InvoiceLegend, mtoImpVenta float64, tipoMoned
 		Value: numeroletras.MontoEnLetras(mtoImpVenta, tipoMoneda),
 	}}
 }
+
+// AppendSUNATLegend2006 agrega leyenda obligatoria para operaciones sujetas a detracción (cat. 52).
+func AppendSUNATLegend2006(legends *[]InvoiceLegend) {
+	if legends == nil {
+		return
+	}
+	for _, l := range *legends {
+		if l.Code == "2006" {
+			return
+		}
+	}
+	*legends = append(*legends, InvoiceLegend{
+		Code:  "2006",
+		Value: "Operación sujeta a detracción",
+	})
+}

@@ -58,7 +58,7 @@ func ValidateTenantBinding() fiber.Handler {
 			}
 		}
 
-		// Host resuelto debe coincidir con slug JWT (app móvil en empresa1.bendey.cloud).
+		// Host resuelto debe coincidir con slug JWT (app móvil en empresa1.tukifac.com).
 		if sub, _ := c.Locals("tenant_subdomain_slug").(string); sub != "" && sub != claims.TenantSlug {
 			return tenantSecurityForbidden(c, "host_jwt_slug_mismatch")
 		}

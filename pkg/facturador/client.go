@@ -235,6 +235,25 @@ type InvoicePayload struct {
 	Details         []InvoiceDetail    `json:"details"`
 	Observacion     string             `json:"observacion,omitempty"` // Leyenda en letras sin languageLocaleID (ver SetSUNATLegendViaObservacion)
 	Legends         []InvoiceLegend    `json:"legends,omitempty"`
+	Compra          string             `json:"compra,omitempty"` // Orden de compra (O/C)
+	Guias           []InvoiceRelatedDoc `json:"guias,omitempty"` // Guías relacionadas (tipoDoc + nroDoc)
+	Detraccion      *InvoiceDetraction  `json:"detraccion,omitempty"`
+	Parameters      *InvoicePDFParameters `json:"parameters,omitempty"` // Solo PDF Lycet; no afecta XML SUNAT.
+}
+
+// InvoiceDetraction bloque detracción SUNAT (cat. 54, 59, cuenta BN).
+type InvoiceDetraction struct {
+	Percent           float64 `json:"percent"`
+	Mount             float64 `json:"mount"`
+	CtaBanco          string  `json:"ctaBanco"`
+	CodMedioPago      string  `json:"codMedioPago"`
+	CodBienDetraccion string  `json:"codBienDetraccion"`
+}
+
+// InvoiceRelatedDoc documento relacionado en factura/boleta (guías, etc.).
+type InvoiceRelatedDoc struct {
+	TipoDoc string `json:"tipoDoc"`
+	NroDoc  string `json:"nroDoc"`
 }
 
 // InvoiceFormaPago según doc: al menos "tipo" (ej. "Contado").
@@ -286,10 +305,11 @@ type InvoiceLegend struct {
 	Value string `json:"value"`
 }
 
-// NoteRelDoc documento afectado por la nota de crédito/débito (relDocs).
+// NoteRelDoc otros documentos relacionados (relDocs → AdditionalDocumentReference, catálogo SUNAT 12).
+// No usar para la factura/boleta anulada: esa va en tipDocAfectado + numDocfectado (BillingReference, cat. 01).
 type NoteRelDoc struct {
-	TipoDoc string `json:"tipoDoc"` // "01" Factura, "03" Boleta
-	NroDoc  string `json:"nroDoc"`  // Serie-número ej. "F001-1", "B001-25"
+	TipoDoc string `json:"tipoDoc"`
+	NroDoc  string `json:"nroDoc"`
 }
 
 // NotePayload es el body para POST /note/send (Lycet). Nota de crédito (07) o débito (08).
@@ -306,9 +326,10 @@ type NotePayload struct {
 	TipoMoneda      string             `json:"tipoMoneda"`
 	CodMotivo       string             `json:"codMotivo"`       // Catálogo SUNAT ej. "01" Anulación de la operación
 	DesMotivo       string             `json:"desMotivo"`       // Descripción del motivo
-	TipDocAfectado  string             `json:"tipDocAfectado,omitempty"` // "01" Factura, "03" Boleta (Greenter XML BillingReference)
-	NumDocfectado   string             `json:"numDocfectado,omitempty"`  // Serie-número doc. afectado (typo Greenter)
-	RelDocs         []NoteRelDoc       `json:"relDocs"`         // Documentos afectados (al menos uno)
+	// Greenter/Lycet: BillingReference/InvoiceDocumentReference (obligatorio en XML SUNAT).
+	TipDocAfectado string `json:"tipDocAfectado,omitempty"` // "01" factura, "03" boleta afectada
+	NumDocfectado  string `json:"numDocfectado,omitempty"`  // serie-número afectado (typo histórico Greenter)
+	RelDocs         []NoteRelDoc       `json:"relDocs,omitempty"` // solo otros docs (cat. 12); no duplicar el afectado
 	MtoOperGravadas float64            `json:"mtoOperGravadas"`
 	MtoOperExoneradas float64          `json:"mtoOperExoneradas,omitempty"`
 	MtoOperInafectas float64           `json:"mtoOperInafectas,omitempty"`
@@ -461,12 +482,33 @@ func (c *Client) SendInvoice(payload *InvoicePayload) (*SunatResponse, error) {
 	return &out, nil
 }
 
+// InvoicePDFExtra fila de información adicional en el PDF Lycet (parameters.user.extras).
+type InvoicePDFExtra struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// InvoicePDFUserParameters bloque user dentro de parameters (POST /invoice/pdf).
+type InvoicePDFUserParameters struct {
+	Extras []InvoicePDFExtra `json:"extras,omitempty"`
+}
+
+// InvoicePDFParameters parámetros de representación impresa; Lycet los ignora en /send y /xml.
+type InvoicePDFParameters struct {
+	User InvoicePDFUserParameters `json:"user"`
+}
+
+// InvoicePDFOptions parámetros opcionales adicionales para POST /invoice/pdf.
+type InvoicePDFOptions struct {
+	Extras []InvoicePDFExtra `json:"extras,omitempty"`
+}
+
 // GetInvoicePDF obtiene el PDF del comprobante sin enviar a SUNAT (POST /invoice/pdf).
 // Útil para guardar el PDF tras un send exitoso.
-func (c *Client) GetInvoicePDF(payload *InvoicePayload) ([]byte, error) {
-	bodyBytes, err := json.Marshal(payload)
+func (c *Client) GetInvoicePDF(payload *InvoicePayload, opts *InvoicePDFOptions) ([]byte, error) {
+	bodyBytes, err := marshalInvoicePDFBody(payload, opts)
 	if err != nil {
-		return nil, fmt.Errorf("payload: %w", err)
+		return nil, err
 	}
 	req, err := http.NewRequest("POST", c.addToken("/invoice/pdf"), bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -483,6 +525,58 @@ func (c *Client) GetInvoicePDF(payload *InvoicePayload) ([]byte, error) {
 		return nil, fmt.Errorf("facturador PDF respondió %d: %s", resp.StatusCode, string(b))
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func marshalInvoicePDFBody(payload *InvoicePayload, opts *InvoicePDFOptions) ([]byte, error) {
+	if payload == nil {
+		return nil, fmt.Errorf("payload: nil")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("payload: %w", err)
+	}
+	extras := collectInvoicePDFExtras(payload, opts)
+	if len(extras) == 0 {
+		return raw, nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, fmt.Errorf("payload map: %w", err)
+	}
+	body["parameters"] = map[string]any{
+		"user": map[string]any{
+			"extras": extras,
+		},
+	}
+	return json.Marshal(body)
+}
+
+func collectInvoicePDFExtras(payload *InvoicePayload, opts *InvoicePDFOptions) []map[string]string {
+	seen := make(map[string]struct{})
+	var out []map[string]string
+	appendExtra := func(name, value string) {
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, map[string]string{"name": name, "value": value})
+	}
+	if payload != nil && payload.Parameters != nil {
+		for _, e := range payload.Parameters.User.Extras {
+			appendExtra(e.Name, e.Value)
+		}
+	}
+	if opts != nil {
+		for _, e := range opts.Extras {
+			appendExtra(e.Name, e.Value)
+		}
+	}
+	return out
 }
 
 // GetInvoiceXML obtiene el XML firmado del comprobante sin enviarlo a SUNAT (POST /invoice/xml).
@@ -768,18 +862,41 @@ type DespatchTransportist struct {
 	ChoferDoc     string `json:"choferDoc"`
 }
 
-// DespatchShipment datos del traslado.
+// DespatchShipment datos del traslado (Greenter Shipment / GRE 2022).
 type DespatchShipment struct {
-	CodTraslado   string                 `json:"codTraslado"`
-	DesTraslado   string                 `json:"desTraslado"`
-	ModTraslado   string                 `json:"modTraslado"`
-	FecTraslado   string                 `json:"fecTraslado"`
-	Partida       DespatchDirection      `json:"partida"`
-	Llegada       DespatchDirection      `json:"llegada"`
-	PesoTotal     float64                `json:"pesoTotal"`
-	UndPesoTotal  string                 `json:"undPesoTotal"`
-	NumBultos     int                    `json:"numBultos"`
-	Transportista *DespatchTransportist  `json:"transportista,omitempty"`
+	CodTraslado             string                `json:"codTraslado"`
+	DesTraslado             string                `json:"desTraslado"`
+	ModTraslado             string                `json:"modTraslado"`
+	FecTraslado             string                `json:"fecTraslado"`
+	FecEntregaBienes        string                `json:"fecEntregaBienes,omitempty"`
+	FecEntregaTransportista string                `json:"fecEntregaTransportista,omitempty"`
+	Partida                 DespatchDirection     `json:"partida"`
+	Llegada                 DespatchDirection     `json:"llegada"`
+	PesoTotal               float64               `json:"pesoTotal"`
+	UndPesoTotal            string                `json:"undPesoTotal"`
+	NumBultos               int                   `json:"numBultos"`
+	Indicadores             []string              `json:"indicadores,omitempty"`
+	Transportista           *DespatchTransportist `json:"transportista,omitempty"`
+	Vehiculo                *DespatchVehicle      `json:"vehiculo,omitempty"`
+	Choferes                []DespatchDriver      `json:"choferes,omitempty"`
+}
+
+// DespatchVehicle vehículo principal GRE (Greenter Vehicle).
+type DespatchVehicle struct {
+	Placa           string `json:"placa"`
+	NroCirculacion  string `json:"nroCirculacion,omitempty"`
+	NroAutorizacion string `json:"nroAutorizacion,omitempty"`
+	CodEmisor       string `json:"codEmisor,omitempty"`
+}
+
+// DespatchDriver conductor GRE.
+type DespatchDriver struct {
+	Tipo      string `json:"tipo,omitempty"`
+	TipoDoc   string `json:"tipoDoc"`
+	NroDoc    string `json:"nroDoc"`
+	Nombres   string `json:"nombres,omitempty"`
+	Apellidos string `json:"apellidos,omitempty"`
+	Licencia  string `json:"licencia,omitempty"`
 }
 
 // DespatchDetail ítem de la guía.
@@ -791,18 +908,28 @@ type DespatchDetail struct {
 	CodProdSunat  string  `json:"codProdSunat,omitempty"`
 }
 
+// DespatchAdditionalDoc documento relacionado con la guía (catálogo 61).
+type DespatchAdditionalDoc struct {
+	Tipo     string `json:"tipo,omitempty"`
+	TipoDesc string `json:"tipoDesc,omitempty"`
+	Nro      string `json:"nro"`
+	Emisor   string `json:"emisor,omitempty"`
+}
+
 // DespatchPayload body para POST /despatch/send.
 type DespatchPayload struct {
-	Version      string            `json:"version"`
-	TipoDoc      string            `json:"tipoDoc"`
-	Serie        string            `json:"serie"`
-	Correlativo  string            `json:"correlativo"`
-	FechaEmision string            `json:"fechaEmision"`
-	Observacion  string            `json:"observacion,omitempty"`
-	Company      InvoiceCompany    `json:"company"`
-	Destinatario InvoiceClient    `json:"destinatario"`
-	Envio        DespatchShipment  `json:"envio"`
-	Details      []DespatchDetail  `json:"details"`
+	Version      string                  `json:"version"`
+	TipoDoc      string                  `json:"tipoDoc"`
+	Serie        string                  `json:"serie"`
+	Correlativo  string                  `json:"correlativo"`
+	FechaEmision string                  `json:"fechaEmision"`
+	Observacion  string                  `json:"observacion,omitempty"`
+	Company      InvoiceCompany          `json:"company"`
+	Destinatario InvoiceClient           `json:"destinatario"`
+	Tercero      *InvoiceClient          `json:"tercero,omitempty"`
+	Envio        DespatchShipment        `json:"envio"`
+	Details      []DespatchDetail        `json:"details"`
+	AddDocs      []DespatchAdditionalDoc `json:"addDocs,omitempty"`
 }
 
 // SendDespatch envía la guía de remisión (POST /despatch/send). Respuesta puede traer ticket o CDR directo (sin hash).
@@ -830,6 +957,42 @@ func (c *Client) SendDespatch(payload *DespatchPayload) (*SunatResponse, error) 
 		return &out, fmt.Errorf("facturador respondió %d: %s", resp.StatusCode, string(respBody))
 	}
 	return &out, nil
+}
+
+// GetDespatchPDF obtiene PDF de guía (POST /despatch/pdf).
+func (c *Client) GetDespatchPDF(payload *DespatchPayload) ([]byte, error) {
+	return c.postDespatchDocument("/despatch/pdf", payload)
+}
+
+// GetDespatchXML obtiene XML firmado de guía (POST /despatch/xml).
+func (c *Client) GetDespatchXML(payload *DespatchPayload) ([]byte, error) {
+	return c.postDespatchDocument("/despatch/xml", payload)
+}
+
+func (c *Client) postDespatchDocument(path string, payload *DespatchPayload) ([]byte, error) {
+	if payload == nil {
+		return nil, fmt.Errorf("payload: nil")
+	}
+	normalizeDespatchPayloadDates(payload)
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("payload: %w", err)
+	}
+	req, err := http.NewRequest("POST", c.addToken(path), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("facturador %s respondió %d: %s", path, resp.StatusCode, string(b))
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // GetDespatchStatus consulta estado del ticket de guía (GET /despatch/status).
@@ -1031,13 +1194,6 @@ func PEMToBase64(pemContent string) string {
 // PEM con clave privada + certificado(s), normalizado para multi-tenant.
 func PrepareGreenterCertificateBase64(pfxBase64, password, privateKeyBase64, certificateBase64 string) (string, error) {
 	if strings.TrimSpace(pfxBase64) != "" {
-		raw, err := DecodeCertificatePayloadBase64(pfxBase64)
-		if err != nil {
-			return "", fmt.Errorf("pfx_base64 inválido: %w", err)
-		}
-		if isLikelyCombinedPEM(raw) {
-			return encodeGreenterCombinedPEM(normalizePEMWithBagAttributes(raw))
-		}
 		return PfxToCombinedPEMBase64(pfxBase64, password)
 	}
 	if strings.TrimSpace(privateKeyBase64) != "" || strings.TrimSpace(certificateBase64) != "" {
@@ -1055,7 +1211,7 @@ func BuildCombinedPEMBase64(privateKeyBase64, certificateBase64 string) (string,
 		if b64 == "" {
 			continue
 		}
-		raw, err := DecodeCertificatePayloadBase64(b64)
+		raw, err := base64.StdEncoding.DecodeString(b64)
 		if err != nil {
 			return "", fmt.Errorf("PEM inválido (base64): %w", err)
 		}
@@ -1072,32 +1228,59 @@ func BuildCombinedPEMBase64(privateKeyBase64, certificateBase64 string) (string,
 
 // PfxToCombinedPEMBase64 convierte certificado .pfx/.p12 (base64) a PEM combinado para Lycet.
 func PfxToCombinedPEMBase64(pfxBase64, password string) (string, error) {
-	raw, err := DecodeCertificatePayloadBase64(pfxBase64)
+	raw, err := decodeBase64Flexible(pfxBase64)
 	if err != nil {
 		return "", err
 	}
-	if isLikelyCombinedPEM(raw) {
-		return encodeGreenterCombinedPEM(normalizePEMWithBagAttributes(raw))
+	if len(raw) == 0 {
+		return "", fmt.Errorf("archivo PFX vacío")
 	}
-	der, err := extractPKCS12DER(raw)
+	blocks, err := pfxToPEMBlocks(raw, password)
 	if err != nil {
 		return "", err
 	}
-
-	blocks, err := pfxDERToPEMBlocks(der, password)
-	if err != nil {
-		// PFX en BER, cifrados legacy (OpenSSL 3) o variantes SUNAT: intentar openssl en el servidor.
-		if opensslBlocks, oerr := pfxDERToPEMBlocksOpenSSL(der, password); oerr == nil {
-			blocks = opensslBlocks
-		} else {
-			msg := err.Error()
-			if strings.Contains(msg, "indefinite length") || strings.Contains(msg, "not DER") {
-				return "", fmt.Errorf("no se pudo abrir el PFX: formato ASN.1 no DER (común en exportaciones antiguas). Convierta con «openssl pkcs12 -in cert.p12 -out cert.pem -nodes -legacy» o use modo PEM en el panel: %w", err)
+	var keyParts []string
+	var certParts []string
+	for _, block := range blocks {
+		if block == nil {
+			continue
+		}
+		part := strings.TrimSpace(string(pem.EncodeToMemory(block)))
+		if part == "" {
+			continue
+		}
+		switch block.Type {
+		case "PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY":
+			if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err != nil {
+				if pkcs1, err2 := x509.ParsePKCS1PrivateKey(block.Bytes); err2 == nil {
+					block = &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(pkcs1)}
+				}
 			}
-			return "", fmt.Errorf("no se pudo abrir el PFX (revise la contraseña): %w", err)
+			part := strings.TrimSpace(string(pem.EncodeToMemory(block)))
+			if part != "" {
+				keyParts = append(keyParts, part)
+			}
+		case "ENCRYPTED PRIVATE KEY":
+			dec, err := x509.DecryptPEMBlock(block, []byte(password))
+			if err != nil {
+				return "", fmt.Errorf("no se pudo desencriptar la clave del PFX (revise la contraseña): %w", err)
+			}
+			keyParts = append(keyParts, strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{
+				Type:  "PRIVATE KEY",
+				Bytes: dec,
+			}))))
+		case "CERTIFICATE":
+			certParts = append(certParts, part)
 		}
 	}
-	return pkcs12BlocksToCombinedPEM(blocks, password)
+	if len(keyParts) == 0 {
+		return "", fmt.Errorf("el PFX no contiene clave privada")
+	}
+	if len(certParts) == 0 {
+		return "", fmt.Errorf("el PFX no contiene certificado")
+	}
+	combined := strings.Join(keyParts, "\n") + "\n" + strings.Join(certParts, "\n")
+	return encodeGreenterCombinedPEM([]byte(combined))
 }
 
 func encodeGreenterCombinedPEM(raw []byte) (string, error) {
@@ -1262,4 +1445,16 @@ func extractPEMBlock(content, blockType string) string {
 		return ""
 	}
 	return content[i : i+j+len(end)]
+}
+
+func normalizeDespatchPayloadDates(payload *DespatchPayload) {
+	if payload == nil {
+		return
+	}
+	ref := payload.FechaEmision
+	payload.FechaEmision = NormalizeFiscalDateTimeString(payload.FechaEmision, ref)
+	ref = payload.FechaEmision
+	payload.Envio.FecTraslado = NormalizeFiscalDateTimeString(payload.Envio.FecTraslado, ref)
+	payload.Envio.FecEntregaBienes = NormalizeFiscalDateTimeString(payload.Envio.FecEntregaBienes, ref)
+	payload.Envio.FecEntregaTransportista = NormalizeFiscalDateTimeString(payload.Envio.FecEntregaTransportista, ref)
 }

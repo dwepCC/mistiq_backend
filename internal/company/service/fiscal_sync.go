@@ -28,6 +28,8 @@ type FiscalSyncInput struct {
 	PSEPassword    string
 	PSEToken       string
 	PSESecondary   string
+	GreClientID    string
+	GreClientSecret string
 	Enabled        bool
 }
 
@@ -71,6 +73,9 @@ func (s *CompanyService) SyncFiscalToFacturador(input FiscalSyncInput) (*factura
 		}
 	}
 	provider = fiscal.NormalizePSEProvider(provider)
+	if sendMode != "pse" && provider == "validapse" && strings.TrimSpace(input.Provider) == "" && strings.TrimSpace(cfg.FiscalProvider) == "" {
+		provider = "sunat"
+	}
 	connType := strings.TrimSpace(input.ConnectionType)
 	if sendMode == "pse" {
 		connType = "bearer"
@@ -79,6 +84,12 @@ func (s *CompanyService) SyncFiscalToFacturador(input FiscalSyncInput) (*factura
 	}
 	if connType == "" {
 		connType = "bearer"
+	}
+	if sendMode == "sunat_direct" {
+		provider = "sunat"
+	}
+	if sendMode == "pse" && fiscal.ResolvePSEBaseURL(provider) == "" {
+		provider = "validapse"
 	}
 
 	pseBaseURL := strings.TrimSpace(input.PSEBaseURL)
@@ -92,9 +103,7 @@ func (s *CompanyService) SyncFiscalToFacturador(input FiscalSyncInput) (*factura
 	}
 	ambiente := fiscal.SunatEnvToFacturadorAmbiente(cfg.SunatEnvMode)
 	solUser := strings.TrimSpace(input.SOLUser)
-	if solUser == "" {
-		solUser = cfg.RUC + "MODDATOS"
-	}
+	solPass := strings.TrimSpace(input.SOLPass)
 
 	autoSend := cfg.AutomaticSend
 	emailOn := true
@@ -109,8 +118,6 @@ func (s *CompanyService) SyncFiscalToFacturador(input FiscalSyncInput) (*factura
 		Provider:       provider,
 		ConnectionType: connType,
 		Ambiente:       ambiente,
-		SOLUser:        solUser,
-		SOLPass:        strings.TrimSpace(input.SOLPass),
 		CertificateB64: strings.TrimSpace(input.CertificateB64),
 		CertPassword:   input.CertPassword,
 		LogoB64:        input.LogoB64,
@@ -123,6 +130,18 @@ func (s *CompanyService) SyncFiscalToFacturador(input FiscalSyncInput) (*factura
 		EmailEnabled:   &emailOn,
 		RetryEnabled:   &retryOn,
 		Enabled:        &enabled,
+	}
+	// Credenciales SOL: solo si el usuario las envió explícitamente en la petición.
+	// Sin fallback MODDATOS — Lycet conserva los valores persistidos en actualizaciones parciales.
+	if solUser != "" {
+		payload.SOLUser = solUser
+	}
+	if solPass != "" {
+		payload.SOLPass = solPass
+	}
+	if ambiente == "produccion" {
+		payload.GreClientID = strings.TrimSpace(input.GreClientID)
+		payload.GreClientSecret = strings.TrimSpace(input.GreClientSecret)
 	}
 
 	status, err := facturador.Shared().CompanySync(payload)

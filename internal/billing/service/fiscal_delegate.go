@@ -94,6 +94,10 @@ func (s *BillingService) persistInvoiceAfterEmit(saleID uint, documentUUID, payl
 		"sunat_status":    "pending",
 		"sent_at":         now,
 	}
+	var sale database.TenantSale
+	if s.db.Select("doc_type").First(&sale, saleID).Error == nil && isNoteSaleDocType(sale.DocType) {
+		updates["note_payload_json"] = payloadJSON
+	}
 	if err := s.db.Model(&database.TenantInvoice{}).Where("id = ?", invoice.ID).Updates(updates).Error; err != nil {
 		return nil, err
 	}
@@ -103,7 +107,6 @@ func (s *BillingService) persistInvoiceAfterEmit(saleID uint, documentUUID, payl
 	}
 
 	if !billingstate.HasFinalSunatOutcome(invoice) {
-		var sale database.TenantSale
 		if err := s.db.Select("billing_status").First(&sale, saleID).Error; err == nil {
 			switch sale.BillingStatus {
 			case "accepted", "rejected":

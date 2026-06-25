@@ -131,6 +131,8 @@ func auxiliaryDocStatusFromPipeline(pipeline string) string {
 		return "error"
 	case billingstate.PENDING_QUEUE, billingstate.PENDING_FISCAL:
 		return "pending"
+	case billingstate.SENDING_TO_SUNAT, billingstate.SENDING_TO_FACTURADOR, billingstate.FACTURADOR_RECEIVED, billingstate.PROCESSING, billingstate.RETRYING:
+		return "sent"
 	default:
 		if strings.Contains(strings.ToLower(pipeline), "reject") {
 			return "rejected"

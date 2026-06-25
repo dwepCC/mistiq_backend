@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"tukifac/internal/memberships/service"
+	"tukifac/pkg/database"
+	"tukifac/pkg/saas/docusage"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
@@ -188,11 +190,22 @@ func (h *MembershipHandler) GenerateSaleAPI(c fiber.Ctx) error {
 		body.PaymentMethod = "cash"
 	}
 	svc := service.NewMembershipService(db(c))
-	sale, inv, err := svc.GenerateSale(uint(id), userID(c), body)
+	var centralTenantID uint
+	if tenant, ok := c.Locals("tenant").(*database.Tenant); ok && tenant != nil {
+		centralTenantID = tenant.ID
+	}
+	sale, inv, err := svc.GenerateSale(uint(id), userID(c), centralTenantID, body)
 	if err != nil {
 		st := fiber.StatusBadRequest
 		if errors.Is(err, service.ErrBillingNotDue) {
 			st = fiber.StatusConflict
+		}
+		if errors.Is(err, docusage.ErrQuotaExceeded) {
+			st = fiber.StatusPaymentRequired
+			return c.Status(st).JSON(fiber.Map{
+				"error": err.Error(),
+				"code":  "DOCUMENT_QUOTA_EXCEEDED",
+			})
 		}
 		return c.Status(st).JSON(fiber.Map{"error": err.Error()})
 	}

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -492,9 +493,20 @@ type TenantCompanyConfig struct {
 	FiscalLastSyncAt       *time.Time `json:"fiscal_last_sync_at"`
 	SunatConnected         bool       `gorm:"default:false" json:"sunat_connected"`
 	AutomaticSend          bool       `gorm:"default:true" json:"automatic_send"`
-	ColorTheme             string     `gorm:"size:30;default:'blue'" json:"color_theme"`
+	ColorTheme             string     `gorm:"size:30;default:'green'" json:"color_theme"`
 	AdditionalNotes        string     `gorm:"type:text" json:"additional_notes"`
-	CreatedAt        time.Time `json:"created_at"`
+	// QR de pago Yape/Plin en comprobantes locales (PDF ticket / A4)
+	WalletProvider     string `gorm:"size:20" json:"wallet_provider"`       // yape | plin
+	WalletPhone        string `gorm:"size:30" json:"wallet_phone"`
+	WalletQrURL        string `gorm:"type:longtext" json:"wallet_qr_url"`
+	WalletShowOnA4     bool   `gorm:"default:false" json:"wallet_show_on_a4"`
+	WalletShowOnTicket bool   `gorm:"default:false" json:"wallet_show_on_ticket"`
+	// JSON array de IDs (tenant_bank_accounts). Vacío sin configurar = todas las activas; "[]" = ninguna.
+	ReceiptBankAccountIDs string `gorm:"type:text" json:"receipt_bank_account_ids"`
+	// Detracción SUNAT — cuenta Banco de la Nación del emisor y medio de pago default (cat. 59).
+	DetractionBNAccount           string `gorm:"size:30" json:"detraction_bn_account"`
+	DetractionDefaultPaymentMethod string `gorm:"size:10;default:'001'" json:"detraction_default_payment_method"`
+	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
@@ -524,9 +536,13 @@ type TenantContact struct {
 	Email         string         `gorm:"size:255" json:"email"`
 	PhotoURL      string         `gorm:"size:500" json:"photo_url"`
 	ContactPerson string         `gorm:"size:255" json:"contact_person"`
-	Notes           string         `gorm:"type:text" json:"notes"`
-	IsDefaultWalkIn bool           `gorm:"default:false;index" json:"is_default_walkin"`
-	Active          bool           `gorm:"default:true" json:"active"`
+	Notes                           string         `gorm:"type:text" json:"notes"`
+	EsAgenteDeRetencion             bool           `gorm:"default:false" json:"es_agente_de_retencion"`
+	EsAgenteDePercepcion            bool           `gorm:"default:false" json:"es_agente_de_percepcion"`
+	EsAgenteDePercepcionCombustible bool           `gorm:"default:false" json:"es_agente_de_percepcion_combustible"`
+	EsBuenContribuyente             bool           `gorm:"default:false" json:"es_buen_contribuyente"`
+	IsDefaultWalkIn                 bool           `gorm:"default:false;index" json:"is_default_walkin"`
+	Active                          bool           `gorm:"default:true" json:"active"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
 	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
@@ -575,6 +591,7 @@ type TenantProduct struct {
 	HasVariants        bool           `gorm:"default:false" json:"has_variants"`
 	HasModifiers       bool           `gorm:"default:false" json:"has_modifiers"`
 	IsRestaurant       bool           `gorm:"default:false" json:"is_restaurant"`
+	BranchID           uint           `gorm:"index" json:"branch_id"` // platos Tukichef: sucursal dueña del catálogo
 	PreparationArea    string         `gorm:"size:50" json:"preparation_area"` // solo restaurante: cocina, bar, barra, etc.
 	MinStock           float64        `gorm:"type:decimal(15,3);default:0" json:"min_stock"`
 	ImageURL           string         `gorm:"size:255" json:"image_url"`
@@ -706,16 +723,22 @@ type TenantSale struct {
 	Subtotal       float64        `gorm:"type:decimal(15,2);not null" json:"subtotal"`
 	TaxAmount      float64        `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
 	Total          float64        `gorm:"type:decimal(15,2);not null" json:"total"`
-	Currency       string         `gorm:"size:10;default:'PEN'" json:"currency"`
-	PaymentMethod  string         `gorm:"size:50" json:"payment_method"`
+	Currency            string   `gorm:"size:10;default:'PEN'" json:"currency"`
+	OperationTypeCode   string   `gorm:"size:10;default:'0101'" json:"operation_type_code"`
+	ExchangeRate        *float64 `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	PaymentMethod       string   `gorm:"size:50" json:"payment_method"`
 	Notes          string         `gorm:"type:text" json:"notes"`
 	Status         string         `gorm:"size:30;default:'paid'" json:"status"`            // draft, paid, cancelled, credit
 	BillingStatus  string         `gorm:"size:30;default:'pending'" json:"billing_status"` // pending, sent, accepted, rejected
 	RestaurantSessionID *uint     `gorm:"index" json:"restaurant_session_id,omitempty"` // pedido restaurante que originó la venta
 	OriginalSaleID *uint          `gorm:"index" json:"original_sale_id"`                   // Si es NOTA_CREDITO: venta que se anuló
 	// Si esta venta es factura/boleta (01/03) generada desde una nota de venta (00), apunta al ID de esa NV.
-	IssuedFromNotaSaleID *uint          `gorm:"index" json:"issued_from_nota_sale_id,omitempty"`
-	CreatedAt            time.Time      `json:"created_at"`
+	IssuedFromNotaSaleID *uint `gorm:"index" json:"issued_from_nota_sale_id,omitempty"`
+	// Origen comercial: direct | converted_from_nota | api | migration | legacy
+	SaleOrigin string `gorm:"size:30;default:direct;index" json:"sale_origin"`
+	// Venta generada desde una cotización (pre venta).
+	IssuedFromQuotationID *uint `gorm:"index" json:"issued_from_quotation_id,omitempty"`
+	CreatedAt             time.Time      `json:"created_at"`
 	UpdatedAt              time.Time      `json:"updated_at"`
 	DeletedAt              gorm.DeletedAt `gorm:"index" json:"-"`
 
@@ -723,8 +746,21 @@ type TenantSale struct {
 	ContactName string `gorm:"-" json:"contact_name"`
 	// ID de la venta electrónica (01/03) emitida desde esta NV; solo listados NV.
 	ElectronicIssueSaleID *uint `gorm:"-" json:"electronic_issue_sale_id,omitempty"`
-	// Payments se rellena al listar (tenant_sale_payments); no es columna en BD.
-	Payments []TenantSalePayment `gorm:"-" json:"payments,omitempty"`
+	ElectronicIssueDocType string `gorm:"-" json:"electronic_issue_doc_type,omitempty"`
+	ElectronicIssueSeries  string `gorm:"-" json:"electronic_issue_series,omitempty"`
+	ElectronicIssueNumber  string `gorm:"-" json:"electronic_issue_number,omitempty"`
+	// Estado NV: registrado | convertida | anulada (solo comprobantes NV).
+	NvStatus string `gorm:"-" json:"nv_status,omitempty"`
+	// Documento comercial vigente para reportes (hijo FE si NV convertida).
+	DisplaySaleID   *uint  `gorm:"-" json:"display_sale_id,omitempty"`
+	DisplayDocType  string `gorm:"-" json:"display_doc_type,omitempty"`
+	DisplaySeries   string `gorm:"-" json:"display_series,omitempty"`
+	DisplayNumber   string `gorm:"-" json:"display_number,omitempty"`
+	// Detracción 1001 (join tenant_sale_detraccion); no es columna en BD.
+	HasDetraccion          bool    `gorm:"-" json:"has_detraccion,omitempty"`
+	DetraccionAmount       float64 `gorm:"-" json:"detraccion_amount,omitempty"`
+	NetPayable             float64 `gorm:"-" json:"net_payable,omitempty"`
+	DetraccionRatePercent  float64 `gorm:"-" json:"detraccion_rate_percent,omitempty"`
 }
 
 type TenantSaleItem struct {
@@ -744,6 +780,131 @@ type TenantSaleItem struct {
 	Total              float64 `gorm:"type:decimal(15,2);not null" json:"total"`
 	ModifiersJSON      string  `gorm:"type:text" json:"modifiers_json"` // JSON array de { option_id, name, extra_price } para el detalle
 }
+
+// TenantSaleFiscalProfile información adicional fiscal de una venta (1:1).
+type TenantSaleFiscalProfile struct {
+	SaleID                     uint      `gorm:"primaryKey" json:"sale_id"`
+	SchemaVersion              int       `gorm:"default:1" json:"schema_version"`
+	OperationTypeCode          string    `gorm:"size:10;default:'0101'" json:"operation_type_code"`
+	HasIgvRetention            bool      `gorm:"default:false" json:"has_igv_retention"`
+	IgvRetentionManualOverride bool      `gorm:"default:false" json:"igv_retention_manual_override"`
+	ShowTermsConditions        bool      `gorm:"default:false" json:"show_terms_conditions"`
+	FiscalObservations         string    `gorm:"type:text" json:"fiscal_observations"`
+	PurchaseOrderNumber        string    `gorm:"size:50" json:"purchase_order_number"`
+	SellerUserID               *uint     `gorm:"index" json:"seller_user_id,omitempty"`
+	CreatedByUserID            uint      `gorm:"index" json:"created_by_user_id"`
+	CreatedAt                  time.Time `json:"created_at"`
+	UpdatedAt                  time.Time `json:"updated_at"`
+}
+
+func (TenantSaleFiscalProfile) TableName() string { return "tenant_sale_fiscal_profiles" }
+
+// TenantSaleFiscalReference documento relacionado con la venta (guías, etc.).
+type TenantSaleFiscalReference struct {
+	ID                   uint      `gorm:"primaryKey" json:"id"`
+	SaleID               uint      `gorm:"not null;index" json:"sale_id"`
+	ReferenceKind        string    `gorm:"size:40;not null;index" json:"reference_kind"`
+	ReferencedSunatType  string    `gorm:"size:10" json:"referenced_sunat_type"`
+	ReferencedSeries     string    `gorm:"size:20" json:"referenced_series"`
+	ReferencedNumber     string    `gorm:"size:20" json:"referenced_number"`
+	ReferencedFullNumber string    `gorm:"size:40" json:"referenced_full_number"`
+	ReferencedSaleID     *uint     `gorm:"index" json:"referenced_sale_id,omitempty"`
+	SortOrder            int       `gorm:"default:0" json:"sort_order"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+func (TenantSaleFiscalReference) TableName() string { return "tenant_sale_fiscal_references" }
+
+// TenantSaleFiscalObligation obligación fiscal calculada (retención, percepción, etc.).
+type TenantSaleFiscalObligation struct {
+	ID                  uint      `gorm:"primaryKey" json:"id"`
+	SaleID              uint      `gorm:"not null;index" json:"sale_id"`
+	ObligationKind      string    `gorm:"size:40;not null;index" json:"obligation_kind"`
+	Direction           string    `gorm:"size:40;not null" json:"direction"`
+	RatePercent         float64   `gorm:"type:decimal(7,4);default:0" json:"rate_percent"`
+	BaseAmount          float64   `gorm:"type:decimal(15,6);default:0" json:"base_amount"`
+	ObligationAmount    float64   `gorm:"type:decimal(15,6);default:0" json:"obligation_amount"`
+	Currency            string    `gorm:"size:10;default:'PEN'" json:"currency"`
+	ApplicabilityStatus string    `gorm:"size:30;not null" json:"applicability_status"`
+	ApplicabilityReason string    `gorm:"type:text" json:"applicability_reason"`
+	Source              string    `gorm:"size:30;not null" json:"source"`
+	Status              string    `gorm:"size:30;default:'pending'" json:"status"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+func (TenantSaleFiscalObligation) TableName() string { return "tenant_sale_fiscal_obligations" }
+
+// TenantSaleDetraccion datos de detracción SUNAT (1:1 con venta factura 1001).
+type TenantSaleDetraccion struct {
+	SaleID              uint      `gorm:"primaryKey" json:"sale_id"`
+	GoodCode            string    `gorm:"size:10;not null" json:"good_code"`
+	PaymentMethodCode   string    `gorm:"size:10;not null" json:"payment_method_code"`
+	BankAccount         string    `gorm:"size:30;not null" json:"bank_account"`
+	RatePercent         float64   `gorm:"type:decimal(5,2);not null" json:"rate_percent"`
+	BaseAmountPen       float64   `gorm:"type:decimal(15,2);not null" json:"base_amount_pen"`
+	DetractionAmountPen float64   `gorm:"type:decimal(15,2);not null" json:"detraction_amount_pen"`
+	InvoiceTotalPen     float64   `gorm:"type:decimal(15,2);not null" json:"invoice_total_pen"`
+	NetPayablePen              float64    `gorm:"type:decimal(15,2);not null" json:"net_payable_pen"`
+	BnConfirmationStatus       string     `gorm:"size:20;default:'pending'" json:"bn_confirmation_status"`
+	BnConfirmedAt              *time.Time `json:"bn_confirmed_at,omitempty"`
+	BnConfirmationReference    string     `gorm:"size:100" json:"bn_confirmation_reference,omitempty"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
+}
+
+func (TenantSaleDetraccion) TableName() string { return "tenant_sale_detraccion" }
+
+// TenantQuotation — cotización comercial (pre venta); no afecta inventario ni caja.
+type TenantQuotation struct {
+	ID                uint       `gorm:"primaryKey" json:"id"`
+	BranchID          uint       `gorm:"not null;index" json:"branch_id"`
+	ContactID         *uint      `gorm:"index" json:"contact_id"`
+	UserID            uint       `gorm:"not null;index" json:"user_id"`
+	SeriesID          uint       `gorm:"not null;index" json:"series_id"`
+	Series            string     `gorm:"size:10;not null" json:"series"`
+	Correlative       uint       `gorm:"not null" json:"correlative"`
+	Number            string     `gorm:"size:20;not null;index" json:"number"`
+	IssueDate         time.Time  `gorm:"not null;index" json:"issue_date"`
+	ValidUntil        *time.Time `json:"valid_until,omitempty"`
+	Subtotal          float64    `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	TaxAmount         float64    `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
+	Total             float64    `gorm:"type:decimal(15,2);not null" json:"total"`
+	Currency          string     `gorm:"size:10;default:'PEN'" json:"currency"`
+	ExchangeRate      *float64   `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	Notes             string     `gorm:"type:text" json:"notes"`
+	Status            string     `gorm:"size:30;default:'draft';index" json:"status"` // draft | converted
+	ConvertedSaleID   *uint      `gorm:"index" json:"converted_sale_id,omitempty"`
+	ConvertedAt       *time.Time `json:"converted_at,omitempty"`
+	ConvertedTarget   string     `gorm:"size:30" json:"converted_target,omitempty"` // nota_venta | 01 | 03
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	ContactName       string     `gorm:"-" json:"contact_name"`
+}
+
+func (TenantQuotation) TableName() string { return "tenant_quotations" }
+
+type TenantQuotationItem struct {
+	ID                 uint    `gorm:"primaryKey" json:"id"`
+	QuotationID        uint    `gorm:"not null;index" json:"quotation_id"`
+	ProductID          *uint   `gorm:"index" json:"product_id"`
+	Code               string  `gorm:"size:100" json:"code"`
+	Description        string  `gorm:"size:255;not null" json:"description"`
+	Unit               string  `gorm:"size:50" json:"unit"`
+	Quantity           float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	UnitPrice          float64 `gorm:"type:decimal(15,2);not null" json:"unit_price"`
+	Discount           float64 `gorm:"type:decimal(15,2);default:0" json:"discount"`
+	TaxRate            float64 `gorm:"type:decimal(5,2);default:0" json:"tax_rate"`
+	IgvAffectationType string  `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
+	PriceIncludesIgv   bool    `gorm:"default:true" json:"price_includes_igv"`
+	Subtotal           float64 `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	TaxAmount          float64 `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
+	Total              float64 `gorm:"type:decimal(15,2);not null" json:"total"`
+	ModifiersJSON      string  `gorm:"type:text" json:"modifiers_json"`
+}
+
+func (TenantQuotationItem) TableName() string { return "tenant_quotation_items" }
 
 type TenantInvoice struct {
 	ID                uint       `gorm:"primaryKey" json:"id"`
@@ -803,6 +964,55 @@ type TenantSunatVoided struct {
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
+
+// TenantGreCarrier transportista para guías GRE (SUNAT CarrierParty).
+type TenantGreCarrier struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	DocType       string    `gorm:"size:2;not null;default:'6'" json:"doc_type"`
+	DocNumber     string    `gorm:"size:20;not null;index" json:"doc_number"`
+	BusinessName  string    `gorm:"size:255;not null" json:"business_name"`
+	FiscalAddress string    `gorm:"size:500" json:"fiscal_address"`
+	MTCNumber     string    `gorm:"size:50" json:"mtc_number"`
+	IsDefault     bool      `gorm:"default:false;index" json:"is_default"`
+	Active        bool      `gorm:"default:true;index" json:"active"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func (TenantGreCarrier) TableName() string { return "tenant_gre_carriers" }
+
+// TenantGreDriver conductor para guías GRE.
+type TenantGreDriver struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	DocType       string    `gorm:"size:2;not null;default:'1'" json:"doc_type"`
+	DocNumber     string    `gorm:"size:20;not null;index" json:"doc_number"`
+	FullName      string    `gorm:"size:255;not null" json:"full_name"`
+	LicenseNumber string    `gorm:"size:50" json:"license_number"`
+	Phone         string    `gorm:"size:30" json:"phone"`
+	CarrierID     *uint     `gorm:"index" json:"carrier_id,omitempty"`
+	IsDefault     bool      `gorm:"default:false;index" json:"is_default"`
+	Active        bool      `gorm:"default:true;index" json:"active"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func (TenantGreDriver) TableName() string { return "tenant_gre_drivers" }
+
+// TenantGreVehicle vehículo para guías GRE.
+type TenantGreVehicle struct {
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	Plate            string    `gorm:"size:20;not null;uniqueIndex" json:"plate"`
+	Brand            string    `gorm:"size:80" json:"brand"`
+	Model            string    `gorm:"size:80" json:"model"`
+	HabilitationCert string    `gorm:"size:100" json:"habilitation_cert"`
+	CarrierID        *uint     `gorm:"index" json:"carrier_id,omitempty"`
+	IsDefault        bool      `gorm:"default:false;index" json:"is_default"`
+	Active           bool      `gorm:"default:true;index" json:"active"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+func (TenantGreVehicle) TableName() string { return "tenant_gre_vehicles" }
 
 // TenantDespatch guía de remisión enviada a SUNAT (remitente o transportista).
 type TenantDespatch struct {
@@ -963,21 +1173,43 @@ type TenantCashMovement struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
-// TenantPaymentMethod métodos de pago del tenant (efectivo, Yape, etc.).
-// destination_type: cash = caja (TenantCashMovement), bank_account = cuenta bancaria.
-// is_system=true (ej. cash) no se puede eliminar.
+// TenantPaymentMethod medios reales de cobro (efectivo, Yape, Plin, etc.).
+// Solo códigos operativos: cash, yape, plin, transferencia, tarjeta.
 type TenantPaymentMethod struct {
-	ID              uint           `gorm:"primaryKey" json:"id"`
-	Name            string         `gorm:"size:100;not null" json:"name"`
-	Code            string         `gorm:"size:50;not null;uniqueIndex" json:"code"` // cash, yape, plin, transferencia, tarjeta
-	DestinationType string         `gorm:"size:20;not null" json:"destination_type"` // cash | bank_account
-	BankAccountID   *uint          `gorm:"index" json:"bank_account_id"`             // cuando destination_type=bank_account
-	IsSystem        bool           `gorm:"default:false" json:"is_system"`           // true = no se puede eliminar (cash)
-	SortOrder       int            `gorm:"default:0" json:"sort_order"`
-	Active          bool           `gorm:"default:true" json:"active"`
+	ID            uint           `gorm:"primaryKey" json:"id"`
+	Code          string         `gorm:"size:50;not null;uniqueIndex" json:"code"`
+	Name          string         `gorm:"size:100;not null" json:"name"`
+	BankAccountID *uint          `gorm:"index" json:"bank_account_id"`
+	IsSystem      bool           `gorm:"default:false" json:"is_system"`
+	SortOrder     int            `gorm:"default:0" json:"sort_order"`
+	Active        bool           `gorm:"default:true" json:"active"`
+	// Legacy column — se elimina en v075; GORM lo omite en BD nueva sin la columna.
+	DestinationType string `gorm:"size:20" json:"destination_type,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// TenantPaymentCondition condición comercial de la venta (contado / crédito).
+type TenantPaymentCondition struct {
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	Code      string         `gorm:"size:50;not null;uniqueIndex" json:"code"`
+	Name      string         `gorm:"size:100;not null" json:"name"`
+	Active    bool           `gorm:"default:true" json:"active"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// TenantTaxPaymentType concepto tributario en pagos (SPOT detracción, retenciones futuras).
+type TenantTaxPaymentType struct {
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	Code      string         `gorm:"size:50;not null;uniqueIndex" json:"code"`
+	Name      string         `gorm:"size:100;not null" json:"name"`
+	Active    bool           `gorm:"default:true" json:"active"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 type TenantBankAccount struct {
@@ -1254,78 +1486,9 @@ type TenantMembershipInvoice struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// MigrateTenant aplica todas las migraciones al DB de un tenant.
+// MigrateTenant está deprecado: el esquema se aplica solo vía tenantmigrations (V001+).
 func MigrateTenant(db *gorm.DB) error {
-	if err := db.AutoMigrate(
-		&TenantRole{},
-		&TenantPermission{},
-		&TenantRolePermission{},
-		&TenantUser{},
-		&TenantBranch{},
-		&TenantCompanyConfig{},
-		&TenantDocumentSeries{},
-		&TenantContact{},
-		&TenantContactPerson{},
-		&TenantCategory{},
-		&TenantProduct{},
-		&TenantProductStock{},
-		&TenantProductSerial{},
-		&TenantStockMovement{},
-		&TenantTransfer{},
-		&TenantTransferLog{},
-		&TenantProductPresentation{},
-		&TenantModifierGroup{},
-		&TenantModifierOption{},
-		&TenantProductModifierGroup{},
-		&TenantSale{},
-		&TenantSaleItem{},
-		&TenantInvoice{},
-		&TenantSunatSummary{},
-		&TenantSunatVoided{},
-		&TenantDespatch{},
-		&TenantRetention{},
-		&TenantPerception{},
-		&TenantSunatReversion{},
-		&TenantPurchase{},
-		&TenantPurchaseItem{},
-		&TenantCashSession{},
-		&TenantCashMovement{},
-		&TenantPaymentMethod{},
-		&TenantBankAccount{},
-		&TenantBankMovement{},
-		&TenantExternalModule{},
-		// Módulo Restaurante
-		&TenantRestaurantFloor{},
-		&TenantRestaurantTable{},
-		&TenantWaiter{},
-		&TenantTableSession{},
-		&TenantTableOrder{},
-		&TenantComanda{},
-		&TenantDeliveryCompany{},
-		&TenantDeliveryDriver{},
-		&TenantRestaurantSetting{},
-		&TenantRestaurantStaff{},
-		&TenantUserRestaurantRole{},
-		&TenantSalePayment{},
-		&TenantMembership{},
-		&TenantMembershipInvoice{},
-		&UbiRegion{},
-		&UbiProvincia{},
-		&UbiDistrito{},
-		&TenantSchemaPatch{},
-		&TenantMigrationHistory{},
-	); err != nil {
-		return err
-	}
-	// Asegurar columnas añadidas después en TenantDocumentSeries (BD antiguas sin sunat_code/category)
-	if err := ensureDocumentSeriesColumns(db); err != nil {
-		return err
-	}
-	if err := ensureServiceProductsNoStock(db); err != nil {
-		return err
-	}
-	// Multi-sucursal DDL: V031 en migrate-fleet (tenantmigrations). Bootstrap nuevos tenants vía AutoMigrate structs.
-	return EnsureMembershipModulePermissions(db)
+	return fmt.Errorf("MigrateTenant deprecado: use migrate-fleet o ProvisionTenantDB (migraciones versionadas)")
 }
 
 // ensureServiceProductsNoStock corrige filas type=service que quedaron con manage_stock por datos legacy o bugs.
@@ -1424,87 +1587,4 @@ func SeedTenant(db *gorm.DB, adminEmail, adminPassword, companyName, ruc, addres
 	return nil
 }
 
-// SeedPaymentMethodsIfEmpty siembra métodos de pago y cuentas bancarias/billeteras por defecto.
-// Yape/Plin → billetera (wallet); transferencia/tarjeta → banco (bank); efectivo → caja.
-// Se ejecuta desde MigrateTenantSchema (CLI / alta de tenant), no en requests HTTP.
-func SeedPaymentMethodsIfEmpty(db *gorm.DB) error {
-	var pmCount int64
-	if err := db.Model(&TenantPaymentMethod{}).Count(&pmCount).Error; err != nil {
-		return nil // tabla puede no existir aún
-	}
-	var baCount int64
-	if err := db.Model(&TenantBankAccount{}).Count(&baCount).Error; err != nil {
-		return nil
-	}
-	if pmCount > 0 && baCount > 0 {
-		return nil
-	}
-	return db.Transaction(func(tx *gorm.DB) error {
-		if pmCount == 0 {
-			return seedDefaultPaymentMethodsAndAccounts(tx)
-		}
-		if baCount == 0 {
-			return backfillBankAccountsForPaymentMethods(tx)
-		}
-		return nil
-	})
-}
-
-func seedDefaultPaymentMethodsAndAccounts(db *gorm.DB) error {
-	accounts := []TenantBankAccount{
-		{Name: "Billetera Yape", Type: "wallet", PaymentMethod: "yape", Currency: "PEN", Active: true},
-		{Name: "Billetera Plin", Type: "wallet", PaymentMethod: "plin", Currency: "PEN", Active: true},
-		{Name: "Cuenta bancaria", Type: "bank", PaymentMethod: "transferencia", Currency: "PEN", Active: true},
-		{Name: "Terminal tarjetas", Type: "bank", PaymentMethod: "tarjeta", Currency: "PEN", Active: true},
-	}
-	if err := db.Create(&accounts).Error; err != nil {
-		return err
-	}
-	yapeID := accounts[0].ID
-	plinID := accounts[1].ID
-	transferID := accounts[2].ID
-	tarjetaID := accounts[3].ID
-	paymentMethods := []TenantPaymentMethod{
-		{Name: "Efectivo", Code: "cash", DestinationType: "cash", IsSystem: true, SortOrder: 0, Active: true},
-		{Name: "Yape", Code: "yape", DestinationType: "bank_account", BankAccountID: &yapeID, IsSystem: false, SortOrder: 1, Active: true},
-		{Name: "Plin", Code: "plin", DestinationType: "bank_account", BankAccountID: &plinID, IsSystem: false, SortOrder: 2, Active: true},
-		{Name: "Transferencia", Code: "transferencia", DestinationType: "bank_account", BankAccountID: &transferID, IsSystem: false, SortOrder: 3, Active: true},
-		{Name: "Tarjeta", Code: "tarjeta", DestinationType: "bank_account", BankAccountID: &tarjetaID, IsSystem: false, SortOrder: 4, Active: true},
-	}
-	return db.Create(&paymentMethods).Error
-}
-
-func backfillBankAccountsForPaymentMethods(db *gorm.DB) error {
-	var methods []TenantPaymentMethod
-	if err := db.Order("sort_order asc, id asc").Find(&methods).Error; err != nil {
-		return err
-	}
-	accountByCode := map[string]TenantBankAccount{
-		"yape":          {Name: "Billetera Yape", Type: "wallet", PaymentMethod: "yape", Currency: "PEN", Active: true},
-		"plin":          {Name: "Billetera Plin", Type: "wallet", PaymentMethod: "plin", Currency: "PEN", Active: true},
-		"transferencia": {Name: "Cuenta bancaria", Type: "bank", PaymentMethod: "transferencia", Currency: "PEN", Active: true},
-		"tarjeta":       {Name: "Terminal tarjetas", Type: "bank", PaymentMethod: "tarjeta", Currency: "PEN", Active: true},
-	}
-	created := map[string]uint{}
-	for code, acc := range accountByCode {
-		row := acc
-		if err := db.Create(&row).Error; err != nil {
-			return err
-		}
-		created[code] = row.ID
-	}
-	for i := range methods {
-		m := &methods[i]
-		if m.DestinationType != "bank_account" || m.BankAccountID != nil {
-			continue
-		}
-		accID, ok := created[m.Code]
-		if !ok {
-			continue
-		}
-		if err := db.Model(m).Update("bank_account_id", accID).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// SeedPaymentMethodsIfEmpty y SeedPaymentMethodsCatalog están en payment_method_seed.go.

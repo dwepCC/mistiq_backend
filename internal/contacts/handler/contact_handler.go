@@ -146,17 +146,21 @@ type contactPersonBody struct {
 }
 
 type contactBody struct {
-	Type           string              `json:"type"`
-	DocType        string              `json:"doc_type"`
-	DocNumber      string              `json:"doc_number"`
-	BusinessName   string              `json:"business_name"`
-	TradeName      string              `json:"trade_name"`
-	Address        string              `json:"address"`
-	Ubigeo         string              `json:"ubigeo"`
-	Phone          string              `json:"phone"`
-	Email          string              `json:"email"`
-	PhotoURL       string              `json:"photo_url"`
-	ContactPersons []contactPersonBody `json:"contact_persons"`
+	Type                            string              `json:"type"`
+	DocType                         string              `json:"doc_type"`
+	DocNumber                       string              `json:"doc_number"`
+	BusinessName                    string              `json:"business_name"`
+	TradeName                       string              `json:"trade_name"`
+	Address                         string              `json:"address"`
+	Ubigeo                          string              `json:"ubigeo"`
+	Phone                           string              `json:"phone"`
+	Email                           string              `json:"email"`
+	PhotoURL                        string              `json:"photo_url"`
+	ContactPersons                  []contactPersonBody `json:"contact_persons"`
+	EsAgenteDeRetencion             *bool               `json:"es_agente_de_retencion"`
+	EsAgenteDePercepcion            *bool               `json:"es_agente_de_percepcion"`
+	EsAgenteDePercepcionCombustible *bool               `json:"es_agente_de_percepcion_combustible"`
+	EsBuenContribuyente             *bool               `json:"es_buen_contribuyente"`
 }
 
 func bodyToInput(b contactBody) service.ContactInput {
@@ -170,17 +174,21 @@ func bodyToInput(b contactBody) service.ContactInput {
 		})
 	}
 	return service.ContactInput{
-		Type:           b.Type,
-		DocType:        b.DocType,
-		DocNumber:      b.DocNumber,
-		BusinessName:   b.BusinessName,
-		TradeName:      b.TradeName,
-		Address:        b.Address,
-		Ubigeo:         b.Ubigeo,
-		Phone:          b.Phone,
-		Email:          b.Email,
-		PhotoURL:       b.PhotoURL,
-		ContactPersons: persons,
+		Type:                            b.Type,
+		DocType:                         b.DocType,
+		DocNumber:                       b.DocNumber,
+		BusinessName:                    b.BusinessName,
+		TradeName:                       b.TradeName,
+		Address:                         b.Address,
+		Ubigeo:                          b.Ubigeo,
+		Phone:                           b.Phone,
+		Email:                           b.Email,
+		PhotoURL:                        b.PhotoURL,
+		ContactPersons:                  persons,
+		EsAgenteDeRetencion:             b.EsAgenteDeRetencion,
+		EsAgenteDePercepcion:            b.EsAgenteDePercepcion,
+		EsAgenteDePercepcionCombustible: b.EsAgenteDePercepcionCombustible,
+		EsBuenContribuyente:             b.EsBuenContribuyente,
 	}
 }
 

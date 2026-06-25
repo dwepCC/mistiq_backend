@@ -27,11 +27,13 @@ type ProductListParams struct {
 	CategoryID       uint
 	Type             string
 	ActiveOnly       bool
-	ManageStockOnly  bool   // solo productos con manage_stock (para transferencias/inventario)
-	RestaurantOnly   bool   // solo productos con is_restaurant (para panel restaurante)
+	InactiveOnly     bool // solo productos inactivos (panel restaurante)
+	ManageStockOnly    bool // solo productos con manage_stock (para transferencias/inventario)
+	NoManageStockOnly  bool // solo productos sin control de stock (reporte restaurante)
+	RestaurantOnly     bool // solo productos con is_restaurant (para panel restaurante)
 	PreparationArea  string // filtrar por área de preparación (cocina, bar, etc.)
 	StockLessThan    *float64
-	BranchID         uint // >0: solo productos con fila de stock en esa sucursal (o sin manage_stock); stock_less_than usa cantidad en esa sucursal
+	BranchID         uint // >0: restaurante → tenant_products.branch_id; inventario ERP → stock en sucursal
 	Limit            int // 0 = sin límite (comportamiento anterior)
 	Offset           int
 }
@@ -43,6 +45,12 @@ type BranchStockRow struct {
 	BranchID   uint    `json:"branch_id"`
 	BranchName string  `json:"branch_name"`
 	Quantity   float64 `json:"quantity"`
+}
+
+// ProductListItem producto en listados API con nombre de categoría.
+type ProductListItem struct {
+	database.TenantProduct
+	CategoryName string `json:"category_name,omitempty"`
 }
 
 // ProductReportItem extiende el producto con totales, stock por sucursal y series.
@@ -76,11 +84,15 @@ func (s *ProductService) buildListQuery(params ProductListParams) *gorm.DB {
 			q = q.Where("type = ?", params.Type)
 		}
 	}
-	if params.ActiveOnly {
+	if params.InactiveOnly {
+		q = q.Where("active = ?", false)
+	} else if params.ActiveOnly {
 		q = q.Where("active = ?", true)
 	}
 	if params.ManageStockOnly {
 		q = q.Where("manage_stock = ?", true)
+	} else if params.NoManageStockOnly {
+		q = q.Where("manage_stock = ?", false)
 	}
 	if params.RestaurantOnly {
 		q = q.Where("is_restaurant = ?", true)
@@ -91,10 +103,8 @@ func (s *ProductService) buildListQuery(params ProductListParams) *gorm.DB {
 	if params.BranchID > 0 {
 		bid := params.BranchID
 		if params.RestaurantOnly {
-			// Carta Tukichef: solo platos asignados a la sucursal (fila en tenant_product_stocks, p. ej. transferencia o alta).
-			q = q.Where(`EXISTS (
-				SELECT 1 FROM tenant_product_stocks s WHERE s.product_id = tenant_products.id AND s.branch_id = ?
-			)`, bid)
+			// Carta Tukichef: catálogo exclusivo por sucursal (branch_id en el producto).
+			q = q.Where("branch_id = ?", bid)
 		} else {
 			q = q.Where(`(tenant_products.manage_stock = ? OR EXISTS (
 				SELECT 1 FROM tenant_product_stocks s WHERE s.product_id = tenant_products.id AND s.branch_id = ?
@@ -134,6 +144,59 @@ func (s *ProductService) List(params ProductListParams) ([]database.TenantProduc
 	}
 	err := q.Order("name ASC").Find(&products).Error
 	return products, total, err
+}
+
+// ListWithCategoryNames igual que List con category_name para el panel tenant.
+func (s *ProductService) ListWithCategoryNames(params ProductListParams) ([]ProductListItem, int64, error) {
+	products, total, err := s.List(params)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.attachCategoryNames(products), total, nil
+}
+
+func (s *ProductService) attachCategoryNames(products []database.TenantProduct) []ProductListItem {
+	if len(products) == 0 {
+		return nil
+	}
+	catName := map[uint]string{}
+	seenCat := map[uint]struct{}{}
+	var catIDs []uint
+	for _, p := range products {
+		if p.CategoryID != nil {
+			cid := *p.CategoryID
+			if _, ok := seenCat[cid]; ok {
+				continue
+			}
+			seenCat[cid] = struct{}{}
+			catIDs = append(catIDs, cid)
+		}
+	}
+	if len(catIDs) > 0 {
+		var cats []database.TenantCategory
+		s.db.Where("id IN ?", catIDs).Find(&cats)
+		for _, c := range cats {
+			catName[c.ID] = c.Name
+		}
+	}
+	out := make([]ProductListItem, len(products))
+	for i, p := range products {
+		item := ProductListItem{TenantProduct: p}
+		if p.CategoryID != nil {
+			item.CategoryName = catName[*p.CategoryID]
+		}
+		out[i] = item
+	}
+	return out
+}
+
+// ProductListItemFrom devuelve un ítem de listado con category_name para un solo producto.
+func (s *ProductService) ProductListItemFrom(p database.TenantProduct) ProductListItem {
+	items := s.attachCategoryNames([]database.TenantProduct{p})
+	if len(items) == 0 {
+		return ProductListItem{TenantProduct: p}
+	}
+	return items[0]
 }
 
 // ListReport igual que List pero devuelve filas enriquecidas (stock por sucursal, series, categoría).
@@ -277,6 +340,37 @@ func (s *ProductService) GetByCode(code string) (*database.TenantProduct, error)
 	return &p, err
 }
 
+// GetByCodeInBranch busca por código dentro de la sucursal (catálogo restaurante).
+func (s *ProductService) GetByCodeInBranch(code string, branchID uint) (*database.TenantProduct, error) {
+	if code == "" {
+		return nil, nil
+	}
+	var p database.TenantProduct
+	q := s.db.Where("code = ?", code)
+	if branchID > 0 {
+		q = q.Where("branch_id = ?", branchID)
+	}
+	err := q.First(&p).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &p, err
+}
+
+// EnsureRestaurantBranchAccess valida que un plato pertenezca a la sucursal activa.
+func (s *ProductService) EnsureRestaurantBranchAccess(p *database.TenantProduct, branchID uint) error {
+	if p == nil || !p.IsRestaurant || branchID == 0 {
+		return nil
+	}
+	if p.BranchID == 0 {
+		return nil
+	}
+	if p.BranchID != branchID {
+		return errors.New("el producto no pertenece a la sucursal activa")
+	}
+	return nil
+}
+
 type ProductInput struct {
 	CategoryID         *uint
 	Code               string
@@ -299,6 +393,7 @@ type ProductInput struct {
 	ImageURL           string
 	Active             bool
 	ActiveSet          bool // si true, Update actualiza el campo active
+	BranchID           uint // sucursal dueña (platos restaurante)
 	// nil = no tocar vínculos (update parcial); no-nil = reemplazar asignación (puede ser slice vacío).
 	ModifierGroupIDs *[]uint
 	// nil = no tocar presentaciones; no-nil = reemplazar lista del producto.
@@ -319,8 +414,12 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, er
 
 	if input.Code != "" {
 		var existing database.TenantProduct
-		if err := s.db.Where("code = ?", input.Code).First(&existing).Error; err == nil {
-			return nil, fmt.Errorf("el código '%s' ya está en uso", input.Code)
+		q := s.db.Where("code = ?", input.Code)
+		if input.IsRestaurant && input.BranchID > 0 {
+			q = q.Where("branch_id = ?", input.BranchID)
+		}
+		if err := q.First(&existing).Error; err == nil {
+			return nil, fmt.Errorf("el código '%s' ya está en uso en esta sucursal", input.Code)
 		}
 	}
 
@@ -352,6 +451,7 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, er
 		HasVariants:        input.HasVariants,
 		HasModifiers:       input.HasModifiers,
 		IsRestaurant:       input.IsRestaurant,
+		BranchID:           input.BranchID,
 		PreparationArea:    input.PreparationArea,
 		MinStock:           input.MinStock,
 		ImageURL:           input.ImageURL,
@@ -377,6 +477,10 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, er
 		return nil, err
 	}
 	p.PriceIncludesIgv = input.PriceIncludesIgv
+	if err := gormutil.PersistBoolWithDefault(s.db, p, "manage_stock", input.ManageStock); err != nil {
+		return nil, err
+	}
+	p.ManageStock = input.ManageStock
 
 	if input.ModifierGroupIDs != nil {
 		s.syncModifierGroups(p.ID, *input.ModifierGroupIDs)

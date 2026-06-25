@@ -10,12 +10,13 @@ import (
 // BulkImportRestaurantAPI POST /api/products/bulk-import/restaurant
 func (h *ProductHandler) BulkImportRestaurantAPI(c fiber.Ctx) error {
 	var body struct {
-		Items []service.BulkImportItem `json:"items"`
+		BranchID uint                     `json:"branch_id"`
+		Items    []service.BulkImportItem `json:"items"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
-	branchID, err := branch.ResolveWriteBranchID(c, 0)
+	branchID, err := branch.ResolveWriteBranchID(c, body.BranchID)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error(), "code": branch.CodeBranchForbidden})
 	}
@@ -30,12 +31,13 @@ func (h *ProductHandler) BulkImportRestaurantAPI(c fiber.Ctx) error {
 // BulkImportCatalogAPI POST /api/products/bulk-import/catalog
 func (h *ProductHandler) BulkImportCatalogAPI(c fiber.Ctx) error {
 	var body struct {
-		Items []service.BulkImportItem `json:"items"`
+		BranchID uint                     `json:"branch_id"`
+		Items    []service.BulkImportItem `json:"items"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
-	branchID, err := branch.ResolveWriteBranchID(c, 0)
+	branchID, err := branch.ResolveWriteBranchID(c, body.BranchID)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error(), "code": branch.CodeBranchForbidden})
 	}

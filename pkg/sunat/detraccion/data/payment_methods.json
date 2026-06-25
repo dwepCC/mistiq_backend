@@ -1,0 +1,22 @@
+[
+  {"code": "001", "description": "Depósito en cuenta", "active": true},
+  {"code": "002", "description": "Giro", "active": true},
+  {"code": "003", "description": "Transferencia de fondos", "active": true},
+  {"code": "004", "description": "Orden de pago", "active": true},
+  {"code": "005", "description": "Tarjeta de débito", "active": true},
+  {"code": "006", "description": "Tarjeta de crédito emitida en el país por una empresa del sistema financiero", "active": true},
+  {"code": "007", "description": "Cheques con cláusula de no negociabilidad", "active": true},
+  {"code": "008", "description": "Efectivo, por operaciones en las que no existe obligación de utilizar medio de pago", "active": true},
+  {"code": "009", "description": "Efectivo, en los demás casos", "active": true},
+  {"code": "010", "description": "Medios de pago usados en comercio exterior", "active": true},
+  {"code": "011", "description": "Documentos emitidos por las empresas del sistema financiero y entidades crediticias", "active": true},
+  {"code": "012", "description": "Tarjeta de crédito emitida en el país o en el exterior por una empresa no perteneciente al sistema financiero", "active": true},
+  {"code": "013", "description": "Tarjetas de crédito emitidas en el exterior por empresas bancarias o financieras no domiciliadas", "active": true},
+  {"code": "101", "description": "Transferencias – Comercio exterior", "active": true},
+  {"code": "102", "description": "Cheques bancarios – Comercio exterior", "active": true},
+  {"code": "103", "description": "Orden de pago simple – Comercio exterior", "active": true},
+  {"code": "104", "description": "Orden de pago documentario – Comercio exterior", "active": true},
+  {"code": "105", "description": "Carta de crédito simple – Comercio exterior", "active": true},
+  {"code": "106", "description": "Carta de crédito documentario – Comercio exterior", "active": true},
+  {"code": "999", "description": "Otros medios de pago", "active": true}
+]

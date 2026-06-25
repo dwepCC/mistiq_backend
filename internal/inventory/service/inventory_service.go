@@ -791,11 +791,13 @@ func (s *InventoryService) adjustmentOutWithSerials(productID, branchID uint, se
 type KardexParams struct {
 	ProductID       uint
 	ProductSearch   string // LIKE en nombre o código de producto (JOIN)
+	CategoryID      uint   // filtro por categoría del producto (JOIN)
 	BranchID        uint
 	DateFrom        *time.Time
 	DateTo          *time.Time
 	MovementKind    string // vacío, purchase_in, sale_out, transfer, adjustment, in, out
 	TextSearch      string // referencia o notas
+	RestaurantOnly  bool   // is_restaurant=true y manage_stock=true
 	Limit           int
 	Offset          int
 }
@@ -808,10 +810,20 @@ func (s *InventoryService) GetKardex(params KardexParams) ([]database.TenantStoc
 	if params.ProductID > 0 {
 		q = q.Where("tenant_stock_movements.product_id = ?", params.ProductID)
 	}
-	if ps := strings.TrimSpace(params.ProductSearch); ps != "" {
-		term := "%" + ps + "%"
-		q = q.Joins("INNER JOIN tenant_products p ON p.id = tenant_stock_movements.product_id").
-			Where("(p.name LIKE ? OR p.code LIKE ?)", term, term)
+	ps := strings.TrimSpace(params.ProductSearch)
+	needProductJoin := params.RestaurantOnly || ps != "" || params.CategoryID > 0
+	if needProductJoin {
+		q = q.Joins("INNER JOIN tenant_products p ON p.id = tenant_stock_movements.product_id")
+		if params.RestaurantOnly {
+			q = q.Where("p.is_restaurant = ? AND p.manage_stock = ?", true, true)
+		}
+		if params.CategoryID > 0 {
+			q = q.Where("p.category_id = ?", params.CategoryID)
+		}
+		if ps != "" {
+			term := "%" + ps + "%"
+			q = q.Where("(p.name LIKE ? OR p.code LIKE ?)", term, term)
+		}
 	}
 	if params.BranchID > 0 {
 		q = q.Where("tenant_stock_movements.branch_id = ?", params.BranchID)

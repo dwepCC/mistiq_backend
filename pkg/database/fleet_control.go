@@ -9,11 +9,13 @@ import (
 
 // FleetMigrationState control global del fleet (fila única ID=1).
 type FleetMigrationState struct {
-	ID            uint       `gorm:"primaryKey"`
-	CircuitOpen   bool       `gorm:"not null;default:false"`
-	CircuitReason string     `gorm:"type:text"`
-	OpenedAt      *time.Time `json:"opened_at,omitempty"`
-	UpdatedAt     time.Time
+	ID                     uint       `gorm:"primaryKey"`
+	CircuitOpen            bool       `gorm:"not null;default:false"`
+	CircuitReason          string     `gorm:"type:text"`
+	OpenedAt               *time.Time `json:"opened_at,omitempty"`
+	LastFleetRunAt         *time.Time `json:"last_fleet_run_at,omitempty"`
+	AvgMigrationDurationMs int64    `gorm:"not null;default:0" json:"avg_migration_duration_ms"`
+	UpdatedAt              time.Time
 }
 
 func (FleetMigrationState) TableName() string { return "fleet_migration_state" }
@@ -80,6 +82,23 @@ func LastFleetCircuitReason() string {
 		return ""
 	}
 	return row.CircuitReason
+}
+
+// RecordFleetRunComplete guarda métricas del último ciclo fleet.
+func RecordFleetRunComplete(avgDurationMs int64) {
+	if CentralDB == nil {
+		return
+	}
+	_ = EnsureFleetMigrationState()
+	now := time.Now()
+	updates := map[string]interface{}{
+		"last_fleet_run_at": now,
+		"updated_at":      now,
+	}
+	if avgDurationMs > 0 {
+		updates["avg_migration_duration_ms"] = avgDurationMs
+	}
+	_ = CentralDB.Model(&FleetMigrationState{}).Where("id = ?", 1).Updates(updates).Error
 }
 
 // ResetFleetCircuitBreaker reanuda fleet tras intervención ops.

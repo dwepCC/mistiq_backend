@@ -254,6 +254,10 @@ func (s *BillingService) EnqueueSendToSUNAT(saleID uint, tenantID uint, tenantSl
 		}
 		switch inv.JobStatus {
 		case billingqueue.StatusPending, billingqueue.StatusProcessing, billingqueue.StatusRetrying:
+			// Borrador con payload (NC/ND recién creadas): aún no hay job en Redis.
+			if billingstate.NormalizePipeline(inv.PipelineStatus) == billingstate.DRAFT {
+				break
+			}
 			return nil
 		case billingqueue.StatusSent:
 			if billingstate.HasAcceptanceEvidence(&inv) {

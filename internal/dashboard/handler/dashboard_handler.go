@@ -5,6 +5,7 @@ import (
 
 	"tukifac/config"
 	"tukifac/pkg/database"
+	"tukifac/pkg/salescope"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
@@ -38,16 +39,16 @@ func (h *DashboardHandler) Home(c fiber.Ctx) error {
 	var salesCount, purchasesCount int64
 	tdb.Model(&database.TenantContact{}).Where("active = ?", true).Count(&contactsCount)
 	tdb.Model(&database.TenantProduct{}).Where("active = ?", true).Count(&productsCount)
-	tdb.Model(&database.TenantSale{}).Where("status != ?", "cancelled").Count(&salesCount)
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).Where("status != ?", "cancelled").Count(&salesCount)
 	tdb.Model(&database.TenantPurchase{}).Count(&purchasesCount)
 
 	// Ventas del mes
 	var monthSalesTotal float64
 	var monthSalesCount int64
-	tdb.Model(&database.TenantSale{}).
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date < ? AND status != ?", monthStart, monthEnd, "cancelled").
 		Count(&monthSalesCount)
-	tdb.Model(&database.TenantSale{}).
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date < ? AND status != ?", monthStart, monthEnd, "cancelled").
 		Select("COALESCE(SUM(total), 0)").Scan(&monthSalesTotal)
 
@@ -71,7 +72,7 @@ func (h *DashboardHandler) Home(c fiber.Ctx) error {
 		start := time.Date(now.Year(), time.Month(i), 1, 0, 0, 0, 0, time.Local)
 		end := start.AddDate(0, 1, 0)
 		var sum float64
-		tdb.Model(&database.TenantSale{}).
+		salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
 			Where("issue_date >= ? AND issue_date < ? AND status != ?", start, end, "cancelled").
 			Select("COALESCE(SUM(total), 0)").Scan(&sum)
 		monthly[i-1] = MonthStat{Label: labels[i-1], Amount: sum}

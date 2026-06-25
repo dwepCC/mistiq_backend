@@ -68,12 +68,60 @@ func (s *CompanyService) SaveConfig(input database.TenantCompanyConfig) error {
 		"currency":         input.Currency,
 		"tax_rate":         input.TaxRate,
 		"additional_notes": strings.TrimSpace(input.AdditionalNotes),
+		"detraction_bn_account":            strings.TrimSpace(input.DetractionBNAccount),
+		"detraction_default_payment_method": normalizeDetractionPaymentMethod(input.DetractionDefaultPaymentMethod),
 	}
 	// color_theme solo desde panel tenant; Tukichef y otros clientes no deben vaciarlo.
 	if strings.TrimSpace(input.ColorTheme) != "" {
 		updates["color_theme"] = input.ColorTheme
 	}
 	return s.db.Model(&existing).Updates(updates).Error
+}
+
+func normalizeDetractionPaymentMethod(raw string) string {
+	code := strings.TrimSpace(raw)
+	if code == "" {
+		return "001"
+	}
+	return code
+}
+
+// SaveReceiptWallet guarda QR Yape/Plin y cuentas bancarias visibles en comprobantes.
+func (s *CompanyService) SaveReceiptWallet(provider, phone, qrURL string, showOnA4, showOnTicket bool, bankAccountIDs []uint) error {
+	var existing database.TenantCompanyConfig
+	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("configure primero los datos generales de la empresa")
+	}
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	phone = strings.TrimSpace(phone)
+	qrURL = strings.TrimSpace(qrURL)
+	if provider != "" && (phone == "" || qrURL == "") {
+		return errors.New("indique número y QR si elige Yape o Plin")
+	}
+	if provider != "" && provider != "yape" && provider != "plin" {
+		return errors.New("billetera inválida (use yape o plin)")
+	}
+	const maxInlineDataURL = 120_000
+	if strings.HasPrefix(qrURL, "data:") && len(qrURL) > maxInlineDataURL {
+		return errors.New("el QR es demasiado grande: use el botón Subir QR (se guardará como archivo en el servidor)")
+	}
+	return s.db.Model(&existing).Updates(map[string]interface{}{
+		"wallet_provider":            provider,
+		"wallet_phone":               phone,
+		"wallet_qr_url":              qrURL,
+		"wallet_show_on_a4":          showOnA4,
+		"wallet_show_on_ticket":      showOnTicket,
+		"receipt_bank_account_ids":   EncodeReceiptBankAccountIDs(bankAccountIDs),
+	}).Error
+}
+
+// UpdateWalletQrURL persiste solo la ruta pública del QR (/uploads/tenants/{RUC}/receipts/...).
+func (s *CompanyService) UpdateWalletQrURL(url string) error {
+	var existing database.TenantCompanyConfig
+	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("configure primero los datos generales de la empresa")
+	}
+	return s.db.Model(&existing).Update("wallet_qr_url", strings.TrimSpace(url)).Error
 }
 
 // SaveSunatConfigTenant guarda solo los campos que el tenant puede editar: IGV, régimen, zona beneficio.
@@ -83,7 +131,9 @@ func (s *CompanyService) SaveSunatConfigTenant(taxRate float64, igvRegime string
 	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return errors.New("configure primero los datos generales de la empresa")
 	}
-	if taxRate <= 0 {
+	switch taxRate {
+	case 18, 10.5:
+	default:
 		taxRate = 18
 	}
 	if igvRegime == "" {
@@ -101,7 +151,7 @@ func (s *CompanyService) SyncFacturadorConfig() error {
 }
 
 // SyncFacturadorConfigWithFiles envía configuración al facturador.
-// Certificados: PFX (.pfx/.p12) o PEM (combinado o clave + cert) se normalizan al formato Greenter antes del envío.
+// PFX o PEM se convierten en Go a certificate_base64 (PEM combinado) como espera Lycet.
 func (s *CompanyService) SyncFacturadorConfigWithFiles(certificateBase64, privateKeyBase64, logoBase64, solUserOverride, solPassOverride, certPassword, pfxBase64 string) error {
 	return s.syncFacturador(certificateBase64, privateKeyBase64, logoBase64, solUserOverride, solPassOverride, certPassword, pfxBase64)
 }
@@ -233,6 +283,9 @@ func (s *CompanyService) CreateSeries(branchID uint, docType, sunatCode, categor
 		sunatCode = "01"
 	}
 	seriesName = docseries.NormalizeSeriesCode(seriesName)
+	if err := docseries.ValidateSeriesConfig(category, sunatCode, seriesName); err != nil {
+		return err
+	}
 	if err := s.assertSeriesCodeUnique(seriesName, 0); err != nil {
 		return err
 	}
@@ -340,7 +393,29 @@ func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, d
 			return err
 		}
 	}
-	updates := map[string]interface{}{"series": seriesName, "active": active}
+	var existing database.TenantDocumentSeries
+	if err := s.db.First(&existing, id).Error; err != nil {
+		return err
+	}
+	finalName := existing.Series
+	if seriesName != "" {
+		finalName = seriesName
+	}
+	finalCat := existing.Category
+	if category != "" {
+		finalCat = category
+	}
+	finalSunat := existing.SunatCode
+	if sunatCode != "" {
+		finalSunat = sunatCode
+	}
+	if err := docseries.ValidateSeriesConfig(finalCat, finalSunat, finalName); err != nil {
+		return err
+	}
+	updates := map[string]interface{}{"active": active}
+	if seriesName != "" {
+		updates["series"] = seriesName
+	}
 	if docType != "" {
 		updates["doc_type"] = docType
 	}

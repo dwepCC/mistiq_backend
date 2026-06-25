@@ -2,10 +2,13 @@ package service
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
+	"tukifac/internal/sales/nvdisplay"
 	"tukifac/pkg/database"
+	"tukifac/pkg/salescope"
 
 	"gorm.io/gorm"
 )
@@ -18,6 +21,34 @@ type SessionReport struct {
 	CancelledSalesDetail []CancelledSaleRow     `json:"cancelled_sales_detail"`
 	TotalsByMethod       TotalsByMethodReport   `json:"totals_by_method"`
 	Totals               SessionTotals          `json:"totals"`
+	CashPhysical         SessionCashPhysical    `json:"cash_physical"`
+	Electronic           SessionElectronic      `json:"electronic"`
+	Detraction           SessionDetraction      `json:"detraction"`
+}
+
+// SessionDetraction ventas con detracción BN (SPOT): informativo, sin impacto en arqueo.
+type SessionDetraction struct {
+	TotalSPOT float64           `json:"total_spot"`
+	Sales     []IncomeDetailRow `json:"sales"`
+}
+
+// SessionCashPhysical resumen y detalle de caja física (solo efectivo).
+type SessionCashPhysical struct {
+	OpeningBalance  float64            `json:"opening_balance"`
+	TotalIncome     float64            `json:"total_income"`
+	TotalExpense    float64            `json:"total_expense"`
+	PhysicalBalance float64            `json:"physical_balance"`
+	SalesTotal      float64            `json:"sales_total"`
+	CashSales       []IncomeDetailRow  `json:"cash_sales"`
+	ManualIncome    []IncomeDetailRow  `json:"manual_income"`
+	Expenses        []ExpenseDetailRow `json:"expenses"`
+}
+
+// SessionElectronic ventas por medios no efectivos (Yape, Plin, tarjeta, etc.).
+type SessionElectronic struct {
+	TotalSales    float64           `json:"total_sales"`
+	SalesByMethod []MethodTotal     `json:"sales_by_method"`
+	Sales         []IncomeDetailRow `json:"sales"`
 }
 
 type SessionReportHeader struct {
@@ -73,11 +104,14 @@ type MethodTotal struct {
 }
 
 type SessionTotals struct {
-	TotalIncome    float64 `json:"total_income"`
-	TotalExpense   float64 `json:"total_expense"`
-	TotalSales     float64 `json:"total_sales"`
-	TotalPurchases float64 `json:"total_purchases"`
-	FinalBalance   float64 `json:"final_balance"`
+	TotalIncome          float64 `json:"total_income"`
+	TotalExpense         float64 `json:"total_expense"`
+	TotalSales           float64 `json:"total_sales"` // cobrado directo (sin SPOT)
+	TotalSalesDirect     float64 `json:"total_sales_direct"`
+	TotalDetractionSpot  float64 `json:"total_detraccion_spot"`
+	TotalSalesCommercial float64 `json:"total_sales_commercial"` // directo + SPOT
+	TotalPurchases       float64 `json:"total_purchases"`
+	FinalBalance         float64 `json:"final_balance"`
 }
 
 // MovementReportRow es una fila del reporte de movimientos.
@@ -97,12 +131,29 @@ type MovementReportRow struct {
 	NotesDetail   string    `json:"notes_detail"`    // notas del movimiento en caja
 }
 
-// MovementReportSummary totales sobre todos los movimientos que cumplen el filtro (no solo la página).
-type MovementReportSummary struct {
-	TotalRows    int64   `json:"total_rows"`
-	SumIncome    float64 `json:"sum_income"`    // suma montos tipo income (positivos en BD)
-	SumExpense   float64 `json:"sum_expense"`   // suma montos tipo expense (positivos en BD)
-	NetMovement  float64 `json:"net_movement"`  // ingresos − egresos (impacto de caja)
+// MovementChannelSummary totales de un canal (efectivo o electrónico).
+type MovementChannelSummary struct {
+	TotalRows       int64         `json:"total_rows"`
+	SumIncome       float64       `json:"sum_income"`
+	SumExpense      float64       `json:"sum_expense"`
+	NetMovement     float64       `json:"net_movement"`
+	OpeningBalance  *float64      `json:"opening_balance,omitempty"`
+	PhysicalBalance *float64      `json:"physical_balance,omitempty"`
+	SalesByMethod   []MethodTotal `json:"sales_by_method,omitempty"`
+}
+
+// MovementChannelBlock filas paginadas y resumen de un canal.
+type MovementChannelBlock struct {
+	Data    []MovementReportRow    `json:"data"`
+	Total   int64                  `json:"total"`
+	Summary MovementChannelSummary `json:"summary"`
+}
+
+// MovementsReportSplit respuesta separada: caja física, electrónico y detracción SPOT.
+type MovementsReportSplit struct {
+	Cash       MovementChannelBlock `json:"cash"`
+	Electronic MovementChannelBlock `json:"electronic"`
+	Detraction MovementChannelBlock `json:"detraction"`
 }
 
 // MovementReportFilters filtros para el reporte de movimientos.
@@ -136,11 +187,7 @@ func (s *CashBankService) movementReportFilteredDB(f MovementReportFilters) *gor
 		q = q.Where("tenant_cash_movements.type = ?", f.MovementType)
 	}
 	if f.PaymentMethod != "" {
-		method := NormalizePaymentMethod(f.PaymentMethod)
-		q = q.Where(
-			"LOWER(TRIM(tenant_cash_movements.payment_method)) IN (?, ?) OR tenant_cash_movements.payment_method = ?",
-			method, strings.ToLower(strings.TrimSpace(f.PaymentMethod)), f.PaymentMethod,
-		)
+		q = applyPaymentMethodFilter(q, "tenant_cash_movements.payment_method", f.PaymentMethod)
 	}
 	if f.DateFrom != nil {
 		q = q.Where("tenant_cash_movements.created_at >= ?", f.DateFrom)
@@ -149,13 +196,6 @@ func (s *CashBankService) movementReportFilteredDB(f MovementReportFilters) *gor
 		q = q.Where("tenant_cash_movements.created_at <= ?", f.DateTo)
 	}
 	return q
-}
-
-func (s *CashBankService) sumMovementAmountByType(f MovementReportFilters, typ string) float64 {
-	var sum float64
-	q := s.movementReportFilteredDB(f).Where("tenant_cash_movements.type = ?", typ)
-	_ = q.Select("COALESCE(SUM(tenant_cash_movements.amount),0)").Scan(&sum).Error
-	return sum
 }
 
 // GetSessionReport genera el reporte de cierre para una sesión de caja.
@@ -201,63 +241,102 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 	manualIncomeByMethod := make(map[string]float64)
 	manualExpenseByMethod := make(map[string]float64)
 
-	var saleIDs []uint
-	for _, m := range movements {
-		if m.SaleID != nil {
-			saleIDs = append(saleIDs, *m.SaleID)
-		}
+	var sessionSales []database.TenantSale
+	if err := s.db.Where("cash_session_id = ? AND status NOT IN ?", sessionID, []string{"cancelled", "draft"}).
+		Order("created_at ASC").Find(&sessionSales).Error; err != nil {
+		return nil, err
 	}
-
+	orphanSales, _ := s.listOrphanSalesForSession(&session)
+	seenSale := make(map[uint]struct{}, len(sessionSales))
+	for _, sale := range sessionSales {
+		seenSale[sale.ID] = struct{}{}
+	}
+	for _, sale := range orphanSales {
+		if _, ok := seenSale[sale.ID]; ok {
+			continue
+		}
+		sessionSales = append(sessionSales, sale)
+	}
+	salesMap := make(map[uint]database.TenantSale, len(sessionSales))
+	saleIDs := make([]uint, 0, len(sessionSales))
+	for _, sale := range sessionSales {
+		salesMap[sale.ID] = sale
+		saleIDs = append(saleIDs, sale.ID)
+	}
+	displayDocNumbers := nvdisplay.LoadDisplayNumbersBySaleID(s.db, saleIDs)
 	if len(saleIDs) > 0 {
 		var payments []database.TenantSalePayment
-		s.db.Where("sale_id IN ?", saleIDs).Find(&payments)
-		for _, p := range payments {
-			salesByMethod[normalizeMethod(p.Method)] += p.Amount
-		}
-		var sales []database.TenantSale
-		s.db.Where("id IN ?", saleIDs).Find(&sales)
+		s.db.Where("sale_id IN ?", saleIDs).Order("created_at ASC").Find(&payments)
 		paidBySale := make(map[uint]float64)
 		for _, p := range payments {
+			meth := normalizeReportMethod(p.Method)
+			sale := salesMap[p.SaleID]
+			if IsDetractionPaymentMethod(meth) || IsDetractionPaymentMethod(p.Method) {
+				report.Totals.TotalDetractionSpot += p.Amount
+				report.Totals.TotalSalesCommercial += p.Amount
+				report.Detraction.TotalSPOT += p.Amount
+				report.Detraction.Sales = append(report.Detraction.Sales, IncomeDetailRow{
+					Date:          p.CreatedAt,
+					Type:          "detraccion_spot",
+					DocNumber:     displayDocNumbers[sale.ID],
+					Reference:     p.Reference,
+					Amount:        p.Amount,
+					PaymentMethod: meth,
+				})
+				continue
+			}
+			salesByMethod[meth] += p.Amount
+			report.Totals.TotalSales += p.Amount
+			report.Totals.TotalSalesDirect += p.Amount
+			report.Totals.TotalSalesCommercial += p.Amount
 			paidBySale[p.SaleID] += p.Amount
+			report.IncomeDetail = append(report.IncomeDetail, IncomeDetailRow{
+				Date:          p.CreatedAt,
+				Type:          "venta",
+				DocNumber:     displayDocNumbers[sale.ID],
+				Reference:     p.Reference,
+				Amount:        p.Amount,
+				PaymentMethod: meth,
+			})
 		}
-		for _, sale := range sales {
+		for _, sale := range sessionSales {
 			if paidBySale[sale.ID] == 0 && sale.Total != 0 {
-				meth := normalizeMethod(sale.PaymentMethod)
-				if meth == "" {
-					meth = "efectivo"
+				meth := normalizeReportMethod(sale.PaymentMethod)
+				if IsDetractionPaymentMethod(meth) {
+					continue
 				}
 				salesByMethod[meth] += sale.Total
+				report.Totals.TotalSales += sale.Total
+				report.Totals.TotalSalesDirect += sale.Total
+				report.Totals.TotalSalesCommercial += sale.Total
+				report.IncomeDetail = append(report.IncomeDetail, IncomeDetailRow{
+					Date:          sale.CreatedAt,
+					Type:          "venta",
+					DocNumber:     displayDocNumbers[sale.ID],
+					Amount:        sale.Total,
+					PaymentMethod: meth,
+				})
 			}
 		}
 	}
 
 	for _, m := range movements {
-		paymentMethod := normalizeMethod(m.PaymentMethod)
-		if paymentMethod == "" {
-			paymentMethod = "efectivo"
-		}
+		paymentMethod := normalizeReportMethod(m.PaymentMethod)
 
 		if m.Type == "income" {
 			report.Totals.TotalIncome += m.Amount
-			row := IncomeDetailRow{Date: m.CreatedAt, Amount: m.Amount, PaymentMethod: paymentMethod}
 			if m.SaleID != nil {
-				row.Type = "venta"
-				report.Totals.TotalSales += m.Amount
-				var sale database.TenantSale
-				if s.db.First(&sale, *m.SaleID).Error == nil {
-					row.DocNumber = sale.Number
-				}
-				report.IncomeDetail = append(report.IncomeDetail, row)
-			} else {
-				if m.Category == "ingreso_manual" || m.Category == "Ingreso manual" {
-					row.Type = "ingreso_manual"
-				} else {
-					row.Type = "otro"
-				}
-				row.Reference = m.Reference
-				manualIncomeByMethod[paymentMethod] += m.Amount
-				report.IncomeDetail = append(report.IncomeDetail, row)
+				continue
 			}
+			row := IncomeDetailRow{Date: m.CreatedAt, Amount: m.Amount, PaymentMethod: paymentMethod}
+			if m.Category == "ingreso_manual" || m.Category == "Ingreso manual" {
+				row.Type = "ingreso_manual"
+			} else {
+				row.Type = "otro"
+			}
+			row.Reference = m.Reference
+			manualIncomeByMethod[paymentMethod] += m.Amount
+			report.IncomeDetail = append(report.IncomeDetail, row)
 		} else {
 			report.Totals.TotalExpense += m.Amount
 			row := ExpenseDetailRow{Date: m.CreatedAt, Amount: m.Amount, PaymentMethod: paymentMethod}
@@ -301,7 +380,7 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 		row := CancelledSaleRow{
 			Date:          m.CreatedAt,
 			Amount:        m.Amount,
-			PaymentMethod: normalizeMethod(m.PaymentMethod),
+			PaymentMethod: normalizeReportMethod(m.PaymentMethod),
 			Reason:        strings.TrimSpace(m.Notes),
 		}
 		if m.SaleID != nil {
@@ -319,26 +398,50 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 		report.CancelledSalesDetail = append(report.CancelledSalesDetail, row)
 	}
 
+	populateSessionReportSections(report)
 	return report, nil
 }
 
-func normalizeMethod(m string) string {
-	if m == "" {
-		return "efectivo"
+func populateSessionReportSections(r *SessionReport) {
+	cashSales := make([]IncomeDetailRow, 0)
+	electronicSales := make([]IncomeDetailRow, 0)
+	manualIncome := make([]IncomeDetailRow, 0)
+	electronicByMethod := make(map[string]float64)
+	var cashSalesTotal, electronicTotal float64
+
+	for _, row := range r.IncomeDetail {
+		switch row.Type {
+		case "venta":
+			if IsDetractionPaymentMethod(row.PaymentMethod) {
+				continue
+			}
+			if IsCashPaymentMethod(row.PaymentMethod) {
+				cashSales = append(cashSales, row)
+				cashSalesTotal += row.Amount
+			} else {
+				electronicSales = append(electronicSales, row)
+				electronicTotal += row.Amount
+				electronicByMethod[row.PaymentMethod] += row.Amount
+			}
+		default:
+			manualIncome = append(manualIncome, row)
+		}
 	}
-	switch m {
-	case "Efectivo", "efectivo":
-		return "efectivo"
-	case "Yape", "yape":
-		return "yape"
-	case "Plin", "plin":
-		return "plin"
-	case "Tarjeta", "tarjeta":
-		return "tarjeta"
-	case "Transferencia", "transferencia":
-		return "transferencia"
-	default:
-		return m
+
+	r.CashPhysical = SessionCashPhysical{
+		OpeningBalance:  r.Session.OpeningBalance,
+		TotalIncome:     r.Totals.TotalIncome,
+		TotalExpense:    r.Totals.TotalExpense,
+		PhysicalBalance: r.Totals.FinalBalance,
+		SalesTotal:      cashSalesTotal,
+		CashSales:       cashSales,
+		ManualIncome:    manualIncome,
+		Expenses:        append([]ExpenseDetailRow{}, r.ExpenseDetail...),
+	}
+	r.Electronic = SessionElectronic{
+		TotalSales:    electronicTotal,
+		SalesByMethod: mapToMethodTotals(electronicByMethod),
+		Sales:         electronicSales,
 	}
 }
 
@@ -352,43 +455,368 @@ func mapToMethodTotals(m map[string]float64) []MethodTotal {
 	return out
 }
 
-// ListMovementsReport devuelve el listado de movimientos con filtros, total y resumen (ingresos/egresos en el rango filtrado).
-func (s *CashBankService) ListMovementsReport(f MovementReportFilters) ([]MovementReportRow, int64, MovementReportSummary, error) {
+// ListMovementsReport devuelve movimientos separados: caja física (efectivo) y medios electrónicos.
+func (s *CashBankService) ListMovementsReport(f MovementReportFilters) (MovementsReportSplit, error) {
+	saleRows, err := s.buildSalePaymentMovementRows(f)
+	if err != nil {
+		return MovementsReportSplit{}, err
+	}
+	cashRows, err := s.buildCashMovementReportRows(f)
+	if err != nil {
+		return MovementsReportSplit{}, err
+	}
+
+	all := append(saleRows, cashRows...)
+	sortMovementRowsDesc(all)
+
+	var cashChannel, electronicChannel, detractionChannel []MovementReportRow
+	for _, row := range all {
+		ch := movementRowChannel(row)
+		switch ch {
+		case "detraction":
+			detractionChannel = append(detractionChannel, row)
+		case "electronic":
+			electronicChannel = append(electronicChannel, row)
+		default:
+			cashChannel = append(cashChannel, row)
+		}
+	}
+
+	var opening *float64
+	if f.SessionID > 0 {
+		var sess database.TenantCashSession
+		if s.db.First(&sess, f.SessionID).Error == nil {
+			ob := sess.OpeningBalance
+			opening = &ob
+		}
+	}
+
+	// Los canales cash/electronic siempre devuelven todas las filas; la paginación
+	// compartida vaciaba el bloque electrónico cuando había muchas filas de efectivo.
+	return MovementsReportSplit{
+		Cash:       buildMovementChannelBlock(cashChannel, 0, 0, opening),
+		Electronic: buildMovementChannelBlock(electronicChannel, 0, 0, nil),
+		Detraction: buildMovementChannelBlock(detractionChannel, 0, 0, nil),
+	}, nil
+}
+
+func buildMovementChannelBlock(rows []MovementReportRow, limit, offset int, opening *float64) MovementChannelBlock {
+	salesByMethod := make(map[string]float64)
+	var sumIn, sumEx float64
+	for _, r := range rows {
+		if r.Amount >= 0 {
+			sumIn += r.Amount
+			if r.Type == "venta" {
+				salesByMethod[r.PaymentMethod] += r.Amount
+			}
+		} else {
+			sumEx += -r.Amount
+		}
+	}
+	net := sumIn - sumEx
+	summary := MovementChannelSummary{
+		TotalRows:     int64(len(rows)),
+		SumIncome:     sumIn,
+		SumExpense:    sumEx,
+		NetMovement:   net,
+		SalesByMethod: mapToMethodTotals(salesByMethod),
+	}
+	if opening != nil {
+		summary.OpeningBalance = opening
+		pb := *opening + net
+		summary.PhysicalBalance = &pb
+	}
+
+	data := rows
+	if limit > 0 {
+		start := offset
+		if start > len(rows) {
+			data = []MovementReportRow{}
+		} else {
+			end := start + limit
+			if end > len(rows) {
+				end = len(rows)
+			}
+			data = rows[start:end]
+		}
+	}
+
+	return MovementChannelBlock{
+		Data:    data,
+		Total:   int64(len(rows)),
+		Summary: summary,
+	}
+}
+
+func sortMovementRowsDesc(rows []MovementReportRow) {
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Date.After(rows[j].Date)
+	})
+}
+
+type salePayRow struct {
+	PaymentID         uint
+	SaleID            uint
+	Method            string
+	Amount            float64
+	Reference         string
+	Notes             string
+	CreatedAt         time.Time
+	SaleNumber        string
+	SaleUserID        uint
+	ContactID         *uint
+	CashSessionID     uint
+	SalePaymentMethod string
+	SaleCreatedAt     time.Time
+	BranchID          uint
+}
+
+// listOrphanSalesForSession ventas del turno sin cash_session_id (histórico antes del fix).
+func (s *CashBankService) listOrphanSalesForSession(session *database.TenantCashSession) ([]database.TenantSale, error) {
+	if session == nil || session.ID == 0 {
+		return nil, nil
+	}
+	q := salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
+		Where("(cash_session_id IS NULL OR cash_session_id = 0)").
+		Where("user_id = ? AND branch_id = ?", sessionOwnerID(session), session.BranchID).
+		Where("created_at >= ?", session.OpenedAt).
+		Where("status NOT IN ?", []string{"cancelled", "draft"})
+	if session.ClosedAt != nil {
+		q = q.Where("created_at <= ?", *session.ClosedAt)
+	}
+	var sales []database.TenantSale
+	err := q.Order("created_at ASC").Find(&sales).Error
+	return sales, err
+}
+
+func (s *CashBankService) scanOrphanSalePaymentRows(f MovementReportFilters) ([]salePayRow, error) {
+	var session database.TenantCashSession
+	if err := s.db.First(&session, f.SessionID).Error; err != nil {
+		return nil, nil
+	}
+	q := s.db.Table("tenant_sale_payments").
+		Select(`tenant_sale_payments.id AS payment_id, tenant_sale_payments.sale_id, tenant_sale_payments.method,
+			tenant_sale_payments.amount, tenant_sale_payments.reference, tenant_sale_payments.notes, tenant_sale_payments.created_at,
+			tenant_sales.number AS sale_number, tenant_sales.user_id AS sale_user_id, tenant_sales.contact_id,
+			? AS cash_session_id, tenant_sales.payment_method AS sale_payment_method, tenant_sales.created_at AS sale_created_at,
+			? AS branch_id`, f.SessionID, session.BranchID).
+		Joins("JOIN tenant_sales ON tenant_sales.id = tenant_sale_payments.sale_id").
+		Where("(tenant_sales.cash_session_id IS NULL OR tenant_sales.cash_session_id = 0)").
+		Scopes(salescope.ScopeCommercial("tenant_sales")).
+		Where("tenant_sales.user_id = ? AND tenant_sales.branch_id = ?", sessionOwnerID(&session), session.BranchID).
+		Where("tenant_sales.created_at >= ?", session.OpenedAt).
+		Where("tenant_sales.status NOT IN ?", []string{"cancelled", "draft"})
+	if session.ClosedAt != nil {
+		q = q.Where("tenant_sales.created_at <= ?", *session.ClosedAt)
+	}
+	if f.UserID > 0 {
+		q = q.Where("tenant_sales.user_id = ?", f.UserID)
+	}
+	if f.PaymentMethod != "" {
+		q = applyPaymentMethodFilter(q, "tenant_sale_payments.method", f.PaymentMethod)
+	}
+	var rows []salePayRow
+	err := q.Order("tenant_sale_payments.created_at DESC").Scan(&rows).Error
+	return rows, err
+}
+
+func (s *CashBankService) buildSalePaymentMovementRows(f MovementReportFilters) ([]MovementReportRow, error) {
+	if f.MovementType == "expense" {
+		return nil, nil
+	}
+	q := s.db.Table("tenant_sale_payments").
+		Select(`tenant_sale_payments.id AS payment_id, tenant_sale_payments.sale_id, tenant_sale_payments.method,
+			tenant_sale_payments.amount, tenant_sale_payments.reference, tenant_sale_payments.notes, tenant_sale_payments.created_at,
+			tenant_sales.number AS sale_number, tenant_sales.user_id AS sale_user_id, tenant_sales.contact_id,
+			tenant_sales.cash_session_id, tenant_sales.payment_method AS sale_payment_method, tenant_sales.created_at AS sale_created_at,
+			tenant_cash_sessions.branch_id`).
+		Joins("JOIN tenant_sales ON tenant_sales.id = tenant_sale_payments.sale_id").
+		Joins("JOIN tenant_cash_sessions ON tenant_cash_sessions.id = tenant_sales.cash_session_id").
+		Where("tenant_sales.cash_session_id > 0").
+		Where("tenant_sales.status NOT IN ?", []string{"cancelled", "draft"})
+
+	if f.SessionID > 0 {
+		q = q.Where("tenant_sales.cash_session_id = ?", f.SessionID)
+	}
+	if f.BranchID > 0 {
+		q = q.Where("tenant_cash_sessions.branch_id = ?", f.BranchID)
+	}
+	if f.UserID > 0 {
+		q = q.Where("tenant_sales.user_id = ?", f.UserID)
+	}
+	if f.DateFrom != nil {
+		q = q.Where("tenant_sales.created_at >= ?", f.DateFrom)
+	}
+	if f.DateTo != nil {
+		q = q.Where("tenant_sales.created_at <= ?", f.DateTo)
+	}
+	if f.PaymentMethod != "" {
+		q = applyPaymentMethodFilter(q, "tenant_sale_payments.method", f.PaymentMethod)
+	}
+
+	var payRows []salePayRow
+	if err := q.Order("tenant_sale_payments.created_at DESC").Scan(&payRows).Error; err != nil {
+		return nil, err
+	}
+	if f.SessionID > 0 {
+		extra, err := s.scanOrphanSalePaymentRows(f)
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[uint]struct{}, len(payRows))
+		for _, p := range payRows {
+			seen[p.PaymentID] = struct{}{}
+		}
+		for _, p := range extra {
+			if _, ok := seen[p.PaymentID]; ok {
+				continue
+			}
+			payRows = append(payRows, p)
+		}
+	}
+
+	userIDs := make(map[uint]struct{})
+	contactIDs := make(map[uint]struct{})
+	branchIDs := make(map[uint]struct{})
+	for _, p := range payRows {
+		userIDs[p.SaleUserID] = struct{}{}
+		if p.ContactID != nil {
+			contactIDs[*p.ContactID] = struct{}{}
+		}
+		branchIDs[p.BranchID] = struct{}{}
+	}
+	users := loadUserNamesMap(s.db, userIDs)
+	contacts := loadContactNamesMap(s.db, contactIDs)
+	branches := loadBranchNamesMap(s.db, branchIDs)
+
+	saleIDsForDisplay := make([]uint, 0, len(payRows))
+	for _, p := range payRows {
+		saleIDsForDisplay = append(saleIDsForDisplay, p.SaleID)
+	}
+
+	rows := make([]MovementReportRow, 0, len(payRows))
+
+	// Ventas legacy sin líneas en tenant_sale_payments
+	legacyQ := s.db.Model(&database.TenantSale{}).
+		Joins("JOIN tenant_cash_sessions ON tenant_cash_sessions.id = tenant_sales.cash_session_id").
+		Where("tenant_sales.cash_session_id > 0").
+		Where("tenant_sales.status NOT IN ?", []string{"cancelled", "draft"}).
+		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments sp WHERE sp.sale_id = tenant_sales.id)")
+	if f.SessionID > 0 {
+		legacyQ = legacyQ.Where("tenant_sales.cash_session_id = ?", f.SessionID)
+	}
+	if f.BranchID > 0 {
+		legacyQ = legacyQ.Where("tenant_cash_sessions.branch_id = ?", f.BranchID)
+	}
+	if f.UserID > 0 {
+		legacyQ = legacyQ.Where("tenant_sales.user_id = ?", f.UserID)
+	}
+	if f.DateFrom != nil {
+		legacyQ = legacyQ.Where("tenant_sales.created_at >= ?", f.DateFrom)
+	}
+	if f.DateTo != nil {
+		legacyQ = legacyQ.Where("tenant_sales.created_at <= ?", f.DateTo)
+	}
+	if f.PaymentMethod != "" {
+		legacyQ = applyPaymentMethodFilter(legacyQ, "tenant_sales.payment_method", f.PaymentMethod)
+	}
+	var legacySales []database.TenantSale
+	if err := legacyQ.Order("tenant_sales.created_at DESC").Find(&legacySales).Error; err != nil {
+		return nil, err
+	}
+	for _, sale := range legacySales {
+		saleIDsForDisplay = append(saleIDsForDisplay, sale.ID)
+	}
+	displayDocNumbers := nvdisplay.LoadDisplayNumbersBySaleID(s.db, saleIDsForDisplay)
+
+	for _, p := range payRows {
+		meth := normalizeReportMethod(p.Method)
+		contactName := ""
+		if p.ContactID != nil {
+			contactName = contacts[*p.ContactID]
+		}
+		docNum := displayDocNumbers[p.SaleID]
+		if docNum == "" {
+			docNum = p.SaleNumber
+		}
+		rows = append(rows, MovementReportRow{
+			Date:          p.CreatedAt,
+			Type:          "venta",
+			DocNumber:     docNum,
+			ContactName:   contactName,
+			UserName:      users[p.SaleUserID],
+			BranchName:    branches[p.BranchID],
+			PaymentMethod: meth,
+			Amount:        p.Amount,
+			MovementID:    salePaymentMovementID(p.PaymentID),
+			CashSessionID: p.CashSessionID,
+			Category:      "Venta",
+			CashReference: p.Reference,
+			NotesDetail:   p.Notes,
+		})
+	}
+
+	// Ventas legacy sin líneas en tenant_sale_payments
+	for _, sale := range legacySales {
+		if sale.CashSessionID == nil {
+			continue
+		}
+		meth := normalizeReportMethod(sale.PaymentMethod)
+		contactName := ""
+		if sale.ContactID != nil {
+			var c database.TenantContact
+			if s.db.First(&c, *sale.ContactID).Error == nil {
+				contactName = contactDisplayName(c)
+			}
+		}
+		branchName := ""
+		var ses database.TenantCashSession
+		if s.db.First(&ses, *sale.CashSessionID).Error == nil {
+			var b database.TenantBranch
+			if s.db.First(&b, ses.BranchID).Error == nil {
+				branchName = b.Name
+			}
+		}
+		userName := ""
+		var u database.TenantUser
+		if s.db.First(&u, sale.UserID).Error == nil {
+			userName = u.Name
+		}
+		rows = append(rows, MovementReportRow{
+			Date:          sale.CreatedAt,
+			Type:          "venta",
+			DocNumber:     displayDocNumbers[sale.ID],
+			ContactName:   contactName,
+			UserName:      userName,
+			BranchName:    branchName,
+			PaymentMethod: meth,
+			Amount:        sale.Total,
+			MovementID:    salePaymentMovementID(sale.ID),
+			CashSessionID: *sale.CashSessionID,
+			Category:      "Venta",
+		})
+	}
+	return rows, nil
+}
+
+func (s *CashBankService) buildCashMovementReportRows(f MovementReportFilters) ([]MovementReportRow, error) {
 	base := s.movementReportFilteredDB(f)
-	var total int64
-	if err := base.Count(&total).Error; err != nil {
-		return nil, 0, MovementReportSummary{}, err
-	}
-
-	sumIn := s.sumMovementAmountByType(f, "income")
-	sumEx := s.sumMovementAmountByType(f, "expense")
-	summary := MovementReportSummary{
-		TotalRows:   total,
-		SumIncome:   sumIn,
-		SumExpense:  sumEx,
-		NetMovement: sumIn - sumEx,
-	}
-
-	q := s.movementReportFilteredDB(f).Select("tenant_cash_movements.*").Order("tenant_cash_movements.created_at DESC")
-	if f.Limit > 0 {
-		q = q.Offset(f.Offset).Limit(f.Limit)
-	}
-
+	// Las ventas se listan desde tenant_sale_payments; en caja física solo manuales, compras y anulaciones.
+	base = base.Where(
+		"(tenant_cash_movements.sale_id IS NULL OR tenant_cash_movements.sale_id = 0 OR tenant_cash_movements.type = ?)",
+		"expense",
+	)
 	var movements []database.TenantCashMovement
-	if err := q.Find(&movements).Error; err != nil {
-		return nil, 0, MovementReportSummary{}, err
+	if err := base.Order("tenant_cash_movements.created_at DESC").Find(&movements).Error; err != nil {
+		return nil, err
 	}
 
 	sessionIDs := make(map[uint]struct{})
 	userIDs := make(map[uint]struct{})
-	saleIDs := make(map[uint]struct{})
 	purchaseIDs := make(map[uint]struct{})
 	for _, m := range movements {
 		sessionIDs[m.CashSessionID] = struct{}{}
 		userIDs[m.UserID] = struct{}{}
-		if m.SaleID != nil {
-			saleIDs[*m.SaleID] = struct{}{}
-		}
 		if m.PurchaseID != nil {
 			purchaseIDs[*m.PurchaseID] = struct{}{}
 		}
@@ -402,46 +830,12 @@ func (s *CashBankService) ListMovementsReport(f MovementReportFilters) ([]Moveme
 			sessions[se.ID] = se
 		}
 	}
-
 	branchIDs := make(map[uint]struct{})
 	for _, ses := range sessions {
 		branchIDs[ses.BranchID] = struct{}{}
 	}
-	branches := make(map[uint]string)
-	if len(branchIDs) > 0 {
-		var branchList []database.TenantBranch
-		s.db.Where("id IN ?", keysUint(branchIDs)).Find(&branchList)
-		for _, b := range branchList {
-			branches[b.ID] = b.Name
-		}
-	}
-
-	users := make(map[uint]string)
-	if len(userIDs) > 0 {
-		var userList []database.TenantUser
-		s.db.Where("id IN ?", keysUint(userIDs)).Find(&userList)
-		for _, u := range userList {
-			users[u.ID] = u.Name
-		}
-	}
-
-	sales := make(map[uint]database.TenantSale)
-	if len(saleIDs) > 0 {
-		var list []database.TenantSale
-		s.db.Where("id IN ?", keysUint(saleIDs)).Find(&list)
-		for _, sa := range list {
-			sales[sa.ID] = sa
-		}
-	}
-	contactsBySale := make(map[uint]string)
-	for sid, sale := range sales {
-		if sale.ContactID != nil {
-			var c database.TenantContact
-			if s.db.First(&c, *sale.ContactID).Error == nil {
-				contactsBySale[sid] = contactDisplayName(c)
-			}
-		}
-	}
+	branches := loadBranchNamesMap(s.db, branchIDs)
+	users := loadUserNamesMap(s.db, userIDs)
 
 	purchases := make(map[uint]database.TenantPurchase)
 	if len(purchaseIDs) > 0 {
@@ -461,15 +855,6 @@ func (s *CashBankService) ListMovementsReport(f MovementReportFilters) ([]Moveme
 		}
 	}
 
-	salePayments := make(map[uint][]database.TenantSalePayment)
-	if len(saleIDs) > 0 {
-		var payList []database.TenantSalePayment
-		s.db.Where("sale_id IN ?", keysUint(saleIDs)).Find(&payList)
-		for _, p := range payList {
-			salePayments[p.SaleID] = append(salePayments[p.SaleID], p)
-		}
-	}
-
 	var rows []MovementReportRow
 	for _, m := range movements {
 		row := MovementReportRow{
@@ -484,30 +869,17 @@ func (s *CashBankService) ListMovementsReport(f MovementReportFilters) ([]Moveme
 		if m.Type == "expense" {
 			row.Amount = -m.Amount
 		}
-
 		if ses, ok := sessions[m.CashSessionID]; ok {
 			row.BranchName = branches[ses.BranchID]
 		}
 		row.UserName = users[m.UserID]
-		row.PaymentMethod = normalizeMethod(m.PaymentMethod)
-		if row.PaymentMethod == "" {
-			row.PaymentMethod = "efectivo"
-		}
+		row.PaymentMethod = normalizeReportMethod(m.PaymentMethod)
 
-		if m.SaleID != nil {
-			if m.Type == "expense" {
-				row.Type = "anulacion_venta"
-			} else {
-				row.Type = "venta"
-			}
-			if sale, ok := sales[*m.SaleID]; ok {
+		if m.SaleID != nil && m.Type == "expense" {
+			row.Type = "anulacion_venta"
+			var sale database.TenantSale
+			if s.db.First(&sale, *m.SaleID).Error == nil {
 				row.DocNumber = sale.Number
-				row.ContactName = contactsBySale[*m.SaleID]
-				if pays := salePayments[*m.SaleID]; len(pays) > 0 {
-					row.PaymentMethod = normalizeMethod(pays[0].Method)
-				} else {
-					row.PaymentMethod = normalizeMethod(sale.PaymentMethod)
-				}
 			}
 		} else if m.PurchaseID != nil {
 			row.Type = "compra"
@@ -526,7 +898,46 @@ func (s *CashBankService) ListMovementsReport(f MovementReportFilters) ([]Moveme
 		}
 		rows = append(rows, row)
 	}
-	return rows, total, summary, nil
+	return rows, nil
+}
+
+func loadUserNamesMap(db *gorm.DB, ids map[uint]struct{}) map[uint]string {
+	out := make(map[uint]string)
+	if len(ids) == 0 {
+		return out
+	}
+	var list []database.TenantUser
+	db.Where("id IN ?", keysUint(ids)).Find(&list)
+	for _, u := range list {
+		out[u.ID] = u.Name
+	}
+	return out
+}
+
+func loadBranchNamesMap(db *gorm.DB, ids map[uint]struct{}) map[uint]string {
+	out := make(map[uint]string)
+	if len(ids) == 0 {
+		return out
+	}
+	var list []database.TenantBranch
+	db.Where("id IN ?", keysUint(ids)).Find(&list)
+	for _, b := range list {
+		out[b.ID] = b.Name
+	}
+	return out
+}
+
+func loadContactNamesMap(db *gorm.DB, ids map[uint]struct{}) map[uint]string {
+	out := make(map[uint]string)
+	if len(ids) == 0 {
+		return out
+	}
+	var list []database.TenantContact
+	db.Where("id IN ?", keysUint(ids)).Find(&list)
+	for _, c := range list {
+		out[c.ID] = contactDisplayName(c)
+	}
+	return out
 }
 
 // SessionProductSoldRow producto vendido agregado por sesión de caja.
@@ -552,6 +963,7 @@ func (s *CashBankService) GetSessionProductsReport(sessionID uint) ([]SessionPro
 		Select(`tenant_sale_items.product_id, tenant_sale_items.code, tenant_sale_items.description,
 			SUM(tenant_sale_items.quantity) AS quantity, SUM(tenant_sale_items.total) AS total`).
 		Joins("JOIN tenant_sales ON tenant_sales.id = tenant_sale_items.sale_id").
+		Scopes(salescope.ScopeCommercial("tenant_sales")).
 		Where("tenant_sales.cash_session_id = ? AND tenant_sales.status NOT IN ?", sessionID, []string{"cancelled", "draft"}).
 		Group("tenant_sale_items.product_id, tenant_sale_items.code, tenant_sale_items.description").
 		Order("tenant_sale_items.description ASC").

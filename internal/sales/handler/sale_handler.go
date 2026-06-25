@@ -2,14 +2,21 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
 
-	"tukifac/internal/sales/service"
 	billingSvc "tukifac/internal/billing/service"
+	detraccionsvc "tukifac/internal/detraccion"
+	salecontext "tukifac/internal/fiscal/salecontext"
+	quotationsvc "tukifac/internal/quotations/service"
+	"tukifac/internal/sales/nvdisplay"
+	"tukifac/internal/sales/service"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
+	emailpkg "tukifac/pkg/email"
+	"tukifac/pkg/saas/docusage"
 	"tukifac/pkg/tax"
 
 	"github.com/gofiber/fiber/v3"
@@ -109,11 +116,16 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 		DocType       string                   `json:"doc_type"`
 		IssueDate     string                   `json:"issue_date"`
 		DueDate       string                   `json:"due_date"`
-		Currency      string                   `json:"currency"`
-		PaymentMethod string                   `json:"payment_method"`
+		Currency          string                   `json:"currency"`
+		OperationTypeCode string                   `json:"operation_type_code"`
+		ExchangeRate      *float64                 `json:"exchange_rate"`
+		PaymentMethod     string                   `json:"payment_method"`
 		Payments      []service.PaymentInput   `json:"payments"`
 		Notes         string                   `json:"notes"`
 		Items         []service.SaleItemInput  `json:"items"`
+		FiscalContext *salecontext.FiscalContextInput `json:"fiscal_context"`
+		Detraccion    *detraccionsvc.SaleInput        `json:"detraccion"`
+		FromQuotationID *uint                         `json:"from_quotation_id"`
 	}
 
 	if err := c.Bind().Body(&body); err != nil {
@@ -149,24 +161,54 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 
 	taxCfg := tax.LoadFromDB(db(c))
 	svc := service.NewSaleService(db(c))
+	var centralTenantID uint
+	if tenant, ok := c.Locals("tenant").(*database.Tenant); ok && tenant != nil {
+		centralTenantID = tenant.ID
+	}
+	var issuedFromQuotationID *uint
+	if body.FromQuotationID != nil && *body.FromQuotationID > 0 {
+		qSvc := quotationsvc.NewQuotationService(db(c))
+		if _, err := qSvc.EnsureCanLinkToSale(*body.FromQuotationID); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+		qid := *body.FromQuotationID
+		issuedFromQuotationID = &qid
+	}
 	sale, err := svc.Create(service.CreateSaleInput{
-		BranchID:      branchID,
-		ContactID:     body.ContactID,
-		UserID:        userID(c),
-		CashSessionID: body.CashSessionID,
-		SeriesID:      body.SeriesID,
-		DocType:       body.DocType,
-		IssueDate:     issueDate,
-		DueDate:       dueDate,
-		Currency:      body.Currency,
-		PaymentMethod: body.PaymentMethod,
-		Payments:      body.Payments,
-		Notes:         body.Notes,
-		Items:         body.Items,
-		TaxConfig:     taxCfg,
+		BranchID:        branchID,
+		ContactID:       body.ContactID,
+		UserID:          userID(c),
+		CashSessionID:   body.CashSessionID,
+		SeriesID:        body.SeriesID,
+		DocType:         body.DocType,
+		IssueDate:       issueDate,
+		DueDate:         dueDate,
+		Currency:          body.Currency,
+		OperationTypeCode: body.OperationTypeCode,
+		ExchangeRate:      body.ExchangeRate,
+		PaymentMethod:     body.PaymentMethod,
+		Payments:        body.Payments,
+		Notes:           body.Notes,
+		Items:           body.Items,
+		TaxConfig:       taxCfg,
+		CentralTenantID: centralTenantID,
+		FiscalContext:           body.FiscalContext,
+		Detraccion:              body.Detraccion,
+		IssuedFromQuotationID:   issuedFromQuotationID,
 	})
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		return saleCreateErrorResponse(c, err)
+	}
+	if body.FromQuotationID != nil && *body.FromQuotationID > 0 {
+		target := "nota_venta"
+		var ser database.TenantDocumentSeries
+		if db(c).First(&ser, sale.SeriesID).Error == nil {
+			code := strings.TrimSpace(ser.SunatCode)
+			if code == "01" || code == "03" {
+				target = code
+			}
+		}
+		_ = quotationsvc.NewQuotationService(db(c)).MarkConverted(*body.FromQuotationID, sale.ID, target)
 	}
 
 	triggerAutoFiscalEnqueue(c, sale)
@@ -183,11 +225,17 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 	}
 	printData, _ := service.BuildPrintData(db(c), sale, items, printPayments, "")
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+	resp := fiber.Map{
 		"success":    true,
 		"sale":       sale,
 		"print_data": printData,
-	})
+	}
+	if body.FiscalContext != nil {
+		if fiscalCtx, err := svc.GetFiscalContext(sale.ID); err == nil && fiscalCtx != nil {
+			resp["fiscal_context"] = fiscalCtx
+		}
+	}
+	return c.Status(fiber.StatusCreated).JSON(resp)
 }
 
 func (h *SaleHandler) DetailPage(c fiber.Ctx) error {
@@ -382,11 +430,9 @@ func (h *SaleHandler) GetAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "No encontrado"})
 	}
-	var emittedChild database.TenantSale
-	if err := db(c).Where("issued_from_nota_sale_id = ?", sale.ID).First(&emittedChild).Error; err == nil {
-		sid := emittedChild.ID
-		sale.ElectronicIssueSaleID = &sid
-	}
+	enriched := []database.TenantSale{*sale}
+	nvdisplay.EnrichSales(db(c), enriched)
+	sale = &enriched[0]
 	if sale.ContactID != nil && *sale.ContactID > 0 {
 		var contact database.TenantContact
 		if db(c).First(&contact, *sale.ContactID).Error == nil {
@@ -415,7 +461,42 @@ func (h *SaleHandler) GetAPI(c fiber.Ctx) error {
 	if printData, err := service.BuildPrintDataForSale(db(c), sale.ID); err == nil {
 		out["print_data"] = printData
 	}
+	if fiscalCtx, err := svc.GetFiscalContext(sale.ID); err == nil && fiscalCtx != nil {
+		out["fiscal_context"] = fiscalCtx
+	}
+	if det, err := detraccionsvc.NewService(db(c)).LoadBySaleID(sale.ID); err == nil && det != nil {
+		out["detraccion"] = det
+	}
 	return c.JSON(out)
+}
+
+// EmailReceiptAPI POST /api/sales/:id/email-receipt — envía PDF ticket al correo del cliente.
+func (h *SaleHandler) EmailReceiptAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Email     string `json:"email"`
+		PdfBase64 string `json:"pdf_base64"`
+	}
+	if err := c.Bind().Body(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
+	}
+	svc := service.NewSaleService(db(c))
+	if err := svc.EmailReceipt(uint(id), service.EmailReceiptInput{
+		Email:     body.Email,
+		PdfBase64: body.PdfBase64,
+	}); err != nil {
+		if errors.Is(err, emailpkg.ErrNotConfigured) {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "El envío por correo no está configurado (SMTP_HOST)",
+				"code":  "SMTP_NOT_CONFIGURED",
+			})
+		}
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }
 
 // IssueElectronicFromNotaAPI POST /api/sales/:id/issue-electronic — factura/boleta desde nota de venta (00).
@@ -427,6 +508,7 @@ func (h *SaleHandler) IssueElectronicFromNotaAPI(c fiber.Ctx) error {
 	var body struct {
 		SeriesID  uint   `json:"series_id"`
 		IssueDate string `json:"issue_date"`
+		ContactID *uint  `json:"contact_id"`
 	}
 	if err := c.Bind().Body(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
@@ -435,12 +517,30 @@ func (h *SaleHandler) IssueElectronicFromNotaAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "series_id es obligatorio"})
 	}
 	svc := service.NewSaleService(db(c))
-	sale, err := svc.IssueElectronicFromNota(uint(id), body.SeriesID, userID(c), body.IssueDate)
+	var centralTenantID uint
+	if tenant, ok := c.Locals("tenant").(*database.Tenant); ok && tenant != nil {
+		centralTenantID = tenant.ID
+	}
+	sale, err := svc.IssueElectronicFromNota(uint(id), body.SeriesID, userID(c), body.IssueDate, centralTenantID, body.ContactID)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		return saleCreateErrorResponse(c, err)
 	}
 	triggerAutoFiscalEnqueue(c, sale)
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"sale": sale})
+	out := fiber.Map{"sale": sale}
+	if printData, err := service.BuildPrintDataForSale(db(c), sale.ID); err == nil {
+		out["print_data"] = printData
+	}
+	return c.Status(fiber.StatusCreated).JSON(out)
+}
+
+func saleCreateErrorResponse(c fiber.Ctx, err error) error {
+	st := fiber.StatusBadRequest
+	payload := fiber.Map{"error": err.Error()}
+	if errors.Is(err, docusage.ErrQuotaExceeded) {
+		st = fiber.StatusPaymentRequired
+		payload["code"] = "DOCUMENT_QUOTA_EXCEEDED"
+	}
+	return c.Status(st).JSON(payload)
 }
 
 func triggerAutoFiscalEnqueue(c fiber.Ctx, sale *database.TenantSale) {

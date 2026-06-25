@@ -2,14 +2,14 @@
 # Deploy completo en VPS: pull → migrate-central → restart → health
 # Uso:
 #   ./deploy/scripts/deploy.sh
-#   MISTIQ_IMAGE=ghcr.io/org/repo:abc123 ./deploy/scripts/deploy.sh
+#   TUKIFAC_IMAGE=ghcr.io/org/repo:abc123 ./deploy/scripts/deploy.sh
 #   SKIP_MIGRATE=1 ./deploy/scripts/deploy.sh
 set -euo pipefail
 
-BASE_DIR="${MISTIQ_BASE:-/opt/mistiq}"
+BASE_DIR="${TUKIFAC_BASE:-/opt/tukifac}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
 ENV_FILE="${ENV_FILE:-.env}"
-CONTAINER="${MISTIQ_CONTAINER:-mistiq-backend-go}"
+CONTAINER="${TUKIFAC_CONTAINER:-tukifac-backend-go}"
 SKIP_MIGRATE="${SKIP_MIGRATE:-0}"
 SKIP_PULL="${SKIP_PULL:-0}"
 
@@ -30,17 +30,17 @@ if [[ ! -f "${COMPOSE_FILE}" ]]; then
 fi
 
 # Imagen explícita (CI) o la definida en .env
-if [[ -n "${MISTIQ_IMAGE:-}" ]]; then
-  if grep -q '^MISTIQ_IMAGE=' "${ENV_FILE}"; then
-    sed -i "s|^MISTIQ_IMAGE=.*|MISTIQ_IMAGE=${MISTIQ_IMAGE}|" "${ENV_FILE}"
+if [[ -n "${TUKIFAC_IMAGE:-}" ]]; then
+  if grep -q '^TUKIFAC_IMAGE=' "${ENV_FILE}"; then
+    sed -i "s|^TUKIFAC_IMAGE=.*|TUKIFAC_IMAGE=${TUKIFAC_IMAGE}|" "${ENV_FILE}"
   else
-    echo "MISTIQ_IMAGE=${MISTIQ_IMAGE}" >> "${ENV_FILE}"
+    echo "TUKIFAC_IMAGE=${TUKIFAC_IMAGE}" >> "${ENV_FILE}"
   fi
 fi
 
-CURRENT_IMAGE="$(grep -E '^MISTIQ_IMAGE=' "${ENV_FILE}" | cut -d= -f2- | tr -d '\r\n')"
+CURRENT_IMAGE="$(grep -E '^TUKIFAC_IMAGE=' "${ENV_FILE}" | cut -d= -f2- | tr -d '\r\n')"
 if [[ -z "${CURRENT_IMAGE}" ]]; then
-  echo "ERROR: MISTIQ_IMAGE no definido en ${ENV_FILE}"
+  echo "ERROR: TUKIFAC_IMAGE no definido en ${ENV_FILE}"
   exit 1
 fi
 
@@ -55,7 +55,7 @@ if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
 fi
 
 echo "=============================================="
-echo " Mistiq Backend — Deploy"
+echo " Tukifac Backend — Deploy"
 echo " Imagen: ${CURRENT_IMAGE}"
 echo "=============================================="
 
@@ -66,7 +66,7 @@ fi
 
 if [[ "${SKIP_MIGRATE}" != "1" ]]; then
   echo "==> Migración BD central (ANTES del restart, imagen nueva)"
-  if ! docker compose -f "${COMPOSE_FILE}" run --rm --no-deps backend-go ./mistiq-api migrate-central; then
+  if ! docker compose -f "${COMPOSE_FILE}" run --rm --no-deps backend-go ./tukifac-api migrate-central; then
     echo "ERROR: migrate-central falló"
     exit 1
   fi

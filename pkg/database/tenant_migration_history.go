@@ -17,6 +17,7 @@ type TenantMigrationHistory struct {
 	DurationMs  int64     `gorm:"not null;default:0" json:"duration_ms"`
 	Success     bool      `gorm:"not null;default:true" json:"success"`
 	Error       *string   `gorm:"type:text" json:"error,omitempty"`
+	Checksum    *string   `gorm:"size:64" json:"checksum,omitempty"`
 }
 
 func (TenantMigrationHistory) TableName() string { return "tenant_migration_history" }

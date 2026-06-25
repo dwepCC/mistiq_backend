@@ -27,6 +27,8 @@ type FiscalCompanySyncPayload struct {
 	PSEPassword    string                 `json:"pse_password,omitempty"`
 	PSEToken       string                 `json:"pse_token,omitempty"`
 	PSESecondary   string                 `json:"pse_secondary_user,omitempty"`
+	GreClientID    string                 `json:"gre_client_id,omitempty"`
+	GreClientSecret string                `json:"gre_client_secret,omitempty"`
 	PSEMetadata    map[string]interface{} `json:"pse_metadata_json,omitempty"`
 	AutomaticSend  *bool                  `json:"automatic_send,omitempty"`
 	EmailEnabled   *bool                  `json:"email_enabled,omitempty"`
@@ -52,6 +54,8 @@ type FiscalCompanyStatus struct {
 	PSETokenConfigured      bool    `json:"pse_token_configured"`
 	SOLConfigured           bool    `json:"sol_configured"`
 	CertificateConfigured   bool    `json:"certificate_configured"`
+	GreClientConfigured     bool    `json:"gre_client_configured"`
+	GreClientID             string  `json:"gre_client_id,omitempty"`
 	Enabled                 bool    `json:"enabled"`
 }
 

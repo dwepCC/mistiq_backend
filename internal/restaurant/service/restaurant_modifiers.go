@@ -52,7 +52,8 @@ func isExtraModifierGroup(g database.TenantModifierGroup) bool {
 	return modifierkind.IsExtra(g.Kind, g.Required, g.MultiSelect)
 }
 
-// resolveRestaurantOrderItem recalcula precio unitario y modifiers_json desde catálogo (no confía en el cliente).
+// resolveRestaurantOrderItem valida producto/modificadores y canonicaliza modifiers_json.
+// Si el cliente envía unit_price > 0 (precio acordado en caja/mesa), se conserva; si no, se usa el catálogo.
 func resolveRestaurantOrderItem(tx *gorm.DB, item *NewOrderItem) error {
 	if item.ProductID == nil || *item.ProductID == 0 {
 		if strings.TrimSpace(item.IgvAffectationType) == "" {
@@ -69,12 +70,17 @@ func resolveRestaurantOrderItem(tx *gorm.DB, item *NewOrderItem) error {
 		return errors.New("producto inactivo")
 	}
 
+	clientUnit := money.RoundDisplay(item.UnitPrice)
 	unit, canonJSON, err := calcRestaurantUnitPrice(tx, &product, item.ModifiersJSON)
 	if err != nil {
 		return err
 	}
-	item.UnitPrice = unit
 	item.ModifiersJSON = canonJSON
+	if clientUnit > 0 {
+		item.UnitPrice = clientUnit
+	} else {
+		item.UnitPrice = unit
+	}
 	if strings.TrimSpace(item.ProductName) == "" {
 		item.ProductName = product.Name
 	}

@@ -408,7 +408,7 @@ type GenerateSaleInput struct {
 	Notes          string                 `json:"notes"`
 }
 
-func (s *MembershipService) GenerateSale(membershipID uint, userID uint, in GenerateSaleInput) (*database.TenantSale, *database.TenantMembershipInvoice, error) {
+func (s *MembershipService) GenerateSale(membershipID uint, userID uint, centralTenantID uint, in GenerateSaleInput) (*database.TenantSale, *database.TenantMembershipInvoice, error) {
 	m, err := s.GetByID(membershipID)
 	if err != nil {
 		return nil, nil, err
@@ -501,20 +501,21 @@ func (s *MembershipService) GenerateSale(membershipID uint, userID uint, in Gene
 	taxCfg := tax.LoadFromDB(s.db)
 	saleSvc := salessvc.NewSaleService(s.db)
 	sale, err := saleSvc.Create(salessvc.CreateSaleInput{
-		BranchID:      m.BranchID,
-		ContactID:     &cid,
-		UserID:        userID,
-		CashSessionID: in.CashSessionID,
-		SeriesID:      in.SeriesID,
-		DocType:       series.DocType,
-		IssueDate:     issue,
-		DueDate:       nil,
-		Currency:      m.Currency,
-		PaymentMethod: strings.TrimSpace(in.PaymentMethod),
-		Payments:      in.Payments,
-		Notes:         notes,
-		Items:         []salessvc.SaleItemInput{item},
-		TaxConfig:     taxCfg,
+		BranchID:        m.BranchID,
+		ContactID:       &cid,
+		UserID:          userID,
+		CashSessionID:   in.CashSessionID,
+		SeriesID:        in.SeriesID,
+		DocType:         series.DocType,
+		IssueDate:       issue,
+		DueDate:         nil,
+		Currency:        m.Currency,
+		PaymentMethod:   strings.TrimSpace(in.PaymentMethod),
+		Payments:        in.Payments,
+		Notes:           notes,
+		Items:           []salessvc.SaleItemInput{item},
+		TaxConfig:       taxCfg,
+		CentralTenantID: centralTenantID,
 	})
 	if err != nil {
 		return nil, nil, err

@@ -6,6 +6,7 @@ import (
 
 	"tukifac/internal/cashbank/service"
 	"tukifac/pkg/branch"
+	"tukifac/pkg/database"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -286,16 +287,46 @@ func (h *CashBankHandler) ListMovementsReportAPI(c fiber.Ctx) error {
 			page = n
 		}
 	}
-	if perPage > 0 {
-		f.Limit = perPage
-		f.Offset = (page - 1) * perPage
+	// Con sesión seleccionada, alinear con el reporte de cierre (sin recorte por fechas del mes).
+	if f.SessionID > 0 {
+		f.DateFrom = nil
+		f.DateTo = nil
 	}
 
-	rows, total, summary, err := service.NewCashBankService(db(c)).ListMovementsReport(f)
+	split, err := service.NewCashBankService(db(c)).ListMovementsReport(f)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": rows, "total": total, "summary": summary})
+	// Compatibilidad: clientes legacy esperan data/total/summary plano (paginado aparte).
+	legacyAll := append(append([]service.MovementReportRow{}, split.Cash.Data...), split.Electronic.Data...)
+	legacyData := legacyAll
+	if perPage > 0 {
+		start := (page - 1) * perPage
+		if start >= len(legacyAll) {
+			legacyData = []service.MovementReportRow{}
+		} else {
+			end := start + perPage
+			if end > len(legacyAll) {
+				end = len(legacyAll)
+			}
+			legacyData = legacyAll[start:end]
+		}
+	}
+	legacyTotal := split.Cash.Total + split.Electronic.Total
+	legacySummary := service.MovementChannelSummary{
+		TotalRows:   legacyTotal,
+		SumIncome:   split.Cash.Summary.SumIncome + split.Electronic.Summary.SumIncome,
+		SumExpense:  split.Cash.Summary.SumExpense + split.Electronic.Summary.SumExpense,
+		NetMovement: split.Cash.Summary.NetMovement + split.Electronic.Summary.NetMovement,
+	}
+	return c.JSON(fiber.Map{
+		"cash":       split.Cash,
+		"electronic": split.Electronic,
+		"detraction": split.Detraction,
+		"data":       legacyData,
+		"total":      legacyTotal,
+		"summary":    legacySummary,
+	})
 }
 
 // ══════════════════════════════════════════════
@@ -305,40 +336,33 @@ func (h *CashBankHandler) ListMovementsReportAPI(c fiber.Ctx) error {
 // GET /api/cashbank/bank-accounts
 func (h *CashBankHandler) ListBankAccountsAPI(c fiber.Ctx) error {
 	svc := service.NewCashBankService(db(c))
-	var accounts interface{}
+	var accounts []database.TenantBankAccount
+	var err error
 	if c.Query("all") == "1" {
-		acc, err := svc.ListAllBankAccounts()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-		}
-		accounts = acc
+		accounts, err = svc.ListAllBankAccounts()
 	} else {
-		acc, err := svc.ListBankAccounts()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-		}
-		accounts = acc
+		accounts, err = svc.ListBankAccounts()
 	}
-	return c.JSON(fiber.Map{"data": accounts})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": maskBankAccountBalances(c, accounts)})
 }
 
-// GET /api/cashbank/payment-methods — métodos de pago del tenant (para ventas, caja, gestión).
-// ?all=1 devuelve todos (activos e inactivos). Por defecto solo activos.
+// GET /api/cashbank/payment-methods — alias legacy; delega a tenant_payment_methods operativos.
 func (h *CashBankHandler) ListPaymentMethodsAPI(c fiber.Ctx) error {
 	svc := service.NewCashBankService(db(c))
-	var list interface{}
+	var (
+		list interface{}
+		err  error
+	)
 	if c.Query("all") == "1" {
-		recs, err := svc.ListAllPaymentMethodRecords()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-		}
-		list = recs
+		list, err = svc.ListAllPaymentMethodRecords()
 	} else {
-		recs, err := svc.ListPaymentMethodRecords()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-		}
-		list = recs
+		list, err = svc.ListPaymentMethodRecords()
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"data": list})
 }
@@ -422,7 +446,7 @@ func (h *CashBankHandler) GetBankAccountAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Cuenta no encontrada"})
 	}
-	return c.JSON(fiber.Map{"data": acc})
+	return c.JSON(fiber.Map{"data": maskBankAccountBalance(c, acc)})
 }
 
 // POST /api/cashbank/bank-accounts

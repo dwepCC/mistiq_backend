@@ -14,7 +14,10 @@ type FleetMigrationSummary struct {
 	Running             int64  `json:"running"`
 	Paused              int64  `json:"paused"`
 	Blocked             int64  `json:"blocked"`
+	Drifted             int64  `json:"drifted"`
 	Outdated            int64  `json:"outdated"`
+	AvgMigrationMs      int64  `json:"avg_migration_duration_ms"`
+	LastFleetRunAt      *time.Time `json:"last_fleet_run_at,omitempty"`
 	SchemaTargetVersion int    `json:"schema_target_version"`
 	WithoutRegistry     int64  `json:"without_registry"`
 	CircuitOpen         bool   `json:"circuit_open"`
@@ -49,6 +52,16 @@ func FleetMigrationSummaryQuery() (*FleetMigrationSummary, error) {
 			sum.Running += r.Cnt
 		case TenantSchemaStatusPaused:
 			sum.Paused += r.Cnt
+		case TenantSchemaStatusDrifted:
+			sum.Drifted += r.Cnt
+		}
+	}
+
+	var fleetState FleetMigrationState
+	if err := CentralDB.First(&fleetState, 1).Error; err == nil {
+		sum.LastFleetRunAt = fleetState.LastFleetRunAt
+		if fleetState.AvgMigrationDurationMs > 0 {
+			sum.AvgMigrationMs = fleetState.AvgMigrationDurationMs
 		}
 	}
 

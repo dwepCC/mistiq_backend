@@ -408,8 +408,10 @@ func (h *InventoryHandler) MovementsAPI(c fiber.Ctx) error {
 	svc := service.NewInventoryService(db(c))
 	tdb := db(c)
 	productID, _ := strconv.ParseUint(c.Query("product_id"), 10, 32)
+	catID, _ := strconv.ParseUint(c.Query("category_id"), 10, 32)
 	reqB, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
 	branchID := branch.ResolveReadBranchFilter(c, uint(reqB))
+	restaurantOnly := c.Query("restaurant_only") == "true" || c.Query("restaurant_only") == "1"
 
 	var dateFrom, dateTo *time.Time
 	if df := c.Query("date_from"); df != "" {
@@ -431,13 +433,15 @@ func (h *InventoryHandler) MovementsAPI(c fiber.Ctx) error {
 		page = 1
 	}
 	params := service.KardexParams{
-		ProductID:     uint(productID),
-		ProductSearch:   c.Query("product_q"),
-		BranchID:      uint(branchID),
-		DateFrom:      dateFrom,
-		DateTo:        dateTo,
-		MovementKind:  c.Query("movement_kind"),
-		TextSearch:    c.Query("q"),
+		ProductID:      uint(productID),
+		ProductSearch:  c.Query("product_q"),
+		CategoryID:     uint(catID),
+		BranchID:       uint(branchID),
+		DateFrom:       dateFrom,
+		DateTo:         dateTo,
+		MovementKind:   c.Query("movement_kind"),
+		TextSearch:     c.Query("q"),
+		RestaurantOnly: restaurantOnly,
 	}
 	if perPage > 0 {
 		params.Limit = perPage

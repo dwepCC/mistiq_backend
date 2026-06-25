@@ -3,7 +3,6 @@ package service
 import (
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -12,9 +11,18 @@ import (
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/money"
+	"tukifac/pkg/paymentcondition"
+	"tukifac/pkg/taxpayment"
+	"tukifac/pkg/saas/docusage"
+	"tukifac/pkg/salecurrency"
+	"tukifac/pkg/salescope"
 	"tukifac/pkg/sunat"
+	detraccionpkg "tukifac/pkg/sunat/detraccion"
 	"tukifac/pkg/tax"
 	cashbanksvc "tukifac/internal/cashbank/service"
+	detraccionsvc "tukifac/internal/detraccion"
+	salecontext "tukifac/internal/fiscal/salecontext"
+	"tukifac/internal/sales/nvdisplay"
 
 	"gorm.io/gorm"
 )
@@ -71,8 +79,10 @@ type CreateSaleInput struct {
 	DocType       string
 	IssueDate     time.Time
 	DueDate       *time.Time
-	Currency      string
-	PaymentMethod string   // legacy: si Payments vacío, se usa para el total
+	Currency          string
+	OperationTypeCode string
+	ExchangeRate      *float64
+	PaymentMethod     string   // legacy: si Payments vacío, se usa para el total
 	Payments      []PaymentInput `json:"payments"` // múltiples métodos de pago
 	Notes         string
 	Items         []SaleItemInput
@@ -81,6 +91,10 @@ type CreateSaleInput struct {
 	SkipInventory             bool
 	SkipPaymentDistribution   bool
 	IssuedFromNotaSaleID      *uint // ID de la NV origen; se guarda en la nueva venta 01/03
+	IssuedFromQuotationID     *uint // ID de la cotización origen
+	CentralTenantID           uint  // tenant SaaS (cupo de documentos electrónicos)
+	FiscalContext             *salecontext.FiscalContextInput
+	Detraccion                *detraccionsvc.SaleInput
 }
 
 // NextCorrelative retorna el siguiente correlativo para una serie y lo incrementa (transacción con bloqueo de fila).
@@ -98,6 +112,9 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 
 	series, err := docseries.ValidateForBranch(s.db, input.SeriesID, input.BranchID)
 	if err != nil {
+		return nil, err
+	}
+	if err := docusage.GuardCountableSunatQuota(input.CentralTenantID, series.SunatCode); err != nil {
 		return nil, err
 	}
 
@@ -154,13 +171,39 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		})
 	}
 
-	currency := input.Currency
-	if currency == "" {
-		currency = "PEN"
+	currency, err := salecurrency.NormalizeCurrency(input.Currency)
+	if err != nil {
+		return nil, err
+	}
+	opCode, err := salecurrency.NormalizeOperationType(input.OperationTypeCode)
+	if err != nil {
+		return nil, err
+	}
+	exchangeRate, err := salecurrency.NormalizeExchangeRate(currency, input.ExchangeRate)
+	if err != nil {
+		return nil, err
+	}
+
+	sunatCode := strings.TrimSpace(series.SunatCode)
+	if opCode == salecurrency.OpDetraccion {
+		if sunatCode != "01" {
+			return nil, errors.New("la operación sujeta a detracción (1001) solo aplica a facturas (01)")
+		}
+		if currency != salecurrency.CurrencyPEN {
+			return nil, errors.New("la detracción requiere moneda PEN en la factura")
+		}
+		if input.Detraccion == nil || strings.TrimSpace(input.Detraccion.GoodCode) == "" {
+			return nil, errors.New("seleccione el bien o servicio sujeto a detracción")
+		}
+		if input.FiscalContext != nil && input.FiscalContext.HasIgvRetention != nil && *input.FiscalContext.HasIgvRetention {
+			return nil, errors.New("no se puede combinar detracción con retención IGV en la misma factura")
+		}
+	}
+	if opCode != salecurrency.OpDetraccion && input.Detraccion != nil {
+		return nil, errors.New("datos de detracción solo aplican con tipo de operación 1001")
 	}
 
 	// Validaciones SUNAT: Factura 01 solo con RUC de 11 dígitos; doc. tipo 0 máximo S/ 700 en boleta/nota de venta
-	sunatCode := strings.TrimSpace(series.SunatCode)
 	if sunatCode == "01" || sunatCode == "03" {
 		var companyCfg database.TenantCompanyConfig
 		if err := s.db.Select("sunat_enabled").First(&companyCfg).Error; err != nil || !companyCfg.SunatEnabled {
@@ -173,6 +216,9 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		if s.db.First(&c, *input.ContactID).Error == nil {
 			contact = &c
 		}
+	}
+	if opCode == salecurrency.OpDetraccion && contact != nil && contact.EsAgenteDePercepcion {
+		return nil, errors.New("no se permite detracción con cliente agente de percepción")
 	}
 	if sunatCode == "01" {
 		if contact == nil {
@@ -197,40 +243,44 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		}
 	}
 
-	// Validar stock y series antes de la transacción
-	for _, item := range input.Items {
-		if item.ProductID == nil {
-			continue
-		}
-		var product database.TenantProduct
-		if s.db.First(&product, *item.ProductID).Error != nil {
-			continue
-		}
-		if product.ManageStock && !productIsCatalogService(&product) {
-			var stock database.TenantProductStock
-			s.db.Where("product_id = ? AND branch_id = ?", *item.ProductID, input.BranchID).First(&stock)
-			if stock.Quantity < item.Quantity {
-				return nil, fmt.Errorf("stock insuficiente para %s: requiere %.2f, hay %.2f", item.Description, item.Quantity, stock.Quantity)
+	// Validar stock y series antes de la transacción (omitir si la NV ya descontó inventario).
+	emitFromNV := input.IssuedFromNotaSaleID != nil && *input.IssuedFromNotaSaleID > 0
+	skipStockCheck := input.SkipInventory || emitFromNV
+	if !skipStockCheck {
+		for _, item := range input.Items {
+			if item.ProductID == nil {
+				continue
 			}
-		}
-		if product.ManageSeries && !productIsCatalogService(&product) {
-			n := int(item.Quantity)
-			if n > 0 {
-				if len(item.Serials) >= n {
-					for _, serial := range item.Serials[:n] {
-						var ps database.TenantProductSerial
-						if err := s.db.Where("product_id = ? AND branch_id = ? AND serial = ? AND status = ?",
-							*item.ProductID, input.BranchID, serial, "available").First(&ps).Error; err != nil {
-							return nil, fmt.Errorf("el serial '%s' no está disponible o no pertenece al producto", serial)
+			var product database.TenantProduct
+			if s.db.First(&product, *item.ProductID).Error != nil {
+				continue
+			}
+			if product.ManageStock && !productIsCatalogService(&product) {
+				var stock database.TenantProductStock
+				s.db.Where("product_id = ? AND branch_id = ?", *item.ProductID, input.BranchID).First(&stock)
+				if stock.Quantity < item.Quantity {
+					return nil, fmt.Errorf("stock insuficiente para %s: requiere %.2f, hay %.2f", item.Description, item.Quantity, stock.Quantity)
+				}
+			}
+			if product.ManageSeries && !productIsCatalogService(&product) {
+				n := int(item.Quantity)
+				if n > 0 {
+					if len(item.Serials) >= n {
+						for _, serial := range item.Serials[:n] {
+							var ps database.TenantProductSerial
+							if err := s.db.Where("product_id = ? AND branch_id = ? AND serial = ? AND status = ?",
+								*item.ProductID, input.BranchID, serial, "available").First(&ps).Error; err != nil {
+								return nil, fmt.Errorf("el serial '%s' no está disponible o no pertenece al producto", serial)
+							}
 						}
-					}
-				} else {
-					var count int64
-					s.db.Model(&database.TenantProductSerial{}).
-						Where("product_id = ? AND branch_id = ? AND status = ?", *item.ProductID, input.BranchID, "available").
-						Count(&count)
-					if count < int64(n) {
-						return nil, fmt.Errorf("no hay suficientes seriales disponibles para %s (requiere %d, hay %d)", item.Description, n, count)
+					} else {
+						var count int64
+						s.db.Model(&database.TenantProductSerial{}).
+							Where("product_id = ? AND branch_id = ? AND status = ?", *item.ProductID, input.BranchID, "available").
+							Count(&count)
+						if count < int64(n) {
+							return nil, fmt.Errorf("no hay suficientes seriales disponibles para %s (requiere %d, hay %d)", item.Description, n, count)
+						}
 					}
 				}
 			}
@@ -243,21 +293,69 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		payments = []PaymentInput{{Method: input.PaymentMethod, Amount: total}}
 	}
 	if total > 0 && len(payments) == 0 {
-		return nil, errors.New("debe indicar al menos un método de pago para registrar la venta")
+		if input.DueDate == nil {
+			return nil, errors.New("debe indicar al menos un método de pago para registrar la venta")
+		}
 	}
-	if len(payments) > 0 {
+
+	isCreditSale := false
+	if emitFromNV && total > 0 && len(payments) > 0 {
 		var sumPayments float64
 		for _, p := range payments {
 			sumPayments += p.Amount
 		}
-		if !money.PaidCoversTotal(sumPayments, total) ||
-			money.RoundDisplay(sumPayments) > money.RoundDisplay(total)+money.PaymentTolerance {
-			return nil, fmt.Errorf("la suma de pagos (%.2f) no coincide con el total (%.2f)", money.RoundDisplay(sumPayments), money.RoundDisplay(total))
+		if money.RoundDisplay(sumPayments) != money.RoundDisplay(total) {
+			payments = alignPaymentsToSaleTotal(payments, total)
 		}
 	}
-	primaryMethod := input.PaymentMethod
-	if len(payments) > 0 {
-		primaryMethod = payments[0].Method
+	if opCode == salecurrency.OpDetraccion && total > 0 {
+		eval, err := s.evaluateDetractionForCreate(input, &series, total, saleItems, contact)
+		if err != nil {
+			return nil, err
+		}
+		if len(payments) > 0 || input.DueDate != nil {
+			var credit bool
+			payments, credit, err = PrepareDetractionSalePaymentsAllowCredit(payments, total, eval)
+			if err != nil {
+				return nil, err
+			}
+			isCreditSale = credit
+		} else {
+			return nil, errors.New("debe indicar pagos o fecha de vencimiento para la venta con detracción")
+		}
+	} else if len(payments) > 0 {
+		var sumPayments float64
+		for _, p := range payments {
+			if paymentcondition.IsCreditCode(p.Method) {
+				continue
+			}
+			sumPayments += p.Amount
+		}
+		if money.RoundDisplay(sumPayments) > money.RoundDisplay(total)+money.PaymentTolerance {
+			return nil, fmt.Errorf("la suma de pagos (%.2f) supera el total (%.2f)", money.RoundDisplay(sumPayments), money.RoundDisplay(total))
+		}
+		if !money.PaidCoversTotal(sumPayments, total) {
+			if input.DueDate == nil {
+				return nil, fmt.Errorf("la suma de pagos (%.2f) no coincide con el total (%.2f)", money.RoundDisplay(sumPayments), money.RoundDisplay(total))
+			}
+			isCreditSale = true
+		}
+	} else if total > 0 && input.DueDate != nil {
+		isCreditSale = true
+	}
+	primaryMethod := PrimaryDirectPaymentMethod(payments, input.PaymentMethod)
+	if isCreditSale && primaryMethod == "" {
+		primaryMethod = paymentcondition.CodeCredit
+	}
+
+	saleOrigin := salescope.SaleOriginDirect
+	if emitFromNV {
+		saleOrigin = salescope.SaleOriginConvertedFromNota
+	}
+
+	saleStatus := "paid"
+	if isCreditSale {
+		saleStatus = "credit"
 	}
 
 	sale := &database.TenantSale{
@@ -273,14 +371,17 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		TaxAmount:            money.RoundSunat(taxAmount),
 		Total:                money.RoundSunat(total),
 		Currency:             currency,
+		OperationTypeCode:    opCode,
+		ExchangeRate:         exchangeRate,
 		PaymentMethod:        primaryMethod,
+		SaleOrigin:           saleOrigin,
 		Notes:                input.Notes,
-		Status:               "paid",
+		Status:               saleStatus,
 		BillingStatus:        "pending",
-		IssuedFromNotaSaleID: input.IssuedFromNotaSaleID,
+		IssuedFromNotaSaleID:    input.IssuedFromNotaSaleID,
+		IssuedFromQuotationID:   input.IssuedFromQuotationID,
 	}
 
-	emitFromNV := input.IssuedFromNotaSaleID != nil && *input.IssuedFromNotaSaleID > 0
 	// Emisión electrónica desde NV: misma operación comercial; nunca repetir stock/seriales ni caja/bancos.
 	skipInv := input.SkipInventory || emitFromNV
 	skipPay := input.SkipPaymentDistribution || emitFromNV
@@ -314,7 +415,7 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				}
 				payLines = append(payLines, cashbanksvc.PaymentLineInput{Method: p.Method, Amount: p.Amount})
 			}
-			resolvedCash, err := cbSvc.ResolveCashSessionForPayments(input.BranchID, input.UserID, input.CashSessionID, payLines)
+			resolvedCash, err := cbSvc.ResolveCashSessionForSale(input.BranchID, input.UserID, input.CashSessionID, payLines)
 			if err != nil {
 				return err
 			}
@@ -345,6 +446,12 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		}
 
 		if skipInv {
+			if err := s.persistFiscalContextTx(tx, sale, input, seriesLocked); err != nil {
+				return err
+			}
+			if err := s.persistDetraccionTx(tx, sale, input, seriesLocked, saleItems); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -432,8 +539,149 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				}
 			}
 		}
+		if err := s.persistFiscalContextTx(tx, sale, input, seriesLocked); err != nil {
+			return err
+		}
+		if err := s.persistDetraccionTx(tx, sale, input, seriesLocked, saleItems); err != nil {
+			return err
+		}
 		return nil
 	})
+}
+
+func (s *SaleService) persistFiscalContextTx(tx *gorm.DB, sale *database.TenantSale, input CreateSaleInput, series database.TenantDocumentSeries) error {
+	if input.FiscalContext == nil {
+		return nil
+	}
+	var contactSnap *salecontext.ContactSnapshot
+	if input.ContactID != nil {
+		var c database.TenantContact
+		if tx.First(&c, *input.ContactID).Error == nil {
+			contactSnap = salecontext.ContactFromModel(&c)
+		}
+	}
+	currency := strings.TrimSpace(input.Currency)
+	if currency == "" {
+		currency = "PEN"
+	}
+	_, err := salecontext.NewService(tx).Persist(salecontext.PersistInput{
+		SaleID:        sale.ID,
+		UserID:        input.UserID,
+		SunatDocCode:  salecontext.SunatCodeFromSeries(&series, input.DocType),
+		SaleTotal:     sale.Total,
+		Currency:      currency,
+		ExchangeRate:  sale.ExchangeRate,
+		Contact:       contactSnap,
+		FiscalContext: input.FiscalContext,
+	})
+	return err
+}
+
+func (s *SaleService) persistDetraccionTx(
+	tx *gorm.DB,
+	sale *database.TenantSale,
+	input CreateSaleInput,
+	series database.TenantDocumentSeries,
+	saleItems []database.TenantSaleItem,
+) error {
+	if strings.TrimSpace(input.OperationTypeCode) != salecurrency.OpDetraccion {
+		return nil
+	}
+	var companyCfg database.TenantCompanyConfig
+	if err := tx.First(&companyCfg).Error; err != nil {
+		return errors.New("configure los datos de la empresa antes de emitir con detracción")
+	}
+	paymentMethod := strings.TrimSpace(companyCfg.DetractionDefaultPaymentMethod)
+	if paymentMethod == "" {
+		paymentMethod = "001"
+	}
+	var contactEsPercepcion bool
+	if input.ContactID != nil {
+		var c database.TenantContact
+		if tx.First(&c, *input.ContactID).Error == nil {
+			contactEsPercepcion = c.EsAgenteDePercepcion
+		}
+	}
+	affItems := make([]detraccionpkg.ItemAffectation, 0, len(saleItems))
+	for _, it := range saleItems {
+		affItems = append(affItems, detraccionpkg.ItemAffectation{
+			IgvAffectationType: it.IgvAffectationType,
+			Total:              it.Total,
+		})
+	}
+	gravadoTotal := detraccionpkg.GravadoTotalFromItems(affItems)
+	_, err := detraccionsvc.NewService(tx).Persist(detraccionsvc.PersistInput{
+		SaleID:              sale.ID,
+		OperationTypeCode:   input.OperationTypeCode,
+		SunatDocCode:        salecontext.SunatCodeFromSeries(&series, input.DocType),
+		Currency:            sale.Currency,
+		ExchangeRate:        sale.ExchangeRate,
+		SaleTotal:           sale.Total,
+		GravadoTotal:        gravadoTotal,
+		BankAccount:         companyCfg.DetractionBNAccount,
+		PaymentMethodCode:   paymentMethod,
+		Detraccion:          input.Detraccion,
+		ContactEsPercepcion: contactEsPercepcion,
+	})
+	return err
+}
+
+func (s *SaleService) evaluateDetractionForCreate(
+	input CreateSaleInput,
+	series *database.TenantDocumentSeries,
+	total float64,
+	saleItems []database.TenantSaleItem,
+	contact *database.TenantContact,
+) (detraccionpkg.CalcResult, error) {
+	var companyCfg database.TenantCompanyConfig
+	if err := s.db.First(&companyCfg).Error; err != nil {
+		return detraccionpkg.CalcResult{}, errors.New("configure los datos de la empresa antes de emitir con detracción")
+	}
+	paymentMethod := strings.TrimSpace(companyCfg.DetractionDefaultPaymentMethod)
+	if paymentMethod == "" {
+		paymentMethod = "001"
+	}
+	var contactEsPercepcion bool
+	if contact != nil {
+		contactEsPercepcion = contact.EsAgenteDePercepcion
+	}
+	affItems := make([]detraccionpkg.ItemAffectation, 0, len(saleItems))
+	for _, it := range saleItems {
+		affItems = append(affItems, detraccionpkg.ItemAffectation{
+			IgvAffectationType: it.IgvAffectationType,
+			Total:              it.Total,
+		})
+	}
+	gravadoTotal := detraccionpkg.GravadoTotalFromItems(affItems)
+	currency := strings.TrimSpace(input.Currency)
+	if currency == "" {
+		currency = salecurrency.CurrencyPEN
+	}
+	return detraccionsvc.NewService(s.db).Evaluate(detraccionsvc.PersistInput{
+		OperationTypeCode:   input.OperationTypeCode,
+		SunatDocCode:        salecontext.SunatCodeFromSeries(series, input.DocType),
+		Currency:            currency,
+		ExchangeRate:        input.ExchangeRate,
+		SaleTotal:           total,
+		GravadoTotal:        gravadoTotal,
+		BankAccount:         companyCfg.DetractionBNAccount,
+		PaymentMethodCode:   paymentMethod,
+		Detraccion:          input.Detraccion,
+		ContactEsPercepcion: contactEsPercepcion,
+	})
+}
+
+// GetFiscalContext carga información adicional fiscal de una venta.
+func (s *SaleService) GetFiscalContext(saleID uint) (*salecontext.FiscalContextOutput, error) {
+	sale, err := s.GetByID(saleID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := salecontext.NewService(s.db).Load(saleID, sale.Total)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return out, err
 }
 
 func (s *SaleService) GetByID(id uint) (*database.TenantSale, error) {
@@ -479,10 +727,13 @@ type SaleListSummary struct {
 	SumActive      float64 `json:"sum_active"`
 	CountCancelled int64   `json:"count_cancelled"`
 	CountActive    int64   `json:"count_active"`
+	SumDetraccion  float64 `json:"sum_detraccion"`
+	SumNetPayable  float64 `json:"sum_net_payable"`
+	CountDetraccion int64  `json:"count_detraccion"`
+	SpotTotal      float64 `json:"spot_total"`
 	PaymentTotals  []struct {
 		Method string  `json:"method"`
 		Total  float64 `json:"total"`
-		Count  int64   `json:"count"`
 	} `json:"payment_totals"`
 }
 
@@ -514,7 +765,21 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 		q = q.Where("tenant_sales.status = ?", params.Status)
 	}
 	if params.BillingStatus != "" {
-		q = q.Where("tenant_sales.billing_status = ?", params.BillingStatus)
+		bs := strings.TrimSpace(params.BillingStatus)
+		if strings.Contains(bs, ",") {
+			parts := make([]string, 0, 4)
+			for _, p := range strings.Split(bs, ",") {
+				p = strings.TrimSpace(strings.ToLower(p))
+				if p != "" {
+					parts = append(parts, p)
+				}
+			}
+			if len(parts) > 0 {
+				q = q.Where("tenant_sales.billing_status IN ?", parts)
+			}
+		} else {
+			q = q.Where("tenant_sales.billing_status = ?", bs)
+		}
 	}
 	if params.PaymentMethod != "" {
 		m := strings.ToLower(strings.TrimSpace(params.PaymentMethod))
@@ -619,27 +884,8 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 			}
 		}
 	}
-	onlyNV := len(params.SunatCodes) == 1 && strings.TrimSpace(params.SunatCodes[0]) == "00"
-	if onlyNV && len(sales) > 0 {
-		parentIDs := make([]uint, len(sales))
-		for i := range sales {
-			parentIDs[i] = sales[i].ID
-		}
-		var children []database.TenantSale
-		if err := s.db.Select("id", "issued_from_nota_sale_id").Where("issued_from_nota_sale_id IN ?", parentIDs).Find(&children).Error; err == nil {
-			byParent := make(map[uint]uint, len(children))
-			for _, ch := range children {
-				if ch.IssuedFromNotaSaleID != nil {
-					byParent[*ch.IssuedFromNotaSaleID] = ch.ID
-				}
-			}
-			for i := range sales {
-				if id, ok := byParent[sales[i].ID]; ok {
-					sales[i].ElectronicIssueSaleID = &id
-				}
-			}
-		}
-	}
+	s.enrichSalesWithDetraccion(sales)
+	nvdisplay.EnrichSales(s.db, sales)
 
 	// Normalizar issue_date como fecha de negocio Perú al mediodía para evitar corrimientos de día
 	// por parsing/serialización (MySQL DATETIME + loc=Local + clientes en UTC).
@@ -653,79 +899,7 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 			sales[i].IssueDate = time.Date(d.Year(), d.Month(), d.Day(), 12, 0, 0, 0, loc)
 		}
 	}
-	s.attachPaymentsToSales(sales)
 	return sales, total, summary, nil
-}
-
-// attachPaymentsToSales carga tenant_sale_payments para el listado.
-// Las NOTA_CREDITO sin filas propias heredan los pagos de la venta original (montos negativos).
-func (s *SaleService) attachPaymentsToSales(sales []database.TenantSale) {
-	if len(sales) == 0 {
-		return
-	}
-	ids := make([]uint, len(sales))
-	for i := range sales {
-		ids[i] = sales[i].ID
-	}
-	var payments []database.TenantSalePayment
-	if err := s.db.Where("sale_id IN ?", ids).Find(&payments).Error; err != nil {
-		return
-	}
-	bySale := make(map[uint][]database.TenantSalePayment, len(sales))
-	for _, p := range payments {
-		bySale[p.SaleID] = append(bySale[p.SaleID], p)
-	}
-
-	var ncWithoutPayments []database.TenantSale
-	for _, sale := range sales {
-		if sale.DocType == "NOTA_CREDITO" && len(bySale[sale.ID]) == 0 && sale.OriginalSaleID != nil && *sale.OriginalSaleID > 0 {
-			ncWithoutPayments = append(ncWithoutPayments, sale)
-		}
-	}
-	if len(ncWithoutPayments) > 0 {
-		origIDs := make([]uint, 0, len(ncWithoutPayments))
-		origByID := make(map[uint]database.TenantSale, len(ncWithoutPayments))
-		for _, nc := range ncWithoutPayments {
-			origIDs = append(origIDs, *nc.OriginalSaleID)
-		}
-		var origSales []database.TenantSale
-		if s.db.Select("id", "total").Where("id IN ?", origIDs).Find(&origSales).Error == nil {
-			for _, o := range origSales {
-				origByID[o.ID] = o
-			}
-		}
-		var origPayments []database.TenantSalePayment
-		if s.db.Where("sale_id IN ?", origIDs).Find(&origPayments).Error == nil {
-			origPayBySale := make(map[uint][]database.TenantSalePayment)
-			for _, p := range origPayments {
-				origPayBySale[p.SaleID] = append(origPayBySale[p.SaleID], p)
-			}
-			for _, nc := range ncWithoutPayments {
-				if nc.OriginalSaleID == nil {
-					continue
-				}
-				orig, ok := origByID[*nc.OriginalSaleID]
-				if !ok {
-					continue
-				}
-				scale := 1.0
-				if orig.Total > 0 {
-					scale = nc.Total / orig.Total
-				}
-				for _, p := range origPayBySale[*nc.OriginalSaleID] {
-					bySale[nc.ID] = append(bySale[nc.ID], database.TenantSalePayment{
-						SaleID: nc.ID,
-						Method: p.Method,
-						Amount: -math.Abs(p.Amount * scale),
-					})
-				}
-			}
-		}
-	}
-
-	for i := range sales {
-		sales[i].Payments = bySale[sales[i].ID]
-	}
 }
 
 // saleListSummary agrega montos sobre el mismo conjunto filtrado que List (sin paginar).
@@ -746,7 +920,7 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		CountActive    int64   `gorm:"column:count_active"`
 	}
 	var row aggRow
-	err := s.db.Model(&database.TenantSale{}).
+	err := salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
 		Where("tenant_sales.id IN (?)", idSub).
 		Select(`
 			COALESCE(SUM(tenant_sales.total), 0) AS sum_total,
@@ -769,21 +943,42 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 	out.CountCancelled = row.CountCancelled
 	out.CountActive = row.CountActive
 
-	// Totales por método desde tenant_sale_payments (montos netos; NOTA_CREDITO resta).
+	type detAggRow struct {
+		SumDetraccion   float64 `gorm:"column:sum_detraccion"`
+		SumNetPayable   float64 `gorm:"column:sum_net_payable"`
+		CountDetraccion int64   `gorm:"column:count_detraccion"`
+	}
+	var detRow detAggRow
+	if err := s.db.Table("tenant_sale_detraccion d").
+		Select(`
+			COALESCE(SUM(d.detraction_amount_pen), 0) AS sum_detraccion,
+			COALESCE(SUM(d.net_payable_pen), 0) AS sum_net_payable,
+			COUNT(*) AS count_detraccion
+		`).
+		Joins("JOIN tenant_sales ts ON ts.id = d.sale_id").
+		Scopes(salescope.ScopeCommercial("ts")).
+		Where("ts.id IN (?)", idSub).
+		Where("ts.status != ?", "cancelled").
+		Scan(&detRow).Error; err != nil {
+		return out, err
+	}
+	out.SumDetraccion = detRow.SumDetraccion
+	out.SumNetPayable = detRow.SumNetPayable
+	out.CountDetraccion = detRow.CountDetraccion
+
+	// Totales por método: si hay filas en tenant_sale_pagos, usar montos por línea; si no, el campo cabecera payment_method.
 	type payRow struct {
 		Method string  `gorm:"column:method"`
 		Total  float64 `gorm:"column:total"`
-		Count  int64   `gorm:"column:cnt"`
 	}
 	byMethod := make(map[string]float64)
-	byMethodCount := make(map[string]map[uint]struct{})
-
-	signedAmount := `CASE WHEN ts.doc_type = 'NOTA_CREDITO' THEN -ABS(tsp.amount) ELSE tsp.amount END`
+	var spotTotal float64
 
 	var fromPayments []payRow
 	err = s.db.Table("tenant_sale_payments tsp").
-		Select("LOWER(TRIM(tsp.method)) AS method, COALESCE(SUM("+signedAmount+"), 0) AS total").
+		Select("LOWER(TRIM(tsp.method)) AS method, COALESCE(SUM(tsp.amount), 0) AS total").
 		Joins("JOIN tenant_sales ts ON ts.id = tsp.sale_id").
+		Scopes(salescope.ScopeCommercial("ts")).
 		Where("ts.id IN (?)", idSub).
 		Where("ts.status != ?", "cancelled").
 		Group("LOWER(TRIM(tsp.method))").
@@ -792,6 +987,10 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		return out, err
 	}
 	for _, p := range fromPayments {
+		if taxpayment.IsDetractionCode(p.Method) {
+			spotTotal += p.Total
+			continue
+		}
 		m := strings.TrimSpace(p.Method)
 		if m == "" {
 			m = "sin_definir"
@@ -799,80 +998,12 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		byMethod[m] += p.Total
 	}
 
-	// NOTA_CREDITO sin filas de pago: restar pagos de la venta original (proporcional).
-	type ncOrigRow struct {
-		Method   string  `gorm:"column:method"`
-		Amount   float64 `gorm:"column:amount"`
-		NCSaleID uint    `gorm:"column:nc_sale_id"`
-	}
-	var ncOrigRows []ncOrigRow
-	err = s.db.Table("tenant_sales nc").
-		Select(`LOWER(TRIM(tsp.method)) AS method,
-			-ABS(tsp.amount) * (nc.total / NULLIF(orig.total, 0)) AS amount,
-			nc.id AS nc_sale_id`).
-		Joins("JOIN tenant_sales orig ON orig.id = nc.original_sale_id").
-		Joins("JOIN tenant_sale_payments tsp ON tsp.sale_id = orig.id").
-		Where("nc.id IN (?)", idSub).
-		Where("nc.doc_type = ?", "NOTA_CREDITO").
-		Where("nc.status != ?", "cancelled").
-		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp2 WHERE tsp2.sale_id = nc.id)").
-		Scan(&ncOrigRows).Error
-	if err != nil {
-		return out, err
-	}
-	for _, r := range ncOrigRows {
-		m := strings.TrimSpace(r.Method)
-		if m == "" {
-			m = "sin_definir"
-		}
-		byMethod[m] += r.Amount
-	}
-
-	type saleMethodRow struct {
-		Method string `gorm:"column:method"`
-		SaleID uint   `gorm:"column:sale_id"`
-	}
-	var saleMethodRows []saleMethodRow
-	err = s.db.Table("tenant_sale_payments tsp").
-		Select("LOWER(TRIM(tsp.method)) AS method, tsp.sale_id AS sale_id").
-		Joins("JOIN tenant_sales ts ON ts.id = tsp.sale_id").
-		Where("ts.id IN (?)", idSub).
-		Where("ts.status != ?", "cancelled").
-		Scan(&saleMethodRows).Error
-	if err != nil {
-		return out, err
-	}
-	for _, r := range saleMethodRows {
-		m := strings.TrimSpace(r.Method)
-		if m == "" {
-			m = "sin_definir"
-		}
-		if byMethodCount[m] == nil {
-			byMethodCount[m] = make(map[uint]struct{})
-		}
-		byMethodCount[m][r.SaleID] = struct{}{}
-	}
-	for _, r := range ncOrigRows {
-		m := strings.TrimSpace(r.Method)
-		if m == "" {
-			m = "sin_definir"
-		}
-		if byMethodCount[m] == nil {
-			byMethodCount[m] = make(map[uint]struct{})
-		}
-		byMethodCount[m][r.NCSaleID] = struct{}{}
-	}
-
-	signedHeaderTotal := `CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN -ABS(tenant_sales.total) ELSE tenant_sales.total END`
-
 	var fromHeader []payRow
-	err = s.db.Model(&database.TenantSale{}).
-		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method,
-			COALESCE(SUM(` + signedHeaderTotal + `), 0) AS total`).
+	err = salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
+		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, COALESCE(SUM(tenant_sales.total), 0) AS total`).
 		Where("tenant_sales.id IN (?)", idSub).
 		Where("tenant_sales.status != ?", "cancelled").
 		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp WHERE tsp.sale_id = tenant_sales.id)").
-		Where(`NOT (tenant_sales.doc_type = 'NOTA_CREDITO' AND tenant_sales.original_sale_id IS NOT NULL)`).
 		Group(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir')))`).
 		Scan(&fromHeader).Error
 	if err != nil {
@@ -886,54 +1017,30 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		byMethod[m] += p.Total
 	}
 
-	type headerSaleRow struct {
-		Method string `gorm:"column:method"`
-		SaleID uint   `gorm:"column:sale_id"`
-	}
-	var headerSaleRows []headerSaleRow
-	err = s.db.Model(&database.TenantSale{}).
-		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, tenant_sales.id AS sale_id`).
-		Where("tenant_sales.id IN (?)", idSub).
-		Where("tenant_sales.status != ?", "cancelled").
-		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp WHERE tsp.sale_id = tenant_sales.id)").
-		Where(`NOT (tenant_sales.doc_type = 'NOTA_CREDITO' AND tenant_sales.original_sale_id IS NOT NULL)`).
-		Scan(&headerSaleRows).Error
-	if err != nil {
-		return out, err
-	}
-	for _, r := range headerSaleRows {
-		m := strings.TrimSpace(r.Method)
-		if m == "" {
-			m = "sin_definir"
-		}
-		if byMethodCount[m] == nil {
-			byMethodCount[m] = make(map[uint]struct{})
-		}
-		byMethodCount[m][r.SaleID] = struct{}{}
-	}
-
 	type kv struct {
 		method string
 		total  float64
-		count  int64
 	}
 	pairs := make([]kv, 0, len(byMethod))
 	for m, t := range byMethod {
-		cnt := int64(len(byMethodCount[m]))
-		pairs = append(pairs, kv{m, t, cnt})
+		pairs = append(pairs, kv{m, t})
 	}
-	sort.Slice(pairs, func(i, j int) bool {
-		if pairs[i].total == pairs[j].total {
-			return pairs[i].method < pairs[j].method
-		}
-		return pairs[i].total > pairs[j].total
-	})
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].total > pairs[j].total })
+	if len(pairs) > 12 {
+		pairs = pairs[:12]
+	}
 	for _, p := range pairs {
 		out.PaymentTotals = append(out.PaymentTotals, struct {
 			Method string  `json:"method"`
 			Total  float64 `json:"total"`
-			Count  int64   `json:"count"`
-		}{Method: p.method, Total: p.total, Count: p.count})
+		}{Method: p.method, Total: p.total})
+	}
+	if spotTotal > 0 {
+		out.SpotTotal = spotTotal
+		out.PaymentTotals = append(out.PaymentTotals, struct {
+			Method string  `json:"method"`
+			Total  float64 `json:"total"`
+		}{Method: taxpayment.CodeDetraccionBN, Total: spotTotal})
 	}
 	return out, nil
 }
@@ -974,7 +1081,8 @@ func (s *SaleService) salesByProductBaseQuery(params SalesByProductParams) *gorm
 	q := s.db.Table("tenant_sale_items").
 		Joins("INNER JOIN tenant_sales ON tenant_sales.id = tenant_sale_items.sale_id AND tenant_sales.status != 'cancelled'").
 		Joins("LEFT JOIN tenant_products p ON p.id = tenant_sale_items.product_id").
-		Joins("LEFT JOIN tenant_categories c ON c.id = p.category_id")
+		Joins("LEFT JOIN tenant_categories c ON c.id = p.category_id").
+		Scopes(salescope.ScopeCommercial("tenant_sales"))
 	if params.DateFrom != nil {
 		q = q.Where("tenant_sales.issue_date >= ?", params.DateFrom)
 	}
@@ -1392,9 +1500,62 @@ func (s *SaleService) GetPayments(saleID uint) ([]database.TenantSalePayment, er
 	return rows, err
 }
 
+func alignPaymentsToSaleTotal(pays []PaymentInput, total float64) []PaymentInput {
+	roundedTotal := money.RoundSunat(total)
+	if len(pays) == 0 {
+		return []PaymentInput{{Method: "cash", Amount: roundedTotal}}
+	}
+	if len(pays) == 1 {
+		return []PaymentInput{{Method: pays[0].Method, Amount: roundedTotal}}
+	}
+	var sum float64
+	for _, p := range pays {
+		sum += p.Amount
+	}
+	if sum <= 0 {
+		return []PaymentInput{{Method: pays[0].Method, Amount: roundedTotal}}
+	}
+	out := make([]PaymentInput, 0, len(pays))
+	var allocated float64
+	for i, p := range pays {
+		amt := money.RoundSunat(p.Amount * roundedTotal / sum)
+		if i == len(pays)-1 {
+			amt = money.RoundSunat(roundedTotal - allocated)
+		}
+		out = append(out, PaymentInput{Method: p.Method, Amount: amt})
+		allocated += amt
+	}
+	return out
+}
+
+// inferPriceIncludesIgvFromSaleItem deduce si el precio unitario de la línea ya incluye IGV,
+// comparando el total almacenado con el recálculo tributario (evita desfase al emitir boleta/factura desde NV).
+func inferPriceIncludesIgvFromSaleItem(db *gorm.DB, it database.TenantSaleItem, taxCfg tax.Config) bool {
+	affType := strings.TrimSpace(it.IgvAffectationType)
+	if affType == "" {
+		affType = "10"
+	}
+	storedTotal := money.RoundSunat(it.Total)
+	_, _, withTrue := tax.CalcItem(it.UnitPrice, it.Quantity, it.Discount, affType, true, taxCfg)
+	if money.RoundSunat(withTrue) == storedTotal {
+		return true
+	}
+	_, _, withFalse := tax.CalcItem(it.UnitPrice, it.Quantity, it.Discount, affType, false, taxCfg)
+	if money.RoundSunat(withFalse) == storedTotal {
+		return false
+	}
+	if it.ProductID != nil && *it.ProductID > 0 {
+		var p database.TenantProduct
+		if db.Select("price_includes_igv").First(&p, *it.ProductID).Error == nil {
+			return p.PriceIncludesIgv
+		}
+	}
+	return true
+}
+
 // IssueElectronicFromNota crea el registro de factura/boleta (01/03) para SUNAT copiando líneas y pagos de la NV (00).
 // No es una “segunda venta” en contabilidad de inventario: IssuedFromNotaSaleID fuerza omitir stock, seriales y caja/bancos.
-func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID uint, userID uint, issueYMD string) (*database.TenantSale, error) {
+func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID uint, userID uint, issueYMD string, centralTenantID uint, overrideContactID *uint) (*database.TenantSale, error) {
 	var nota database.TenantSale
 	if err := s.db.First(&nota, notaSaleID).Error; err != nil {
 		return nil, errors.New("nota de venta no encontrada")
@@ -1441,6 +1602,7 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 	if len(items) == 0 {
 		return nil, errors.New("la nota de venta no tiene líneas")
 	}
+	taxCfg := tax.LoadFromDB(s.db)
 	var inputs []SaleItemInput
 	for _, it := range items {
 		inputs = append(inputs, SaleItemInput{
@@ -1452,7 +1614,7 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 			UnitPrice:          it.UnitPrice,
 			Discount:           it.Discount,
 			IgvAffectationType: it.IgvAffectationType,
-			PriceIncludesIgv:   false,
+			PriceIncludesIgv:   inferPriceIncludesIgvFromSaleItem(s.db, it, taxCfg),
 			ModifiersJSON:      it.ModifiersJSON,
 		})
 	}
@@ -1466,7 +1628,13 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 			pays = append(pays, PaymentInput{Method: p.Method, Amount: p.Amount})
 		}
 	}
-	taxCfg := tax.LoadFromDB(s.db)
+	if len(pays) == 0 && nota.Total > 0 {
+		method := strings.TrimSpace(nota.PaymentMethod)
+		if method == "" {
+			method = "cash"
+		}
+		pays = []PaymentInput{{Method: method, Amount: nota.Total}}
+	}
 	issueAt := parseIssueDateForSale(issueYMD, nota.IssueDate)
 	nvRef := strings.TrimSpace(nota.Series) + "-" + strings.TrimSpace(nota.Number)
 	notes := strings.TrimSpace(nota.Notes)
@@ -1475,10 +1643,26 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 	} else {
 		notes = "Referencia NV " + nvRef + "."
 	}
+	contactID := nota.ContactID
+	if overrideContactID != nil && *overrideContactID > 0 {
+		var c database.TenantContact
+		if err := s.db.First(&c, *overrideContactID).Error; err != nil {
+			return nil, errors.New("cliente no encontrado")
+		}
+		if !c.Active {
+			return nil, errors.New("el cliente seleccionado no está activo")
+		}
+		ct := strings.ToLower(strings.TrimSpace(c.Type))
+		if ct != "customer" && ct != "both" {
+			return nil, errors.New("el contacto seleccionado no es un cliente válido")
+		}
+		cid := *overrideContactID
+		contactID = &cid
+	}
 	nvID := notaSaleID
 	return s.Create(CreateSaleInput{
 		BranchID:                nota.BranchID,
-		ContactID:               nota.ContactID,
+		ContactID:               contactID,
 		UserID:                  userID,
 		CashSessionID:           nil,
 		SeriesID:                targetSeriesID,
@@ -1494,12 +1678,13 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 		SkipInventory:           true,
 		SkipPaymentDistribution: true,
 		IssuedFromNotaSaleID:    &nvID,
+		CentralTenantID:         centralTenantID,
 	})
 }
 
 // SummaryStats retorna estadísticas resumidas de ventas.
 func (s *SaleService) SummaryStats(branchID uint, from, to time.Time) map[string]interface{} {
-	q := s.db.Model(&database.TenantSale{}).
+	q := salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date <= ? AND status != ?", from, to, "cancelled")
 	if branchID > 0 {
 		q = q.Where("branch_id = ?", branchID)

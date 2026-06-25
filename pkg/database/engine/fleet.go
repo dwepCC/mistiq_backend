@@ -56,6 +56,11 @@ func RunFleetMigrate(opts FleetOptions) FleetSummary {
 	if n := database.RecoverStaleMigrationLocks(); n > 0 {
 		logger.L.Info("fleet_stale_locks_recovered", slog.Int64("count", n))
 	}
+	if drifted, err := ScanSchemaDriftBatch(opts.Limit); err != nil {
+		logger.L.Warn("fleet_drift_scan_failed", slog.Any("error", err))
+	} else if drifted > 0 {
+		logger.L.Info("fleet_drift_scan_marked", slog.Int("count", drifted))
+	}
 
 	pending, err := ListPendingTenants(opts.Limit, opts.ActiveOnly)
 	if err != nil {
@@ -149,6 +154,12 @@ func RunFleetMigrate(opts FleetOptions) FleetSummary {
 		slog.Int("failed", len(summary.Failed)),
 		slog.Bool("circuit_tripped", summary.CircuitTripped),
 	)
+	if len(summary.Success) > 0 {
+		avg := metrics.MigrationDurationMsTotal.Load() / int64(len(summary.Success))
+		database.RecordFleetRunComplete(avg)
+	} else {
+		database.RecordFleetRunComplete(0)
+	}
 	return summary
 }
 
