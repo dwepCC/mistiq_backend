@@ -7,6 +7,7 @@ import (
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	"tukifac/pkg/middleware"
+	"tukifac/pkg/saas"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/golang-jwt/jwt/v5"
@@ -34,6 +35,68 @@ func (h *SessionHandler) GetCapabilities(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"schema_version": ver,
 		"features":       database.TenantFeatureFlags(tdb),
+	})
+}
+
+// GET /api/session/modules — catálogo de módulos IMPLEMENTADOS con enabled por tenant + uso/
+// límites del plan. Lo consumen tukifac y tukichef para mostrar módulos bloqueados con upsell
+// (los NO implementados se ocultan) y avisar cuando el tenant se acerca a un tope.
+func (h *SessionHandler) GetModules(c fiber.Ctx) error {
+	tdb := sessionTenantDB(c)
+	claims, _ := c.Locals("tenant_claims").(*middleware.TenantClaims)
+	if tdb == nil || claims == nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Sin contexto"})
+	}
+
+	// Solo módulos implementados y activos (los no implementados no se muestran al tenant).
+	var catalog []database.SaasModule
+	database.CentralDB.Where("implemented = ? AND active = ?", true, true).
+		Order("sort_order asc, id asc").Find(&catalog)
+
+	// Habilitados del tenant: fuente actual en central (refleja reconciliaciones al instante).
+	enabled := map[string]bool{}
+	var tms []database.TenantModule
+	database.CentralDB.Where("tenant_id = ? AND enabled = ?", claims.TenantID, true).Find(&tms)
+	for _, tm := range tms {
+		enabled[tm.ModuleKey] = true
+	}
+
+	type moduleView struct {
+		Key         string `json:"key"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Icon        string `json:"icon"`
+		Category    string `json:"category"`
+		Enabled     bool   `json:"enabled"`
+	}
+	modules := make([]moduleView, 0, len(catalog))
+	for _, m := range catalog {
+		modules = append(modules, moduleView{
+			Key: m.Key, Name: m.Name, Description: m.Description, Icon: m.Icon,
+			Category: m.Category, Enabled: enabled[m.Key],
+		})
+	}
+
+	// Uso actual en la BD del tenant (seats activos / productos vivos).
+	var usersUsed, branchesUsed, productsUsed int64
+	tdb.Model(&database.TenantUser{}).Where("active = ?", true).Count(&usersUsed)
+	tdb.Model(&database.TenantBranch{}).Where("active = ?", true).Count(&branchesUsed)
+	tdb.Model(&database.TenantProduct{}).Count(&productsUsed)
+
+	limits := saas.TenantPlanLimits(claims.TenantID)
+	type limitView struct {
+		Used      int64 `json:"used"`
+		Max       int   `json:"max"`
+		Unlimited bool  `json:"unlimited"`
+	}
+	return c.JSON(fiber.Map{
+		"modules": modules,
+		"limits": fiber.Map{
+			"users":     limitView{Used: usersUsed, Max: limits.MaxUsers, Unlimited: limits.MaxUsers <= 0},
+			"branches":  limitView{Used: branchesUsed, Max: limits.MaxBranches, Unlimited: limits.MaxBranches <= 0},
+			"products":  limitView{Used: productsUsed, Max: limits.MaxProducts, Unlimited: limits.MaxProducts <= 0},
+			"documents": limitView{Max: limits.MaxDocuments, Unlimited: limits.UnlimitedDocuments},
+		},
 	})
 }
 
@@ -165,6 +228,9 @@ func issueTokenWithBranch(tdb *gorm.DB, old *middleware.TenantClaims, user *data
 		Permissions:          old.Permissions,
 		EmployeeType:         old.EmployeeType,
 		AuthMethod:           old.AuthMethod,
+		Impersonated:         old.Impersonated,
+		MasterActorID:        old.MasterActorID,
+		MasterActorEmail:     old.MasterActorEmail,
 		PermVer:              old.PermVer,
 		StaffID:              old.StaffID,
 		Status:               old.Status,

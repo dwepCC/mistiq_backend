@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tukifac/internal/contacts/service"
+	"tukifac/pkg/pagination"
 	"tukifac/pkg/tenantstorage"
 	"tukifac/pkg/uploadlimits"
 
@@ -146,17 +147,21 @@ type contactPersonBody struct {
 }
 
 type contactBody struct {
-	Type           string              `json:"type"`
-	DocType        string              `json:"doc_type"`
-	DocNumber      string              `json:"doc_number"`
-	BusinessName   string              `json:"business_name"`
-	TradeName      string              `json:"trade_name"`
-	Address        string              `json:"address"`
-	Ubigeo         string              `json:"ubigeo"`
-	Phone          string              `json:"phone"`
-	Email          string              `json:"email"`
-	PhotoURL       string              `json:"photo_url"`
-	ContactPersons []contactPersonBody `json:"contact_persons"`
+	Type                            string              `json:"type"`
+	DocType                         string              `json:"doc_type"`
+	DocNumber                       string              `json:"doc_number"`
+	BusinessName                    string              `json:"business_name"`
+	TradeName                       string              `json:"trade_name"`
+	Address                         string              `json:"address"`
+	Ubigeo                          string              `json:"ubigeo"`
+	Phone                           string              `json:"phone"`
+	Email                           string              `json:"email"`
+	PhotoURL                        string              `json:"photo_url"`
+	ContactPersons                  []contactPersonBody `json:"contact_persons"`
+	EsAgenteDeRetencion             *bool               `json:"es_agente_de_retencion"`
+	EsAgenteDePercepcion            *bool               `json:"es_agente_de_percepcion"`
+	EsAgenteDePercepcionCombustible *bool               `json:"es_agente_de_percepcion_combustible"`
+	EsBuenContribuyente             *bool               `json:"es_buen_contribuyente"`
 }
 
 func bodyToInput(b contactBody) service.ContactInput {
@@ -170,27 +175,54 @@ func bodyToInput(b contactBody) service.ContactInput {
 		})
 	}
 	return service.ContactInput{
-		Type:           b.Type,
-		DocType:        b.DocType,
-		DocNumber:      b.DocNumber,
-		BusinessName:   b.BusinessName,
-		TradeName:      b.TradeName,
-		Address:        b.Address,
-		Ubigeo:         b.Ubigeo,
-		Phone:          b.Phone,
-		Email:          b.Email,
-		PhotoURL:       b.PhotoURL,
-		ContactPersons: persons,
+		Type:                            b.Type,
+		DocType:                         b.DocType,
+		DocNumber:                       b.DocNumber,
+		BusinessName:                    b.BusinessName,
+		TradeName:                       b.TradeName,
+		Address:                         b.Address,
+		Ubigeo:                          b.Ubigeo,
+		Phone:                           b.Phone,
+		Email:                           b.Email,
+		PhotoURL:                        b.PhotoURL,
+		ContactPersons:                  persons,
+		EsAgenteDeRetencion:             b.EsAgenteDeRetencion,
+		EsAgenteDePercepcion:            b.EsAgenteDePercepcion,
+		EsAgenteDePercepcionCombustible: b.EsAgenteDePercepcionCombustible,
+		EsBuenContribuyente:             b.EsBuenContribuyente,
 	}
 }
 
 func (h *ContactHandler) SearchAPI(c fiber.Ctx) error {
 	svc := service.NewContactService(db(c))
-	contacts, _ := svc.List(service.ContactListParams{
+	params := service.ContactListParams{
 		Query:  c.Query("q"),
 		Type:   c.Query("type"),
 		Status: c.Query("status"),
-	})
+	}
+
+	// Paginación opt-in: solo cuando el cliente manda per_page. Sin él se devuelve todo, que
+	// es lo que necesitan los selectores del POS/ventas (retrocompatible).
+	perPage, _ := strconv.Atoi(c.Query("per_page"))
+	if perPage > 0 {
+		page, _ := strconv.Atoi(c.Query("page"))
+		if page < 1 {
+			page = 1
+		}
+		contacts, total, err := svc.ListPaged(params, page, perPage)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{
+			"data":        contacts,
+			"total":       total,
+			"page":        page,
+			"per_page":    perPage,
+			"total_pages": pagination.TotalPages(total, perPage),
+		})
+	}
+
+	contacts, _ := svc.List(params)
 	return c.JSON(fiber.Map{"data": contacts})
 }
 

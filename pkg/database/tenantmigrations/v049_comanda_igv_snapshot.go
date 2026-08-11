@@ -9,7 +9,7 @@ import (
 // V049ComandaIgvSnapshot guarda afectación IGV e «incluye IGV» por línea (ítems manuales y snapshot de catálogo).
 type V049ComandaIgvSnapshot struct{}
 
-func (V049ComandaIgvSnapshot) Version() int  { return 49 }
+func (V049ComandaIgvSnapshot) Version() int { return 49 }
 func (V049ComandaIgvSnapshot) Name() string { return "comanda_igv_snapshot" }
 
 func (V049ComandaIgvSnapshot) Up(db *gorm.DB) error {

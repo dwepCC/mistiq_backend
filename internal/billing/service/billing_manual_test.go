@@ -25,7 +25,7 @@ func TestClassifyAfterSync_allowsEnqueueWithoutInvoice(t *testing.T) {
 			DisplayPhase:  billingstate.PhasePending,
 		},
 	}
-	if got := classifyAfterSync(sync, false); got != "allow" {
+	if got := classifyAfterSync(sync, false, FiscalSourceManual); got != "allow" {
 		t.Fatalf("expected allow, got %q", got)
 	}
 }
@@ -40,7 +40,7 @@ func TestClassifyAfterSync_blocksWhenInvoiceQueued(t *testing.T) {
 			Async:         true,
 		},
 	}
-	if got := classifyAfterSync(sync, false); got != "already_processing" {
+	if got := classifyAfterSync(sync, false, FiscalSourceManual); got != "already_processing" {
 		t.Fatalf("expected already_processing, got %q", got)
 	}
 }

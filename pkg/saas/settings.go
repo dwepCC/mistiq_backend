@@ -10,10 +10,14 @@ import (
 
 const DefaultTimezone = "America/Lima"
 
+// DefaultPaymentWindowDays días para pagar un cobro recién emitido antes de darlo por vencido.
+const DefaultPaymentWindowDays = 3
+
 // PlatformSettings DTO para API (panel central).
 type PlatformSettings struct {
 	ReminderDays                   []int                 `json:"reminder_days"`
 	GracePeriodDays                int                   `json:"grace_period_days"`
+	PaymentWindowDays              int                   `json:"payment_window_days"`
 	ReconnectionFee                float64               `json:"reconnection_fee"`
 	AutoSuspendEnabled             bool                  `json:"auto_suspend_enabled"`
 	ProvisionalReactivationEnabled bool                  `json:"provisional_reactivation_enabled"`
@@ -29,6 +33,7 @@ type PlatformSettings struct {
 	PortalURLOverride              string                `json:"portal_url_override"` // vacío = flujo interno /subscription
 	Support                        SupportConfig         `json:"support"`
 	OperationsKeyConfigured        bool                  `json:"operations_key_configured"`
+	UpdatedAt                      string                `json:"updated_at,omitempty"`
 }
 
 // SupportConfig contacto para tenants.
@@ -67,6 +72,7 @@ func defaultSettings() PlatformSettings {
 	return PlatformSettings{
 		ReminderDays:                   []int{7, 5, 3, 1},
 		GracePeriodDays:                3,
+		PaymentWindowDays:              DefaultPaymentWindowDays,
 		ReconnectionFee:                50,
 		AutoSuspendEnabled:             true,
 		ProvisionalReactivationEnabled: true,
@@ -112,6 +118,11 @@ func LoadSettings() (PlatformSettings, error) {
 		_ = json.Unmarshal([]byte(row.ReminderDaysJSON), &out.ReminderDays)
 	}
 	out.GracePeriodDays = row.GracePeriodDays
+	// Filas creadas antes de que existiera el campo traen 0; ahí manda el default, no
+	// «sin ventana» (que daría por vencido el cobro el mismo día de emitirlo).
+	if row.PaymentWindowDays > 0 {
+		out.PaymentWindowDays = row.PaymentWindowDays
+	}
 	out.ReconnectionFee = row.ReconnectionFee
 	out.AutoSuspendEnabled = row.AutoSuspendEnabled
 	out.ProvisionalReactivationEnabled = row.ProvisionalReactivationEnabled
@@ -141,6 +152,9 @@ func LoadSettings() (PlatformSettings, error) {
 		Phone:    row.SupportPhone,
 	}
 	out.OperationsKeyConfigured = strings.TrimSpace(row.OperationsKeyHash) != ""
+	if !row.UpdatedAt.IsZero() {
+		out.UpdatedAt = row.UpdatedAt.UTC().Format(time.RFC3339)
+	}
 	return out, nil
 }
 
@@ -151,6 +165,9 @@ func SaveSettings(in PlatformSettings) error {
 	}
 	if in.StrikeMax <= 0 {
 		in.StrikeMax = 2
+	}
+	if in.PaymentWindowDays <= 0 {
+		in.PaymentWindowDays = DefaultPaymentWindowDays
 	}
 	if in.ProvisionalHours <= 0 {
 		in.ProvisionalHours = MaxProvisionalHours
@@ -168,6 +185,7 @@ func SaveSettings(in PlatformSettings) error {
 		ID:                             1,
 		ReminderDaysJSON:               string(rd),
 		GracePeriodDays:                in.GracePeriodDays,
+		PaymentWindowDays:              in.PaymentWindowDays,
 		ReconnectionFee:                  in.ReconnectionFee,
 		AutoSuspendEnabled:             in.AutoSuspendEnabled,
 		ProvisionalReactivationEnabled: in.ProvisionalReactivationEnabled,
@@ -212,6 +230,14 @@ func TenantPaymentConfig(cfg PlatformSettings) PaymentConfigView {
 		PortalOverride: override,
 		UseInternalHub: true,
 	}
+}
+
+// EffectivePaymentWindowDays días de ventana de pago, con default si no está configurado.
+func EffectivePaymentWindowDays(cfg PlatformSettings) int {
+	if cfg.PaymentWindowDays <= 0 {
+		return DefaultPaymentWindowDays
+	}
+	return cfg.PaymentWindowDays
 }
 
 // EffectiveStrikeMax desde configuración.

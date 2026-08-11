@@ -50,6 +50,92 @@ func (s *CompanyService) GetConfig() (*database.TenantCompanyConfig, error) {
 	return &cfg, nil
 }
 
+// CompanyConfigPatch campos opcionales para PUT /api/company/config (solo actualiza lo enviado).
+type CompanyConfigPatch struct {
+	TradeName                      *string  `json:"trade_name"`
+	Address                        *string  `json:"address"`
+	Ubigeo                         *string  `json:"ubigeo"`
+	Country                        *string  `json:"country"`
+	Phone                          *string  `json:"phone"`
+	Email                          *string  `json:"email"`
+	Website                        *string  `json:"website"`
+	Currency                       *string  `json:"currency"`
+	TaxRate                        *float64 `json:"tax_rate"`
+	AdditionalNotes                *string  `json:"additional_notes"`
+	TermsAndConditions             *string  `json:"terms_and_conditions"`
+	ShowTermsConditions            *bool    `json:"show_terms_conditions"`
+	DetractionBNAccount            *string  `json:"detraction_bn_account"`
+	DetractionDefaultPaymentMethod *string  `json:"detraction_default_payment_method"`
+	ColorTheme                     *string  `json:"color_theme"`
+	LogoURL                        *string  `json:"logo_url"`
+}
+
+func (s *CompanyService) ApplyConfigPatch(patch CompanyConfigPatch) error {
+	var existing database.TenantCompanyConfig
+	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("configure primero los datos generales de la empresa")
+	}
+	updates := map[string]interface{}{}
+	if patch.TradeName != nil {
+		updates["trade_name"] = strings.TrimSpace(*patch.TradeName)
+	}
+	if patch.Address != nil {
+		updates["address"] = strings.TrimSpace(*patch.Address)
+	}
+	if patch.Ubigeo != nil {
+		updates["ubigeo"] = strings.TrimSpace(*patch.Ubigeo)
+	}
+	if patch.Country != nil {
+		updates["country"] = strings.TrimSpace(*patch.Country)
+	}
+	if patch.Phone != nil {
+		updates["phone"] = strings.TrimSpace(*patch.Phone)
+	}
+	if patch.Email != nil {
+		updates["email"] = strings.TrimSpace(*patch.Email)
+	}
+	if patch.Website != nil {
+		updates["website"] = strings.TrimSpace(*patch.Website)
+	}
+	if patch.Currency != nil {
+		if c := strings.TrimSpace(*patch.Currency); c != "" {
+			updates["currency"] = c
+		}
+	}
+	if patch.TaxRate != nil && *patch.TaxRate > 0 {
+		updates["tax_rate"] = *patch.TaxRate
+	}
+	if patch.AdditionalNotes != nil {
+		updates["additional_notes"] = strings.TrimSpace(*patch.AdditionalNotes)
+	}
+	if patch.TermsAndConditions != nil {
+		updates["terms_and_conditions"] = strings.TrimSpace(*patch.TermsAndConditions)
+	}
+	if patch.ShowTermsConditions != nil {
+		updates["show_terms_conditions"] = *patch.ShowTermsConditions
+	}
+	if patch.DetractionBNAccount != nil {
+		updates["detraction_bn_account"] = strings.TrimSpace(*patch.DetractionBNAccount)
+	}
+	if patch.DetractionDefaultPaymentMethod != nil {
+		updates["detraction_default_payment_method"] = normalizeDetractionPaymentMethod(*patch.DetractionDefaultPaymentMethod)
+	}
+	if patch.ColorTheme != nil {
+		if theme := strings.TrimSpace(*patch.ColorTheme); theme != "" {
+			updates["color_theme"] = theme
+		}
+	}
+	if patch.LogoURL != nil {
+		if logo := strings.TrimSpace(*patch.LogoURL); logo != "" {
+			updates["logo_url"] = logo
+		}
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return s.db.Model(&existing).Updates(updates).Error
+}
+
 func (s *CompanyService) SaveConfig(input database.TenantCompanyConfig) error {
 	var existing database.TenantCompanyConfig
 	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
@@ -64,16 +150,77 @@ func (s *CompanyService) SaveConfig(input database.TenantCompanyConfig) error {
 		"phone":      input.Phone,
 		"email":      input.Email,
 		"website":    input.Website,
-		"logo_url":   input.LogoURL,
 		"currency":         input.Currency,
 		"tax_rate":         input.TaxRate,
 		"additional_notes": strings.TrimSpace(input.AdditionalNotes),
+		"terms_and_conditions":  strings.TrimSpace(input.TermsAndConditions),
+		"show_terms_conditions": input.ShowTermsConditions,
+		"detraction_bn_account":            strings.TrimSpace(input.DetractionBNAccount),
+		"detraction_default_payment_method": normalizeDetractionPaymentMethod(input.DetractionDefaultPaymentMethod),
 	}
 	// color_theme solo desde panel tenant; Tukichef y otros clientes no deben vaciarlo.
 	if strings.TrimSpace(input.ColorTheme) != "" {
 		updates["color_theme"] = input.ColorTheme
 	}
+	if logoURL := strings.TrimSpace(input.LogoURL); logoURL != "" {
+		updates["logo_url"] = logoURL
+	}
 	return s.db.Model(&existing).Updates(updates).Error
+}
+
+// UpdateLogoURL persiste la ruta pública del logo (/uploads/tenants/{RUC}/company/...).
+func (s *CompanyService) UpdateLogoURL(url string) error {
+	var existing database.TenantCompanyConfig
+	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("configure primero los datos generales de la empresa")
+	}
+	return s.db.Model(&existing).Update("logo_url", strings.TrimSpace(url)).Error
+}
+
+func normalizeDetractionPaymentMethod(raw string) string {
+	code := strings.TrimSpace(raw)
+	if code == "" {
+		return "001"
+	}
+	return code
+}
+
+// SaveReceiptWallet guarda QR Yape/Plin y cuentas bancarias visibles en comprobantes.
+func (s *CompanyService) SaveReceiptWallet(provider, phone, qrURL string, showOnA4, showOnTicket bool, bankAccountIDs []uint) error {
+	var existing database.TenantCompanyConfig
+	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("configure primero los datos generales de la empresa")
+	}
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	phone = strings.TrimSpace(phone)
+	qrURL = strings.TrimSpace(qrURL)
+	if provider != "" && (phone == "" || qrURL == "") {
+		return errors.New("indique número y QR si elige Yape o Plin")
+	}
+	if provider != "" && provider != "yape" && provider != "plin" {
+		return errors.New("billetera inválida (use yape o plin)")
+	}
+	const maxInlineDataURL = 120_000
+	if strings.HasPrefix(qrURL, "data:") && len(qrURL) > maxInlineDataURL {
+		return errors.New("el QR es demasiado grande: use el botón Subir QR (se guardará como archivo en el servidor)")
+	}
+	return s.db.Model(&existing).Updates(map[string]interface{}{
+		"wallet_provider":            provider,
+		"wallet_phone":               phone,
+		"wallet_qr_url":              qrURL,
+		"wallet_show_on_a4":          showOnA4,
+		"wallet_show_on_ticket":      showOnTicket,
+		"receipt_bank_account_ids":   EncodeReceiptBankAccountIDs(bankAccountIDs),
+	}).Error
+}
+
+// UpdateWalletQrURL persiste solo la ruta pública del QR (/uploads/tenants/{RUC}/receipts/...).
+func (s *CompanyService) UpdateWalletQrURL(url string) error {
+	var existing database.TenantCompanyConfig
+	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("configure primero los datos generales de la empresa")
+	}
+	return s.db.Model(&existing).Update("wallet_qr_url", strings.TrimSpace(url)).Error
 }
 
 // SaveSunatConfigTenant guarda solo los campos que el tenant puede editar: IGV, régimen, zona beneficio.
@@ -83,7 +230,9 @@ func (s *CompanyService) SaveSunatConfigTenant(taxRate float64, igvRegime string
 	if err := s.db.First(&existing).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return errors.New("configure primero los datos generales de la empresa")
 	}
-	if taxRate <= 0 {
+	switch taxRate {
+	case 18, 10.5:
+	default:
 		taxRate = 18
 	}
 	if igvRegime == "" {
@@ -101,7 +250,7 @@ func (s *CompanyService) SyncFacturadorConfig() error {
 }
 
 // SyncFacturadorConfigWithFiles envía configuración al facturador.
-// Certificados: PFX (.pfx/.p12) o PEM (combinado o clave + cert) se normalizan al formato Greenter antes del envío.
+// PFX o PEM se convierten en Go a certificate_base64 (PEM combinado) como espera Lycet.
 func (s *CompanyService) SyncFacturadorConfigWithFiles(certificateBase64, privateKeyBase64, logoBase64, solUserOverride, solPassOverride, certPassword, pfxBase64 string) error {
 	return s.syncFacturador(certificateBase64, privateKeyBase64, logoBase64, solUserOverride, solPassOverride, certPassword, pfxBase64)
 }
@@ -171,8 +320,13 @@ func (s *CompanyService) CreateBranch(name, address, phone, fiscalDomicileCode s
 		IsMain:             isMain,
 		Active:             true,
 	}
-	err := s.db.Create(b).Error
-	return b, err
+	if err := s.db.Create(b).Error; err != nil {
+		return nil, err
+	}
+	if err := database.SeedInventoryDocumentSeriesForBranch(s.db, b.ID); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func (s *CompanyService) UpdateBranch(id uint, name, address, phone, fiscalDomicileCode string, isMain bool) error {
@@ -203,12 +357,19 @@ func (s *CompanyService) ListSeries(branchID uint) ([]database.TenantDocumentSer
 	return series, err
 }
 
-func (s *CompanyService) assertSeriesCodeUnique(seriesName string, excludeID uint) error {
+func (s *CompanyService) assertSeriesCodeUnique(branchID uint, category, seriesName string, excludeID uint) error {
 	code := docseries.NormalizeSeriesCode(seriesName)
 	if code == "" {
 		return errors.New("código de serie inválido")
 	}
 	q := s.db.Model(&database.TenantDocumentSeries{}).Where("series = ?", code)
+	// Series de almacén: código único dentro de la sucursal (puede repetirse en otra sucursal).
+	if strings.TrimSpace(strings.ToLower(category)) == "almacen" {
+		if branchID == 0 {
+			return errors.New("sucursal requerida para series de almacén")
+		}
+		q = q.Where("branch_id = ?", branchID)
+	}
 	if excludeID > 0 {
 		q = q.Where("id != ?", excludeID)
 	}
@@ -222,56 +383,53 @@ func (s *CompanyService) assertSeriesCodeUnique(seriesName string, excludeID uin
 	return nil
 }
 
-func (s *CompanyService) CreateSeries(branchID uint, docType, sunatCode, category, seriesName string) error {
+func (s *CompanyService) CreateSeries(branchID uint, docType, seriesName string, correlative *uint) error {
 	if seriesName == "" || docType == "" {
 		return errors.New("serie y tipo de documento son requeridos")
 	}
-	if category == "" {
-		category = "venta"
-	}
-	if sunatCode == "" {
-		sunatCode = "01"
+	var err error
+	var documentCode, category string
+	docType, documentCode, category, err = docseries.NormalizeSeriesDocumentInput(docType)
+	if err != nil {
+		return err
 	}
 	seriesName = docseries.NormalizeSeriesCode(seriesName)
-	if err := s.assertSeriesCodeUnique(seriesName, 0); err != nil {
+	if err := docseries.ValidateSeriesConfig(docType, category, documentCode, seriesName); err != nil {
 		return err
+	}
+	if err := s.assertSeriesCodeUnique(branchID, category, seriesName, 0); err != nil {
+		return err
+	}
+	startCorrelative := uint(1)
+	if correlative != nil {
+		if *correlative == 0 {
+			return errors.New("el correlativo inicial debe ser mayor a 0")
+		}
+		startCorrelative = *correlative
 	}
 	return s.db.Create(&database.TenantDocumentSeries{
 		BranchID:    branchID,
 		DocType:     docType,
-		SunatCode:   sunatCode,
+		SunatCode:   documentCode,
 		Category:    category,
 		Series:      seriesName,
-		Correlative: 1,
+		Correlative: startCorrelative,
 		Active:      true,
 	}).Error
 }
 
-func (s *CompanyService) seriesUsage(id uint) (salesCount int64, ser *database.TenantDocumentSeries, err error) {
-	var row database.TenantDocumentSeries
-	if err = s.db.First(&row, id).Error; err != nil {
-		return 0, nil, err
-	}
-	if err = s.db.Model(&database.TenantSale{}).Where("series_id = ?", id).Count(&salesCount).Error; err != nil {
-		return 0, nil, err
-	}
-	return salesCount, &row, nil
+func (s *CompanyService) seriesUsageSvc() *SeriesUsageService {
+	return NewSeriesUsageService(s.db)
 }
 
-func (s *CompanyService) isSeriesLocked(id uint) (bool, int64, error) {
-	salesCount, ser, err := s.seriesUsage(id)
-	if err != nil {
-		return false, 0, err
-	}
-	return ser.Correlative > 1 || salesCount > 0, salesCount, nil
-}
-
-// SeriesListItem enriquece la serie con metadatos de uso documentario.
+// SeriesListItem enriquece la serie con metadatos de uso documentario (API única para el frontend).
 type SeriesListItem struct {
 	database.TenantDocumentSeries
-	Locked     bool  `json:"locked"`
-	SalesCount int64 `json:"sales_count"`
-	CanDelete  bool  `json:"can_delete"`
+	Locked      bool   `json:"locked"`
+	CanDelete   bool   `json:"can_delete"`
+	UsageTable  string `json:"usage_table"`
+	UsageCount  int64  `json:"usage_count"`
+	UsageReason string `json:"usage_reason"`
 }
 
 func (s *CompanyService) ListSeriesEnriched(branchID uint) ([]SeriesListItem, error) {
@@ -279,76 +437,103 @@ func (s *CompanyService) ListSeriesEnriched(branchID uint) ([]SeriesListItem, er
 	if err != nil {
 		return nil, err
 	}
+	usageSvc := s.seriesUsageSvc()
 	out := make([]SeriesListItem, 0, len(series))
 	for _, row := range series {
-		var salesCount int64
-		_ = s.db.Model(&database.TenantSale{}).Where("series_id = ?", row.ID).Count(&salesCount).Error
-		locked := row.Correlative > 1 || salesCount > 0
+		inUse, info, err := usageSvc.IsSeriesInUse(row.ID)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, SeriesListItem{
 			TenantDocumentSeries: row,
-			Locked:               locked,
-			SalesCount:           salesCount,
-			CanDelete:            !locked,
+			Locked:               inUse,
+			CanDelete:            !inUse,
+			UsageTable:           info.Table,
+			UsageCount:           info.Count,
+			UsageReason:          info.Reason,
 		})
 	}
 	return out, nil
 }
 
 func (s *CompanyService) DeleteSeries(id uint) error {
-	locked, salesCount, err := s.isSeriesLocked(id)
+	inUse, info, err := s.seriesUsageSvc().IsSeriesInUse(id)
 	if err != nil {
 		return err
 	}
-	if locked || salesCount > 0 {
-		return errors.New("no se puede eliminar una serie con documentos emitidos o numeración iniciada")
+	if inUse {
+		return errors.New(LockMessageWhenInUse(info))
 	}
 	return s.db.Delete(&database.TenantDocumentSeries{}, id).Error
 }
 
-func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, docType, sunatCode, category string, correlative *uint) error {
-	locked, _, err := s.isSeriesLocked(id)
+func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, docType string, correlative *uint) error {
+	inUse, usageInfo, err := s.seriesUsageSvc().IsSeriesInUse(id)
 	if err != nil {
 		return err
 	}
-	if locked {
+	lockMsg := LockMessageWhenInUse(usageInfo)
+	if inUse {
 		var existing database.TenantDocumentSeries
 		if err := s.db.First(&existing, id).Error; err != nil {
 			return err
 		}
-		// Solo permitir cambiar estado activo cuando la serie ya tiene uso.
 		if seriesName != "" && docseries.NormalizeSeriesCode(seriesName) != existing.Series {
-			return errors.New("no se puede modificar la serie: ya tiene documentos emitidos o numeración iniciada")
+			return errors.New(lockMsg)
 		}
-		if docType != "" && docType != existing.DocType {
-			return errors.New("no se puede modificar el tipo de documento: la serie ya está en uso")
-		}
-		if sunatCode != "" && sunatCode != existing.SunatCode {
-			return errors.New("no se puede modificar el código SUNAT: la serie ya está en uso")
-		}
-		if category != "" && category != existing.Category {
-			return errors.New("no se puede modificar la categoría: la serie ya está en uso")
+		if docType != "" {
+			incoming, err := docseries.ResolveDocumentType(docType)
+			if err != nil {
+				return err
+			}
+			current, err := docseries.ResolveDocumentType(existing.DocType)
+			if err != nil {
+				return err
+			}
+			if incoming.ID != current.ID {
+				return errors.New(lockMsg)
+			}
 		}
 		if correlative != nil && *correlative != existing.Correlative {
-			return errors.New("no se puede modificar el correlativo: la serie ya está en uso")
+			return errors.New(lockMsg)
 		}
 		return s.db.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).Update("active", active).Error
 	}
 
-	seriesName = docseries.NormalizeSeriesCode(seriesName)
+	var existing database.TenantDocumentSeries
+	if err := s.db.First(&existing, id).Error; err != nil {
+		return err
+	}
+	finalName := existing.Series
 	if seriesName != "" {
-		if err := s.assertSeriesCodeUnique(seriesName, id); err != nil {
+		finalName = seriesName
+	}
+	effectiveDocType := existing.DocType
+	if docType != "" {
+		effectiveDocType = docType
+	}
+	finalDocType, finalDocumentCode, finalCat, err := docseries.NormalizeSeriesDocumentInput(effectiveDocType)
+	if err != nil {
+		return err
+	}
+	if err := docseries.ValidateSeriesConfig(finalDocType, finalCat, finalDocumentCode, finalName); err != nil {
+		return err
+	}
+	if seriesName != "" {
+		normalized := docseries.NormalizeSeriesCode(seriesName)
+		if err := s.assertSeriesCodeUnique(existing.BranchID, finalCat, normalized, id); err != nil {
 			return err
 		}
+		finalName = normalized
 	}
-	updates := map[string]interface{}{"series": seriesName, "active": active}
+	updates := map[string]interface{}{"active": active}
+	if seriesName != "" {
+		updates["series"] = finalName
+	}
 	if docType != "" {
-		updates["doc_type"] = docType
-	}
-	if sunatCode != "" {
-		updates["sunat_code"] = sunatCode
-	}
-	if category != "" {
-		updates["category"] = category
+		updates["doc_type"] = finalDocType
+		updates["sunat_code"] = finalDocumentCode
+		updates["category"] = finalCat
 	}
 	if correlative != nil {
 		updates["correlative"] = *correlative

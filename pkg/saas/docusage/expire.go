@@ -29,19 +29,3 @@ func ExpirePackagesForEndedCycles() int {
 	}
 	return int(res.RowsAffected)
 }
-
-// ResetCycleDocumentUsage al iniciar nuevo período (cuando se crea ciclo nuevo con used=0).
-func InitCycleDocumentQuota(cycle *database.SaasBillingCycle, planID uint) {
-	if cycle == nil {
-		return
-	}
-	var plan database.SaasPlan
-	if database.CentralDB.First(&plan, planID).Error != nil {
-		return
-	}
-	_ = database.CentralDB.Model(cycle).Updates(map[string]interface{}{
-		"is_unlimited_documents": plan.IsUnlimitedDocuments,
-		"documents_limit":        planLimitFromPlan(&plan),
-		"documents_used":         0,
-	}).Error
-}

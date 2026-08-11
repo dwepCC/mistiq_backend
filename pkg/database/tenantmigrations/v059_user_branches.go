@@ -9,7 +9,7 @@ import (
 // V059UserBranches tabla N:N usuario ↔ sucursal + backfill desde home_branch_id.
 type V059UserBranches struct{}
 
-func (V059UserBranches) Version() int  { return 59 }
+func (V059UserBranches) Version() int { return 59 }
 func (V059UserBranches) Name() string { return "user_branches" }
 
 type v059UserBranch struct {

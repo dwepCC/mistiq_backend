@@ -14,6 +14,13 @@ func RegisterRoutes(api fiber.Router) {
 	api.Get("/billing/events", middleware.RequireModule("billing"), handler.SSEAccessTokenMiddleware, h.BillingEventsSSE)
 	api.Get("/billing/job/:saleId", middleware.RequireModule("billing"), h.GetBillingJobStatus)
 	api.Post("/billing/resend/:saleId", middleware.RequireModule("billing"), h.ResendToSUNAT)
+	// Corrección fiscal: reenvía con otra fecha de emisión aunque el comprobante
+	// ya tenga aceptación. Reservada a soporte por acceso maestro (auditable).
+	api.Post("/billing/reissue/:saleId",
+		middleware.RequireModule("billing"),
+		middleware.RequireMasterAccess(),
+		h.ReissueToSUNAT,
+	)
 	api.Post("/billing/void-with-credit-note/:saleId", middleware.RequireModule("billing"), h.VoidWithCreditNoteAPI)
 	api.Post("/billing/debit-notes/:saleId", middleware.RequireModule("billing"), h.CreateDebitNoteAPI)
 	api.Get("/billing/invoice/:saleId", middleware.RequireModule("billing"), h.GetInvoiceAPI)

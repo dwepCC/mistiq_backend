@@ -15,7 +15,7 @@ func (v054ModifierGroup) TableName() string { return "tenant_modifier_groups" }
 // V054ModifierGroupKind distingue presentaciones (reemplazan precio) de extras (suman al precio).
 type V054ModifierGroupKind struct{}
 
-func (V054ModifierGroupKind) Version() int  { return 54 }
+func (V054ModifierGroupKind) Version() int { return 54 }
 func (V054ModifierGroupKind) Name() string { return "modifier_group_kind" }
 
 func (V054ModifierGroupKind) Up(db *gorm.DB) error {

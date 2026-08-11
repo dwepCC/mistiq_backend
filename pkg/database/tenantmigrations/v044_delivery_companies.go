@@ -25,7 +25,7 @@ func (v044DeliveryDriver) TableName() string { return "tenant_delivery_drivers" 
 // V044DeliveryCompanies tabla de empresas delivery y vínculo en repartidores.
 type V044DeliveryCompanies struct{}
 
-func (V044DeliveryCompanies) Version() int  { return 44 }
+func (V044DeliveryCompanies) Version() int { return 44 }
 func (V044DeliveryCompanies) Name() string { return "delivery_companies" }
 
 func (V044DeliveryCompanies) Up(db *gorm.DB) error {

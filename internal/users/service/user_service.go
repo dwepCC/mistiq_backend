@@ -98,7 +98,7 @@ func (s *UserService) Create(input CreateUserInput) (*database.TenantUser, error
 	if len(branchIDs) == 0 && input.BranchID != nil && *input.BranchID > 0 {
 		branchIDs = []uint{*input.BranchID}
 	}
-	if len(branchIDs) > 0 && branch.UserBranchesReady(s.db) {
+	if len(branchIDs) > 0 {
 		if err := branch.SetUserAssignedBranches(s.db, user.ID, branchIDs, false); err != nil {
 			return nil, err
 		}
@@ -118,10 +118,32 @@ type UpdateUserInput struct {
 	Active    bool   `json:"active"`
 }
 
+func (s *UserService) TenantRoleEditLocked(userID uint, roleID uint) (bool, error) {
+	isOwner, err := database.IsTenantOwnerUser(s.db, userID)
+	if err != nil || !isOwner {
+		return false, err
+	}
+	var role database.TenantRole
+	if err := s.db.First(&role, roleID).Error; err != nil {
+		return false, err
+	}
+	return branch.IsTenantAdmin(role.Name), nil
+}
+
 func (s *UserService) Update(id uint, input UpdateUserInput) error {
 	user, err := s.GetByID(id)
 	if err != nil {
 		return errors.New("usuario no encontrado")
+	}
+
+	if input.RoleID > 0 && input.RoleID != user.RoleID {
+		locked, err := s.TenantRoleEditLocked(id, user.RoleID)
+		if err != nil {
+			return err
+		}
+		if locked {
+			return errors.New("no se puede cambiar el rol del usuario principal del sistema")
+		}
 	}
 
 	updates := map[string]interface{}{
@@ -143,7 +165,7 @@ func (s *UserService) Update(id uint, input UpdateUserInput) error {
 	if len(branchIDs) == 0 && input.BranchID != nil && *input.BranchID > 0 {
 		branchIDs = []uint{*input.BranchID}
 	}
-	if len(branchIDs) > 0 && branch.UserBranchesReady(s.db) {
+	if len(branchIDs) > 0 {
 		if err := branch.SetUserAssignedBranches(s.db, id, branchIDs, true); err != nil {
 			return err
 		}

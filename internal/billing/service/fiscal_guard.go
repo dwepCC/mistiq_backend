@@ -20,6 +20,12 @@ const (
 	FiscalSourceFiscalQueue FiscalOpSource = "fiscal_queue"
 	FiscalSourceRetry      FiscalOpSource = "retry"
 	FiscalSourceReconcile  FiscalOpSource = "reconcile"
+	// FiscalSourceReissue corrección de soporte: reenvía un comprobante con otra
+	// fecha de emisión aunque ya tenga aceptación registrada. Existe porque una
+	// aceptación de SUNAT beta no vale en producción, y sin este origen las
+	// guardas de "ya aceptado" impedirían corregirlo. Solo lo dispara el endpoint
+	// protegido por acceso maestro.
+	FiscalSourceReissue FiscalOpSource = "reissue"
 )
 
 // FiscalPrepareResult resultado de sync+lock antes de emitir/encolar.
@@ -101,7 +107,7 @@ func (s *BillingService) PrepareFiscalOperation(saleID, tenantID uint, source Fi
 		res.Invoice = sync.Invoice
 	}
 
-	switch classifyAfterSync(sync, allowResend) {
+	switch classifyAfterSync(sync, allowResend, source) {
 	case "already_accepted":
 		res.Proceed = false
 		res.Status = "already_accepted"
@@ -155,9 +161,14 @@ func hasInFlightFiscalWork(sync SSOTSyncOutcome) bool {
 	return false
 }
 
-func classifyAfterSync(sync SSOTSyncOutcome, allowResend bool) string {
+func classifyAfterSync(sync SSOTSyncOutcome, allowResend bool, source FiscalOpSource) string {
+	// La reemisión ignora la aceptación previa a propósito: es justo el caso que
+	// viene a corregir. Sigue respetando el trabajo en vuelo para no pisar un
+	// envío en curso.
+	reissue := source == FiscalSourceReissue
+
 	ms := sync.ManualStatus
-	if ms == "already_accepted" || ms == "accepted" {
+	if (ms == "already_accepted" || ms == "accepted") && !reissue {
 		return "already_accepted"
 	}
 	if ms == "rejected" && !allowResend {
@@ -174,7 +185,9 @@ func classifyAfterSync(sync SSOTSyncOutcome, allowResend bool) string {
 				return "already_processing"
 			}
 		case billingstate.PhaseAccepted, billingstate.PhaseObserved:
-			return "already_accepted"
+			if !reissue {
+				return "already_accepted"
+			}
 		}
 	}
 	return "allow"

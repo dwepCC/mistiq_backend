@@ -18,7 +18,9 @@ import (
 	"tukifac/pkg/database"
 	"tukifac/pkg/facturador"
 	"tukifac/pkg/fiscal"
+	"tukifac/pkg/pagination"
 	"tukifac/pkg/saas"
+	"tukifac/pkg/taxregime"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
@@ -32,21 +34,43 @@ func NewTenantHandler() *TenantHandler {
 	return &TenantHandler{svc: service.NewTenantService()}
 }
 
-// GET /api/superadmin/tenants?q=&status=&region_id=&provincia_id=
+// GET /api/superadmin/tenants?q=&status=&region_id=&provincia_id=&page=&per_page=
 func (h *TenantHandler) ListAPI(c fiber.Ctx) error {
-	tenants, err := h.svc.List(c.Query("q"), c.Query("status"), c.Query("region_id"), c.Query("provincia_id"))
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	perPage, _ := strconv.Atoi(c.Query("per_page", "25"))
+	page, perPage = pagination.Normalize(page, perPage)
+
+	tenants, total, err := h.svc.List(service.TenantListParams{
+		Query:       c.Query("q"),
+		Status:      c.Query("status"),
+		RegionID:    c.Query("region_id"),
+		ProvinciaID: c.Query("provincia_id"),
+		Page:        page,
+		PerPage:     perPage,
+	})
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	// Incluir billing_enabled por tenant para la columna Modo SUNAT
-	billingByTenant, _ := h.svc.BillingEnabledByTenantIDs(tenantIDs(tenants))
+	ids := tenantIDs(tenants)
+	billingByTenant, _ := h.svc.BillingEnabledByTenantIDs(ids)
+	planNames := make(map[uint]string, len(tenants))
+	for _, t := range tenants {
+		planNames[t.ID] = t.Plan
+	}
+	planRefs, _ := h.svc.PlanRefsByTenantIDs(ids, planNames)
 	out := make([]fiber.Map, 0, len(tenants))
 	for _, t := range tenants {
-		m := enrichTenantMap(&t)
+		m := withPlanRef(enrichTenantMap(&t), planRefs[t.ID])
 		m["billing_enabled"] = billingByTenant[t.ID]
 		out = append(out, m)
 	}
-	return c.JSON(fiber.Map{"data": out})
+	return c.JSON(fiber.Map{
+		"data":        out,
+		"page":        page,
+		"per_page":    perPage,
+		"total":       total,
+		"total_pages": pagination.TotalPages(total, perPage),
+	})
 }
 
 func tenantIDs(tenants []database.Tenant) []uint {
@@ -68,7 +92,11 @@ func (h *TenantHandler) GetAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Tenant no encontrado"})
 	}
 	modules, _ := h.svc.GetModules(uint(id))
-	return c.JSON(fiber.Map{"data": tenant, "modules": modules})
+	planRefs, _ := h.svc.PlanRefsByTenantIDs([]uint{uint(id)}, map[uint]string{uint(id): tenant.Plan})
+	return c.JSON(fiber.Map{
+		"data":    withPlanRef(enrichTenantMap(tenant), planRefs[uint(id)]),
+		"modules": modules,
+	})
 }
 
 // POST /api/superadmin/tenants
@@ -81,9 +109,11 @@ func (h *TenantHandler) CreateAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	// El cobro del alta va en la respuesta para poder registrar el pago en el mismo paso.
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"success": true,
-		"data":    enrichTenantMap(tenant),
+		"success":       true,
+		"data":          enrichTenantMap(tenant),
+		"billing_cycle": saas.PendingCycleForTenant(tenant.ID),
 	})
 }
 
@@ -126,6 +156,27 @@ func (h *TenantHandler) UpdateAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
+}
+
+// POST /api/superadmin/tenants/:id/master-access — acceso maestro al ERP web del tenant.
+func (h *TenantHandler) MasterAccessAPI(c fiber.Ctx) error {
+	if err := saRequireSuperAdminRole(c); err != nil {
+		return err
+	}
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	saEmail, _ := c.Locals("sa_user_email").(string)
+	result, err := h.svc.MasterAccess(uint(id), saUserID, saEmail, c.IP())
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{
+		"tenant_url": result.TenantURL,
+		"token":      result.Token,
+	})
 }
 
 // PATCH /api/superadmin/tenants/:id/status
@@ -264,6 +315,8 @@ func (h *TenantHandler) GetSunatConfigAPI(c fiber.Ctx) error {
 	pseTokenConfigured := false
 	solConfigured := false
 	certificateConfigured := false
+	greClientConfigured := false
+	greClientID := ""
 	sunatSolUser := ""
 	pseUser := ""
 	certificateFile := ""
@@ -292,33 +345,37 @@ func (h *TenantHandler) GetSunatConfigAPI(c fiber.Ctx) error {
 			pseTokenConfigured = st.PSETokenConfigured
 			solConfigured = st.SOLConfigured
 			certificateConfigured = st.CertificateConfigured
+			greClientConfigured = st.GreClientConfigured
+			greClientID = strings.TrimSpace(st.GreClientID)
 		}
 	}
 	return c.JSON(fiber.Map{
-		"sunat_enabled":          cfg.SunatEnabled,
-		"automatic_send":         cfg.AutomaticSend,
-		"sunat_env_mode":         fiscal.NormalizeSunatEnvMode(cfg.SunatEnvMode),
-		"tax_rate":               cfg.TaxRate,
-		"igv_regime":             cfg.IgvRegime,
-		"tax_benefit_zone":       cfg.TaxBenefitZone,
-		"ruc":                    cfg.RUC,
-		"business_name":          cfg.BusinessName,
-		"send_mode":              sendMode,
-		"fiscal_provider":        provider,
-		"connection_type":        connType,
-		"connection_status":      connStatus,
-		"fiscal_last_sync_at":    cfg.FiscalLastSyncAt,
-		"sunat_connected":        cfg.SunatConnected,
+		"sunat_enabled":           cfg.SunatEnabled,
+		"automatic_send":          cfg.AutomaticSend,
+		"sunat_env_mode":          fiscal.NormalizeSunatEnvMode(cfg.SunatEnvMode),
+		"tax_rate":                cfg.TaxRate,
+		"igv_regime":              cfg.IgvRegime,
+		"tax_benefit_zone":        cfg.TaxBenefitZone,
+		"ruc":                     cfg.RUC,
+		"business_name":           cfg.BusinessName,
+		"send_mode":               sendMode,
+		"fiscal_provider":         provider,
+		"connection_type":         connType,
+		"connection_status":       connStatus,
+		"fiscal_last_sync_at":     cfg.FiscalLastSyncAt,
+		"sunat_connected":         cfg.SunatConnected,
 		"pse_base_url_configured": pseBaseURLConfigured,
-		"pse_base_url":           pseBaseURL,
-		"pse_token_configured":   pseTokenConfigured,
-		"sol_configured":         solConfigured,
-		"certificate_configured": certificateConfigured,
-		"sunat_sol_user":         sunatSolUser,
-		"pse_user":                 pseUser,
-		"certificate_file":       certificateFile,
-		"logo_file":              logoFile,
-		"logo_configured":        logoFile != "",
+		"pse_base_url":            pseBaseURL,
+		"pse_token_configured":    pseTokenConfigured,
+		"sol_configured":          solConfigured,
+		"certificate_configured":  certificateConfigured,
+		"sunat_sol_user":          sunatSolUser,
+		"pse_user":                pseUser,
+		"certificate_file":        certificateFile,
+		"logo_file":               logoFile,
+		"logo_configured":         logoFile != "",
+		"gre_client_configured":   greClientConfigured,
+		"gre_client_id":           greClientID,
 	})
 }
 
@@ -334,23 +391,26 @@ func (h *TenantHandler) UpdateSunatConfigAPI(c fiber.Ctx) error {
 	}
 	defer database.ReleaseTenantDB(dbName)
 	var body struct {
-		SunatEnabled   bool    `json:"sunat_enabled"`
-		AutomaticSend  *bool   `json:"automatic_send"`
-		SunatSolUser   string  `json:"sunat_sol_user"`
-		SunatSolPass   string  `json:"sunat_sol_pass"`
-		Certificate    string  `json:"certificate"`
-		SunatEnvMode   string  `json:"sunat_env_mode"`
-		TaxRate        float64 `json:"tax_rate"`
-		IgvRegime      string  `json:"igv_regime"`
-		TaxBenefitZone bool    `json:"tax_benefit_zone"`
-		SendMode       string  `json:"send_mode"`
-		PSEProvider    string  `json:"pse_provider"`
-		FiscalProvider string  `json:"fiscal_provider"`
-		ConnectionType string  `json:"connection_type"`
-		PSEBaseURL     string  `json:"pse_base_url"`
-		PSEToken       string  `json:"pse_token"`
-		PSEUser        string  `json:"pse_user"`
-		PSEPassword    string  `json:"pse_password"`
+		SunatEnabled    bool    `json:"sunat_enabled"`
+		AutomaticSend   *bool   `json:"automatic_send"`
+		SunatSolUser    string  `json:"sunat_sol_user"`
+		SunatSolPass    string  `json:"sunat_sol_pass"`
+		Certificate     string  `json:"certificate"`
+		SunatEnvMode    string  `json:"sunat_env_mode"`
+		TaxRate         float64 `json:"tax_rate"`
+		IgvRegime       string  `json:"igv_regime"`
+		TaxBenefitZone  bool    `json:"tax_benefit_zone"`
+		SendMode        string  `json:"send_mode"`
+		PSEProvider     string  `json:"pse_provider"`
+		FiscalProvider  string  `json:"fiscal_provider"`
+		ConnectionType  string  `json:"connection_type"`
+		PSEBaseURL      string  `json:"pse_base_url"`
+		PSEToken        string  `json:"pse_token"`
+		PSEUser         string  `json:"pse_user"`
+		PSEPassword     string  `json:"pse_password"`
+		GreClientID     string  `json:"gre_client_id"`
+		GreClientSecret string  `json:"gre_client_secret"`
+		TaxpayerRegime  string  `json:"taxpayer_regime"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
@@ -371,8 +431,12 @@ func (h *TenantHandler) UpdateSunatConfigAPI(c fiber.Ctx) error {
 		if provider == "" {
 			provider = "validapse"
 		}
-	} else if connType == "" {
+		if fiscal.ResolvePSEBaseURL(provider) == "" {
+			provider = "validapse"
+		}
+	} else {
 		connType = "bearer"
+		provider = "sunat"
 	}
 
 	cfg, err := svc.GetConfig()
@@ -400,8 +464,14 @@ func (h *TenantHandler) UpdateSunatConfigAPI(c fiber.Ctx) error {
 		body.SunatEnabled,
 		body.TaxRate, body.IgvRegime, body.TaxBenefitZone,
 		body.AutomaticSend,
+		body.TaxpayerRegime,
 	); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	// Espejo del régimen en el registro central del tenant (fuente para el alta/edición).
+	if strings.TrimSpace(body.TaxpayerRegime) != "" {
+		database.CentralDB.Model(&database.Tenant{}).Where("id = ?", id).
+			Update("taxpayer_regime", string(taxregime.Normalize(body.TaxpayerRegime)))
 	}
 
 	certB64 := ""
@@ -411,17 +481,19 @@ func (h *TenantHandler) UpdateSunatConfigAPI(c fiber.Ctx) error {
 
 	if config.AppConfig.FacturadorBaseURL != "" && config.AppConfig.FacturadorToken != "" {
 		status, syncErr := svc.SyncFiscalToFacturador(companysvc.FiscalSyncInput{
-			SendMode:       sendMode,
-			Provider:       provider,
-			ConnectionType: connType,
-			SOLUser:        body.SunatSolUser,
-			SOLPass:        body.SunatSolPass,
-			CertificateB64: certB64,
-			PSEBaseURL:     pseBaseURL,
-			PSEUser:        body.PSEUser,
-			PSEPassword:    psePassword,
-			PSEToken:       pseToken,
-			Enabled:        body.SunatEnabled,
+			SendMode:        sendMode,
+			Provider:        provider,
+			ConnectionType:  connType,
+			SOLUser:         body.SunatSolUser,
+			SOLPass:         body.SunatSolPass,
+			CertificateB64:  certB64,
+			PSEBaseURL:      pseBaseURL,
+			PSEUser:         body.PSEUser,
+			PSEPassword:     psePassword,
+			PSEToken:        pseToken,
+			GreClientID:     body.GreClientID,
+			GreClientSecret: body.GreClientSecret,
+			Enabled:         body.SunatEnabled,
 		})
 		if syncErr != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": syncErr.Error()})
@@ -507,6 +579,7 @@ func (h *TenantHandler) PatchSunatEnvAPI(c fiber.Ctx) error {
 		cfg.SunatEnabled,
 		float64(cfg.TaxRate), cfg.IgvRegime, cfg.TaxBenefitZone,
 		nil,
+		cfg.TaxpayerRegime,
 	); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -592,9 +665,9 @@ func (h *TenantHandler) ListConectadosSunatAPI(c fiber.Ctx) error {
 		AmbienteLycet    string     `json:"ambiente_lycet,omitempty"`
 		SendMode         string     `json:"send_mode,omitempty"`
 		Provider         string     `json:"provider,omitempty"`
-		ConexionTipo       string     `json:"conexion_tipo"` // SUNAT | PSE
-		ConnectionStatus   string     `json:"connection_status,omitempty"`
-		PseConfigured      bool       `json:"pse_configured"`
+		ConexionTipo     string     `json:"conexion_tipo"` // SUNAT | PSE
+		ConnectionStatus string     `json:"connection_status,omitempty"`
+		PseConfigured    bool       `json:"pse_configured"`
 		Enabled          bool       `json:"enabled"`
 	}
 	out := make([]item, 0, len(empresasLycet))
@@ -626,8 +699,8 @@ func (h *TenantHandler) ListConectadosSunatAPI(c fiber.Ctx) error {
 				AmbienteLycet:    ambiente,
 				SendMode:         entry.SendMode,
 				Provider:         entry.Provider,
-				ConexionTipo:       conexion,
-				ConnectionStatus:   entry.ConnectionStatus,
+				ConexionTipo:     conexion,
+				ConnectionStatus: entry.ConnectionStatus,
 				PseConfigured:    pseConfigured,
 				Enabled:          entry.Enabled,
 			})
@@ -642,8 +715,8 @@ func (h *TenantHandler) ListConectadosSunatAPI(c fiber.Ctx) error {
 				AmbienteLycet:    ambiente,
 				SendMode:         entry.SendMode,
 				Provider:         entry.Provider,
-				ConexionTipo:       conexion,
-				ConnectionStatus:   entry.ConnectionStatus,
+				ConexionTipo:     conexion,
+				ConnectionStatus: entry.ConnectionStatus,
 				PseConfigured:    pseConfigured,
 				Enabled:          entry.Enabled,
 			})
@@ -1138,3 +1211,95 @@ func (h *TenantHandler) TogglePSEEmpresaAPI(c fiber.Ctx) error {
 	})
 }
 
+// PATCH /api/superadmin/tenants/facturador-enabled
+// Habilita/deshabilita en el facturador (Lycet) la empresa identificada por RUC.
+// Cuerpo: { "ruc": "20xxxxxxxxx", "enabled": true|false }.
+// Corrige el caso "Empresa fiscal deshabilitada o no registrada" cuando la empresa
+// existe en Lycet pero quedó con enabled=false. Si no existe en Lycet, Lycet exige
+// credenciales y el error se propaga (usar Sincronizar en ese caso).
+func (h *TenantHandler) SetFacturadorEnabledAPI(c fiber.Ctx) error {
+	if config.AppConfig.FacturadorBaseURL == "" || config.AppConfig.FacturadorToken == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "facturador no configurado"})
+	}
+	var body struct {
+		RUC     string `json:"ruc"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	ruc := strings.TrimSpace(body.RUC)
+	if len(ruc) != 11 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "RUC inválido (11 dígitos)"})
+	}
+	if err := facturador.Shared().SetEmpresaEnabled(ruc, body.Enabled); err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "ruc": ruc, "enabled": body.Enabled})
+}
+
+// GET /api/superadmin/backfills — backfills disponibles (run-once, idempotentes).
+func (h *TenantHandler) ListBackfillsAPI(c fiber.Ctx) error {
+	return c.JSON(fiber.Map{"data": h.svc.ListBackfills()})
+}
+
+// backfillVersionFromQuery: ?version=33; 0/ausente = todos los registrados.
+func backfillVersionFromQuery(c fiber.Ctx) int {
+	v, _ := strconv.Atoi(c.Query("version"))
+	return v
+}
+
+// POST /api/superadmin/tenants/:id/backfill?version= — corre backfill en un tenant.
+func (h *TenantHandler) RunBackfillAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := h.svc.RunBackfill(uint(id), backfillVersionFromQuery(c)); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "Backfill ejecutado"})
+}
+
+// POST /api/superadmin/backfills/run-all?version= — corre backfill en toda la flota.
+func (h *TenantHandler) RunBackfillAllAPI(c fiber.Ctx) error {
+	summary := h.svc.RunBackfillAll(backfillVersionFromQuery(c))
+	resp := fiber.Map{
+		"success":  len(summary.Failed) == 0,
+		"aplicado": len(summary.Success),
+		"failed":   len(summary.Failed),
+	}
+	if len(summary.Failed) > 0 {
+		failed := make([]string, 0, len(summary.Failed))
+		for _, f := range summary.Failed {
+			failed = append(failed, f.Slug)
+		}
+		resp["failed_tenants"] = failed
+	}
+	return c.JSON(resp)
+}
+
+// POST /api/superadmin/tenants/:id/cleanup-abandoned-orders — cancela ventas rápidas
+// abandonadas de un tenant (mantenimiento re-ejecutable).
+func (h *TenantHandler) CleanupAbandonedOrdersAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	n, err := h.svc.CleanupAbandonedQuickSales(uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "cancelled": n})
+}
+
+// POST /api/superadmin/maintenance/cleanup-abandoned-orders — flota completa.
+func (h *TenantHandler) CleanupAbandonedOrdersAllAPI(c fiber.Ctx) error {
+	cleaned, failed := h.svc.CleanupAbandonedQuickSalesFleet()
+	return c.JSON(fiber.Map{
+		"success":        len(failed) == 0,
+		"cancelled":      cleaned,
+		"failed":         len(failed),
+		"failed_tenants": failed,
+	})
+}

@@ -10,15 +10,16 @@ import (
 
 // TenantSeedInput datos del formulario de alta para seed inicial del tenant.
 type TenantSeedInput struct {
-	AdminEmail    string
-	AdminPassword string
-	CompanyName   string
-	RUC           string
-	Address       string
-	Ubigeo        string
-	Phone         string
-	Email         string
-	Rubro         string // general | gastronomico
+	AdminEmail     string
+	AdminPassword  string
+	CompanyName    string
+	RUC            string
+	Address        string
+	Ubigeo         string
+	Phone          string
+	Email          string
+	Rubro          string // general | gastronomico
+	TaxpayerRegime string // general | nrus — régimen tributario del contribuyente
 }
 
 // ProvisionTenantSeed inicializa BD tenant en una transacción (sucursal, empresa, POS, admin, series).
@@ -39,6 +40,12 @@ func ProvisionTenantSeed(db *gorm.DB, in TenantSeedInput) error {
 			return err
 		}
 		if err := seedDocumentSeries(tx, mainBranchID); err != nil {
+			return err
+		}
+		if err := SeedInventoryOperationTypes(tx); err != nil {
+			return err
+		}
+		if err := SeedInventoryDocumentSeriesForBranch(tx, mainBranchID); err != nil {
 			return err
 		}
 		if err := seedAdminUser(tx, in, mainBranchID); err != nil {
@@ -145,15 +152,15 @@ func seedCompanyConfig(tx *gorm.DB, in TenantSeedInput, branchID, walkInID uint)
 	if cfgCount > 0 {
 		return tx.Model(&TenantCompanyConfig{}).Where("id > 0").Limit(1).
 			Updates(map[string]interface{}{
-				"business_name":             strings.TrimSpace(in.CompanyName),
-				"ruc":                       strings.TrimSpace(in.RUC),
-				"address":                   addr,
-				"ubigeo":                    ubi,
-				"phone":                     strings.TrimSpace(in.Phone),
-				"email":                     strings.TrimSpace(in.Email),
-				"currency":                  "PEN",
-				"tax_rate":                  18.00,
-				"default_branch_id":         bid,
+				"business_name":              strings.TrimSpace(in.CompanyName),
+				"ruc":                        strings.TrimSpace(in.RUC),
+				"address":                    addr,
+				"ubigeo":                     ubi,
+				"phone":                      strings.TrimSpace(in.Phone),
+				"email":                      strings.TrimSpace(in.Email),
+				"currency":                   "PEN",
+				"tax_rate":                   18.00,
+				"default_branch_id":          bid,
 				"default_walk_in_contact_id": wid,
 			}).Error
 	}
@@ -169,6 +176,7 @@ func seedCompanyConfig(tx *gorm.DB, in TenantSeedInput, branchID, walkInID uint)
 		Currency:               "PEN",
 		TaxRate:                18.00,
 		SunatEnvMode:           "demo",
+		TaxpayerRegime:         in.TaxpayerRegime,
 	}
 	return tx.Create(&cfg).Error
 }
@@ -185,11 +193,15 @@ func seedDocumentSeries(tx *gorm.DB, branchID uint) error {
 		{BranchID: branchID, DocType: "FACTURA", SunatCode: "01", Category: "venta", Series: "F001", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "BOLETA", SunatCode: "03", Category: "venta", Series: "B001", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA DE VENTA", SunatCode: "00", Category: "venta", Series: "NV001", Correlative: 1, Active: true},
+		// La cotización no es documento SUNAT, pero necesita serie y correlativo propios.
+		// V073 la siembra para tenants existentes; aquí, porque esa migración corre antes
+		// de que exista la sucursal y no alcanza a crearla en un tenant nuevo.
+		{BranchID: branchID, DocType: "Cotización", SunatCode: "QT", Category: "cotizacion", Series: "COT01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_CREDITO", SunatCode: "07", Category: "nota_credito", Series: "FC01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_CREDITO", SunatCode: "07", Category: "nota_credito", Series: "BC01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_DEBITO", SunatCode: "08", Category: "nota_debito", Series: "FD01", Correlative: 1, Active: true},
-		{BranchID: branchID, DocType: "NOTA_DEBITO", SunatCode: "08", Category: "nota_debito", Series: "BD01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "GUIA_REMISION", SunatCode: "09", Category: "guia_remision", Series: "T001", Correlative: 1, Active: true},
+		{BranchID: branchID, DocType: "GUIA_TRANSPORTISTA", SunatCode: "31", Category: "guia_transportista", Series: "V001", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "RETENCION", SunatCode: "20", Category: "retencion", Series: "R001", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "PERCEPCION", SunatCode: "40", Category: "percepcion", Series: "P001", Correlative: 1, Active: true},
 	}

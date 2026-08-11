@@ -1,12 +1,19 @@
 package database
 
-import "tukifac/pkg/database/tenantmigrations"
+// Versiones de esquema tenant (Migration System v3).
+// 0 = BD vacía; la primera migración registrada es V001 (baseline_schema).
+const TenantSchemaBaselineVersion = 0
 
-// Versiones de esquema tenant (Migration System v2).
-// V30 = baseline congelado: estado del sistema antes del registry incremental.
-const TenantSchemaBaselineVersion = 30
+var tenantSchemaTargetVersion = 64
+
+// SetTenantSchemaTargetVersion sincroniza el objetivo con tenantmigrations.MaxVersion() al arranque.
+func SetTenantSchemaTargetVersion(v int) {
+	if v > 0 {
+		tenantSchemaTargetVersion = v
+	}
+}
 
 // TenantSchemaTargetVersion versión objetivo del binario (registry incremental).
 func TenantSchemaTargetVersion() int {
-	return tenantmigrations.MaxVersion()
+	return tenantSchemaTargetVersion
 }

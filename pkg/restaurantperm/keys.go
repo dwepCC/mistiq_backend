@@ -6,6 +6,7 @@ const (
 	TablesOpen      = "t.o"
 	OrdersCreate    = "o.c"
 	OrdersCharge    = "o.ch" // cobrar / generar venta (POS, mesa, ventas)
+	OrdersCancel    = "o.cx" // anular comandas / ítems (requiere PIN de operaciones)
 	KitchenView     = "k.v"
 	KitchenUpdate   = "k.u"
 	POSUse          = "p.u"
@@ -18,7 +19,7 @@ const (
 
 // AllKeys lista completa para invalidación / admin.
 var AllKeys = []string{
-	TablesView, TablesOpen, OrdersCreate, OrdersCharge,
+	TablesView, TablesOpen, OrdersCreate, OrdersCharge, OrdersCancel,
 	KitchenView, KitchenUpdate, POSUse, CashView,
 	ProductsManage, SettingsManage, DeliveryView, DeliveryUpdate,
 }
@@ -29,7 +30,7 @@ func LegacyRoleToKeys(role string) []string {
 	case "admin":
 		return append([]string{}, AllKeys...)
 	case "vendedor":
-		return []string{TablesView, TablesOpen, OrdersCreate, OrdersCharge, KitchenView, POSUse, CashView, DeliveryView}
+		return []string{TablesView, TablesOpen, OrdersCreate, OrdersCharge, OrdersCancel, KitchenView, POSUse, CashView, DeliveryView}
 	case "mozo":
 		return []string{TablesView, TablesOpen, OrdersCreate}
 	case "cocinero":
@@ -45,8 +46,8 @@ func EmployeeTypeToKeys(employeeType string, flags StaffFlags) []string {
 	case "admin", "supervisor":
 		keys := append([]string{}, AllKeys...)
 		return keys
-	case "cashier":
-		keys := []string{TablesView, TablesOpen, OrdersCreate, POSUse, CashView, KitchenView}
+	case "cashier", "cajero", "vendedor":
+		keys := []string{TablesView, TablesOpen, OrdersCreate, OrdersCancel, POSUse, CashView, KitchenView}
 		if flags.CanCharge {
 			keys = append(keys, OrdersCharge)
 		}

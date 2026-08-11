@@ -3,6 +3,7 @@ package superadmin
 import (
 	"tukifac/internal/ajustes"
 	consultaHandler "tukifac/internal/consulta/handler"
+	exchangeRateHandler "tukifac/internal/exchangerate/handler"
 	"tukifac/internal/payments"
 	"tukifac/internal/plans"
 	"tukifac/internal/saasadmin"
@@ -37,12 +38,14 @@ func RegisterRoutes(app *fiber.App) {
 	saAPI.Get("/tenants", tenantHandler.ListAPI)
 	saAPI.Get("/tenants/conectados-sunat", tenantHandler.ListConectadosSunatAPI)
 	saAPI.Get("/tenants/conectados-facturador", tenantHandler.ListConectadosSunatAPI)
+	saAPI.Patch("/tenants/facturador-enabled", tenantHandler.SetFacturadorEnabledAPI)
 	saAPI.Get("/pse/empresas", tenantHandler.ListPSEEmpresasAPI)
 	saAPI.Get("/pse/empresas/:id", tenantHandler.GetPSEEmpresaAPI)
 	saAPI.Post("/pse/empresas", tenantHandler.CreatePSEEmpresaAPI)
 	saAPI.Put("/pse/empresas/:id", tenantHandler.UpdatePSEEmpresaAPI)
 	saAPI.Patch("/pse/empresas/:id/toggle", tenantHandler.TogglePSEEmpresaAPI)
 	saAPI.Get("/tenants/:id", tenantHandler.GetAPI)
+	saAPI.Post("/tenants/:id/master-access", tenantHandler.MasterAccessAPI)
 	saAPI.Post("/tenants", tenantHandler.CreateAPI)
 	saAPI.Put("/tenants/:id", tenantHandler.UpdateAPI)
 	saAPI.Post("/tenants/:id/destroy-complete", tenantHandler.DestroyCompleteAPI)
@@ -51,10 +54,24 @@ func RegisterRoutes(app *fiber.App) {
 	saAPI.Post("/tenants/:id/modules", tenantHandler.SetModuleAPI)
 	saAPI.Post("/tenants/:id/migrate", tenantHandler.MigrateAPI)
 	saAPI.Post("/tenants/migrate-all", tenantHandler.MigrateAllAPI)
+	saAPI.Get("/backfills", tenantHandler.ListBackfillsAPI)
+	saAPI.Post("/tenants/:id/backfill", tenantHandler.RunBackfillAPI)
+	saAPI.Post("/backfills/run-all", tenantHandler.RunBackfillAllAPI)
+	saAPI.Post("/tenants/:id/cleanup-abandoned-orders", tenantHandler.CleanupAbandonedOrdersAPI)
+	saAPI.Post("/maintenance/cleanup-abandoned-orders", tenantHandler.CleanupAbandonedOrdersAllAPI)
 
 	saAPI.Get("/migrations", migrationHandler.ListAPI)
 	saAPI.Get("/migrations/summary", migrationHandler.SummaryAPI)
+	saAPI.Get("/migrations/jobs", migrationHandler.ListJobsAPI)
+	saAPI.Get("/migrations/jobs/:jobId", migrationHandler.GetJobAPI)
+	saAPI.Post("/migrations/drift-scan", migrationHandler.DriftScanAPI)
+	saAPI.Post("/migrations/bulk/repair", migrationHandler.BulkRepairAPI)
+	saAPI.Post("/migrations/bulk/repair-drifted", migrationHandler.BulkRepairDriftedAPI)
+	saAPI.Post("/migrations/bulk/retry-failed", migrationHandler.BulkRetryFailedAPI)
 	saAPI.Post("/migrations/resume-fleet", migrationHandler.ResumeFleetAPI)
+	saAPI.Get("/migrations/:tenantId/history", migrationHandler.HistoryAPI)
+	saAPI.Get("/migrations/:tenantId/drift", migrationHandler.DriftAPI)
+	saAPI.Post("/migrations/:tenantId/repair", migrationHandler.RepairAPI)
 	saAPI.Post("/migrations/:tenantId/retry", migrationHandler.RetryAPI)
 	saAPI.Post("/migrations/:tenantId/migrate", migrationHandler.MigrateAPI)
 	saAPI.Post("/migrations/:tenantId/pause", migrationHandler.PauseAPI)
@@ -77,6 +94,10 @@ func RegisterRoutes(app *fiber.App) {
 	consultaH := consultaHandler.NewConsultaHandler()
 	saAPI.Post("/consulta/dni", consultaH.ConsultaDNIAPI)
 	saAPI.Post("/consulta/ruc", consultaH.ConsultaRUCAPI)
+
+	exchangeRateH := exchangeRateHandler.NewExchangeRateHandler()
+	saAPI.Get("/exchange-rates/today", exchangeRateH.TodayAPI)
+	saAPI.Post("/exchange-rates/refresh", exchangeRateH.RefreshAPI)
 
 	// Planes, módulos del catálogo, suscripciones y pagos
 	plans.RegisterRoutes(saAPI)

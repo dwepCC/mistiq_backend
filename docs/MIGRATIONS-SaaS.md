@@ -91,7 +91,7 @@ SMTP_HOST=smtp.tu-dominio.com
 SMTP_PORT=587
 SMTP_USER=...
 SMTP_PASSWORD=...
-SMTP_FROM=noreply@bendey.cloud
+SMTP_FROM=noreply@tukifac.com
 
 # Health interno
 INTERNAL_API_KEY=clave-larga-secreta

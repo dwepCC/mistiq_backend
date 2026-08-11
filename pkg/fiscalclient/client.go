@@ -21,6 +21,10 @@ type EmitRequest struct {
 	RUC            string                 `json:"ruc"`
 	Document       map[string]interface{} `json:"document"`
 	IdempotencyKey string                 `json:"idempotency_key,omitempty"`
+	// Reissue autoriza al facturador a sobrescribir el snapshot de un documento
+	// ya aceptado y volver a generarlo. Solo lo activa la corrección de soporte
+	// (fecha de emisión nueva sobre un comprobante emitido contra beta).
+	Reissue bool `json:"reissue,omitempty"`
 }
 
 // EmitResponse respuesta 202 del facturador.

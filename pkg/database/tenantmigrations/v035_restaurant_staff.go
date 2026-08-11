@@ -38,7 +38,7 @@ func (v035Settings) TableName() string { return "tenant_restaurant_settings" }
 // V035RestaurantStaff perfil operativo + flags staff v2.
 type V035RestaurantStaff struct{}
 
-func (V035RestaurantStaff) Version() int  { return 35 }
+func (V035RestaurantStaff) Version() int { return 35 }
 func (V035RestaurantStaff) Name() string { return "restaurant_staff_v2" }
 
 func (V035RestaurantStaff) Up(db *gorm.DB) error {

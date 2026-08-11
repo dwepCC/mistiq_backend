@@ -44,6 +44,7 @@ func TestConcurrentReserve_100goroutines_5quota(t *testing.T) {
 		&database.SaasElectronicDocumentUsage{},
 		&database.SaasDocumentPackage{},
 		&database.SaasTenantDocumentPackage{},
+		&database.SaasDocumentQuotaPeriod{},
 		&database.Tenant{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -55,6 +56,7 @@ func TestConcurrentReserve_100goroutines_5quota(t *testing.T) {
 	}
 
 	db.Exec("DELETE FROM saas_electronic_document_usages")
+	db.Exec("DELETE FROM saas_document_quota_periods")
 	db.Exec("DELETE FROM saas_billing_cycles")
 	db.Exec("DELETE FROM saas_subscriptions")
 	db.Exec("DELETE FROM saas_plans")
@@ -132,14 +134,19 @@ func TestConcurrentReserve_100goroutines_5quota(t *testing.T) {
 		t.Fatalf("expected exactly 5 successes, got %d (use DOCUSAGE_MYSQL_DSN for MySQL stress)", okCount)
 	}
 
-	var c database.SaasBillingCycle
-	if err := db.First(&c, cycle.ID).Error; err != nil {
+	// El cupo se descuenta del período mensual, no del ciclo de cobro.
+	var periods []database.SaasDocumentQuotaPeriod
+	if err := db.Where("subscription_id = ?", sub.ID).Find(&periods).Error; err != nil {
 		t.Fatal(err)
 	}
-	if c.DocumentsUsed != 5 {
-		t.Fatalf("documents_used want 5, got %d", c.DocumentsUsed)
+	if len(periods) != 1 {
+		t.Fatalf("se esperaba 1 período de cuota, hay %d", len(periods))
 	}
-	if c.DocumentsUsed < 0 || c.DocumentsLimit < 0 {
+	p := periods[0]
+	if p.DocumentsUsed != 5 {
+		t.Fatalf("documents_used want 5, got %d", p.DocumentsUsed)
+	}
+	if p.DocumentsUsed < 0 || p.DocumentsLimit < 0 {
 		t.Fatal("negative counters")
 	}
 

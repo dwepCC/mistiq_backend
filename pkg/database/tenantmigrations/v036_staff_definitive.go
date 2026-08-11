@@ -11,7 +11,7 @@ import (
 // V036StaffDefinitive migra waiters → staff, staff_id en sesiones, activa staff v2.
 type V036StaffDefinitive struct{}
 
-func (V036StaffDefinitive) Version() int  { return 36 }
+func (V036StaffDefinitive) Version() int { return 36 }
 func (V036StaffDefinitive) Name() string { return "restaurant_staff_definitive" }
 
 type v036SessionStaff struct {

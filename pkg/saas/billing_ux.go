@@ -17,6 +17,11 @@ type BillingContextView struct {
 	CurrentPaymentTone  string  `json:"current_payment_tone"` // success, warning, danger, info, muted
 	HasRealDebt         bool    `json:"has_real_debt"`
 	DisplayDebtAmount   float64 `json:"display_debt_amount,omitempty"`
+	// PaymentDueDate y PaymentDaysLeft describen el plazo del cobro en curso (no la vigencia
+	// del plan): días que quedan para pagarlo antes de que se dé por vencido. Negativo = el
+	// plazo ya se agotó.
+	PaymentDueDate  string `json:"payment_due_date,omitempty"`
+	PaymentDaysLeft int    `json:"payment_days_left,omitempty"`
 	ShowStatusBanner    bool    `json:"show_status_banner"`
 	StatusBannerVariant string  `json:"status_banner_variant,omitempty"`
 	StatusBannerMessage string  `json:"status_banner_message,omitempty"`
@@ -72,6 +77,13 @@ func BuildBillingContext(sub TenantSubscriptionView, cfg PlatformSettings, tenan
 				out.DisplayDebtAmount = BillingCycleAmountDue(currentCycle, &tenant, &s)
 			}
 		}
+	}
+
+	if currentCycle != nil &&
+		(currentCycle.Status == database.SaasInvoicePending || currentCycle.Status == database.SaasInvoiceOverdue) {
+		due := CalendarDateLima(currentCycle.DueDate)
+		out.PaymentDueDate = due.Format("2006-01-02")
+		out.PaymentDaysLeft = calendarDaysBetween(NowLima(), due.AddDate(0, 0, EffectivePaymentWindowDays(cfg)))
 	}
 
 	out.UrgencyTier, out.CurrentPaymentLabel, out.CurrentPaymentTone = resolvePaymentUX(sub, cfg, out.HasRealDebt, out.DisplayDebtAmount)
@@ -133,7 +145,12 @@ func resolvePaymentUX(sub TenantSubscriptionView, cfg PlatformSettings, hasDebt 
 		tier = "review"
 		return tier, "En revisión", "info"
 	}
-	if sub.IsSuspended || (!sub.CanOperate && sub.ShowSuspendedBanner) {
+	// Vencido y suspendido cortan igual el acceso, pero no son lo mismo y el tenant lee ambos
+	// a la vez: el widget muestra el estado («VENCIDA») y el banner el mensaje. Antes la
+	// condición de suspensión capturaba también al vencido —porque tampoco puede operar—, así
+	// que se veía «VENCIDA» junto a «Tu cuenta está suspendida». Cada estado usa su rama; la
+	// de suspensión queda al final como red para casos sin estado propio.
+	if sub.IsSuspended {
 		tier = "suspended"
 		if hasDebt {
 			return tier, fmt.Sprintf("Pendiente S/ %.2f", debtAmt), "danger"
@@ -154,6 +171,13 @@ func resolvePaymentUX(sub TenantSubscriptionView, cfg PlatformSettings, hasDebt 
 		}
 		return tier, "Vencido", "danger"
 	}
+	if !sub.CanOperate && sub.ShowSuspendedBanner {
+		tier = "suspended"
+		if hasDebt {
+			return tier, fmt.Sprintf("Pendiente S/ %.2f", debtAmt), "danger"
+		}
+		return tier, "Suspendido", "danger"
+	}
 	maxRem := MaxReminderDay(cfg.ReminderDays)
 	if sub.DaysUntilExpiry > 0 && maxRem > 0 && sub.DaysUntilExpiry <= maxRem && sub.Status == database.SaasSubActive {
 		tier = "reminder"
@@ -162,8 +186,11 @@ func resolvePaymentUX(sub TenantSubscriptionView, cfg PlatformSettings, hasDebt 
 		}
 		return tier, "Renovación próxima", "warning"
 	}
+	// Deuda con el plan lejos de vencer: es el cobro del período en curso, no una renovación
+	// próxima. Antes caía también en «reminder» y el aviso decía «tu plan vence en 31 días»
+	// justo después de dar de alta al cliente, que es lo contrario de lo que pasaba.
 	if hasDebt {
-		return "reminder", fmt.Sprintf("Pendiente S/ %.2f", debtAmt), "warning"
+		return "payment_due", fmt.Sprintf("Pendiente S/ %.2f", debtAmt), "warning"
 	}
 	return tier, "Pagado", "success"
 }
@@ -184,7 +211,14 @@ func resolveStatusBanner(sub TenantSubscriptionView, ctx BillingContextView) (sh
 	case "grace":
 		return true, "warning", "Periodo de gracia: realiza tu pago para evitar la suspensión."
 	case "overdue":
-		return true, "warning", "Tu suscripción está vencida. Regulariza tu pago."
+		// Vencido ya implica acceso restringido (CanOperate lo niega): decirlo evita que el
+		// tenant crea que solo es un recordatorio y descubra el corte al intentar vender.
+		if ctx.HasRealDebt {
+			return true, "danger", fmt.Sprintf(
+				"Tu suscripción venció y el acceso quedó restringido. Regulariza S/ %.2f para reactivarlo.",
+				ctx.DisplayDebtAmount)
+		}
+		return true, "danger", "Tu suscripción venció y el acceso quedó restringido. Regulariza tu pago para reactivarlo."
 	case "reminder":
 		if sub.DaysUntilExpiry > 0 {
 			return true, "warning", fmt.Sprintf("Tu plan vence en %d día(s). Programa tu renovación.", sub.DaysUntilExpiry)
@@ -193,6 +227,22 @@ func resolveStatusBanner(sub TenantSubscriptionView, ctx BillingContextView) (sh
 			return true, "warning", fmt.Sprintf("Tienes un pago pendiente de S/ %.2f.", ctx.DisplayDebtAmount)
 		}
 		return true, "warning", "Renovación próxima."
+	case "payment_due":
+		// Habla del plazo del cobro, no de la vigencia del plan: son cosas distintas y el
+		// tenant necesita saber cuánto le queda para pagar, no cuándo vence su suscripción.
+		if ctx.PaymentDaysLeft > 0 {
+			return true, "warning", fmt.Sprintf(
+				"Tienes un pago pendiente de S/ %.2f. Cuentas con %d día(s) para regularizarlo.",
+				ctx.DisplayDebtAmount, ctx.PaymentDaysLeft)
+		}
+		if ctx.PaymentDaysLeft == 0 {
+			return true, "warning", fmt.Sprintf(
+				"Tienes un pago pendiente de S/ %.2f. Hoy vence el plazo para regularizarlo.",
+				ctx.DisplayDebtAmount)
+		}
+		return true, "danger", fmt.Sprintf(
+			"El plazo para pagar S/ %.2f venció. Regulariza tu pago para evitar la suspensión.",
+			ctx.DisplayDebtAmount)
 	default:
 		return false, "success", "Tu suscripción está activa."
 	}

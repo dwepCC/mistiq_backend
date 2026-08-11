@@ -50,15 +50,21 @@ func ListCatalogAdmin() ([]database.SaasDocumentPackage, error) {
 	return rows, err
 }
 
+// UpsertPackageInput payload del panel central.
+//
+// Los tags JSON son obligatorios: el panel envía snake_case y encoding/json empareja sin
+// distinguir mayúsculas pero NO ignora los guiones bajos, así que "documents_qty" jamás
+// llegaba a DocumentsQty. Quedaba en 0 y la validación rechazaba el formulario aunque
+// estuviera completo; is_active y sort_order se perdían igual, en silencio.
 type UpsertPackageInput struct {
-	ID           uint
-	Name         string
-	Description  string
-	DocumentsQty int
-	Price        float64
-	Currency     string
-	IsActive     bool
-	SortOrder    int
+	ID           uint    `json:"id"`
+	Name         string  `json:"name"`
+	Description  string  `json:"description"`
+	DocumentsQty int     `json:"documents_qty"`
+	Price        float64 `json:"price"`
+	Currency     string  `json:"currency"`
+	IsActive     bool    `json:"is_active"`
+	SortOrder    int     `json:"sort_order"`
 }
 
 func UpsertCatalogPackage(in UpsertPackageInput) (*database.SaasDocumentPackage, error) {

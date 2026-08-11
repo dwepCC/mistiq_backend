@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"tukifac/internal/exchangerate"
 	"tukifac/pkg/database"
 
 	ajustesvc "tukifac/internal/ajustes/service"
@@ -114,8 +115,12 @@ type RUCResponse struct {
 		Departamento          string   `json:"departamento"`
 		Provincia             string   `json:"provincia"`
 		Distrito              string   `json:"distrito"`
-		UbigeoSunat           string   `json:"ubigeo_sunat"`
-		Ubigeo                []string `json:"ubigeo"`
+		UbigeoSunat                    string   `json:"ubigeo_sunat"`
+		Ubigeo                         []string `json:"ubigeo"`
+		EsAgenteDeRetencion            string   `json:"es_agente_de_retencion"`
+		EsAgenteDePercepcion           string   `json:"es_agente_de_percepcion"`
+		EsAgenteDePercepcionCombustible string  `json:"es_agente_de_percepcion_combustible"`
+		EsBuenContribuyente            string   `json:"es_buen_contribuyente"`
 	} `json:"data"`
 	Message string `json:"message"`
 }
@@ -132,7 +137,11 @@ type RUCResult struct {
 	Departamento   string `json:"departamento"`
 	Provincia      string `json:"provincia"`
 	Distrito       string `json:"distrito"`
-	Ubigeo         string `json:"ubigeo"` // 6 dígitos (distrito)
+	Ubigeo                          string `json:"ubigeo"` // 6 dígitos (distrito)
+	EsAgenteDeRetencion             bool   `json:"es_agente_de_retencion"`
+	EsAgenteDePercepcion            bool   `json:"es_agente_de_percepcion"`
+	EsAgenteDePercepcionCombustible bool   `json:"es_agente_de_percepcion_combustible"`
+	EsBuenContribuyente             bool   `json:"es_buen_contribuyente"`
 }
 
 func (s *ConsultaService) ConsultaDNI(dni string) (*DNIResult, error) {
@@ -210,16 +219,75 @@ func (s *ConsultaService) ConsultaRUC(ruc string) (*RUCResult, error) {
 		ubigeo = r.Data.Ubigeo[2]
 	}
 	return &RUCResult{
-		Success:          true,
-		RUC:              r.Data.RUC,
-		RazonSocial:      r.Data.NombreORazonSocial,
-		Direccion:        r.Data.Direccion,
-		DireccionCompleta: r.Data.DireccionCompleta,
-		Estado:           r.Data.Estado,
-		Condicion:        r.Data.Condicion,
-		Departamento:     r.Data.Departamento,
-		Provincia:        r.Data.Provincia,
-		Distrito:         r.Data.Distrito,
-		Ubigeo:           ubigeo,
+		Success:                         true,
+		RUC:                             r.Data.RUC,
+		RazonSocial:                     r.Data.NombreORazonSocial,
+		Direccion:                       r.Data.Direccion,
+		DireccionCompleta:               r.Data.DireccionCompleta,
+		Estado:                          r.Data.Estado,
+		Condicion:                       r.Data.Condicion,
+		Departamento:                    r.Data.Departamento,
+		Provincia:                       r.Data.Provincia,
+		Distrito:                        r.Data.Distrito,
+		Ubigeo:                          ubigeo,
+		EsAgenteDeRetencion:             sunatSiNoToBool(r.Data.EsAgenteDeRetencion),
+		EsAgenteDePercepcion:            sunatSiNoToBool(r.Data.EsAgenteDePercepcion),
+		EsAgenteDePercepcionCombustible: sunatSiNoToBool(r.Data.EsAgenteDePercepcionCombustible),
+		EsBuenContribuyente:             sunatSiNoToBool(r.Data.EsBuenContribuyente),
 	}, nil
+}
+
+// sunatSiNoToBool convierte "SI"/"NO" de apiperu.dev a bool.
+func sunatSiNoToBool(v string) bool {
+	return strings.EqualFold(strings.TrimSpace(v), "SI")
+}
+
+// TipoCambioResult tipo de cambio SUNAT (USD/PEN) para una fecha.
+type TipoCambioResult struct {
+	Success          bool    `json:"success"`
+	Fecha            string  `json:"fecha"`
+	FechaEfectiva    string  `json:"fecha_efectiva,omitempty"`
+	Moneda           string  `json:"moneda"`
+	Venta            float64 `json:"venta"`
+	Compra           float64 `json:"compra"`
+	Fuente           string  `json:"fuente"`
+	Status           string  `json:"status,omitempty"`
+	EsFallback       bool    `json:"es_fallback,omitempty"`
+	ProximoReintento *string `json:"proximo_reintento,omitempty"`
+	Mensaje          string  `json:"mensaje,omitempty"`
+	ErrorMessage     string  `json:"error_message,omitempty"`
+}
+
+// GetTipoCambio delega al cache central (Redis + BD); no consulta apiperu directamente.
+func (s *ConsultaService) GetTipoCambio(fecha string) (*TipoCambioResult, error) {
+	res, err := exchangerate.DefaultService().GetExchangeRate(fecha)
+	if err != nil {
+		return nil, err
+	}
+	return mapExchangeRateResult(res), nil
+}
+
+func mapExchangeRateResult(res *exchangerate.QueryResult) *TipoCambioResult {
+	if res == nil {
+		return &TipoCambioResult{Success: false, ErrorMessage: "sin respuesta"}
+	}
+	return &TipoCambioResult{
+		Success:          res.Success,
+		Fecha:            res.Fecha,
+		FechaEfectiva:    res.FechaEfectiva,
+		Moneda:           res.Moneda,
+		Venta:            res.Venta,
+		Compra:           res.Compra,
+		Fuente:           res.Fuente,
+		Status:           res.Status,
+		EsFallback:       res.EsFallback,
+		ProximoReintento: res.ProximoReintento,
+		Mensaje:          res.Mensaje,
+		ErrorMessage:     res.ErrorMessage,
+	}
+}
+
+// ConsultaTipoCambio deprecated: usar GetTipoCambio (cache central).
+func (s *ConsultaService) ConsultaTipoCambio(fecha string) (*TipoCambioResult, error) {
+	return s.GetTipoCambio(fecha)
 }

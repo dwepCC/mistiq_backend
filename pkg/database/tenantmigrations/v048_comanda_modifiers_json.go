@@ -9,7 +9,7 @@ import (
 // V048ComandaModifiersJSON agrega modifiers_json a tenant_comandas (variantes y extras).
 type V048ComandaModifiersJSON struct{}
 
-func (V048ComandaModifiersJSON) Version() int  { return 48 }
+func (V048ComandaModifiersJSON) Version() int { return 48 }
 func (V048ComandaModifiersJSON) Name() string { return "comanda_modifiers_json" }
 
 func (V048ComandaModifiersJSON) Up(db *gorm.DB) error {

@@ -12,6 +12,7 @@ import (
 	"tukifac/pkg/billingevents"
 	"tukifac/pkg/billingqueue"
 	"tukifac/pkg/database"
+	"tukifac/pkg/database/engine"
 	"tukifac/pkg/fiscaladmin"
 	"tukifac/pkg/fiscalclient"
 	"tukifac/pkg/fiscalqueue"
@@ -21,6 +22,7 @@ import (
 
 // Init infraestructura de producción (Redis, tenant cache, DB manager, billing workers).
 func Init(cfg *config.Config) error {
+	engine.SyncSchemaTargetVersion()
 	if err := database.ConnectCentral(); err != nil {
 		return err
 	}

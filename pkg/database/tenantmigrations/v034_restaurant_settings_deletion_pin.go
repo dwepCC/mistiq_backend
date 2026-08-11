@@ -15,7 +15,7 @@ func (v034RestaurantSetting) TableName() string { return "tenant_restaurant_sett
 // V034RestaurantSettingsDeletionPin amplía deletion_pin para almacenar hash bcrypt (~60 chars).
 type V034RestaurantSettingsDeletionPin struct{}
 
-func (V034RestaurantSettingsDeletionPin) Version() int  { return 34 }
+func (V034RestaurantSettingsDeletionPin) Version() int { return 34 }
 func (V034RestaurantSettingsDeletionPin) Name() string { return "restaurant_settings_deletion_pin" }
 
 func (V034RestaurantSettingsDeletionPin) Up(db *gorm.DB) error {

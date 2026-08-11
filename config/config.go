@@ -53,11 +53,14 @@ type Config struct {
 	TenantPoolEvictInterval time.Duration
 
 	// Redis (resuelto en Load desde REDIS_URL / REDIS_ADDR / REDIS_HOST+PORT)
-	Redis            RedisSettings
-	RedisURL         string // URL canónica (compatibilidad)
-	RedisPoolSize    int
+	Redis             RedisSettings
+	RedisURL          string // URL canónica (compatibilidad)
+	RedisPoolSize     int
 	RedisMinIdleConns int
-	RedisMaxRetries  int
+	RedisMaxRetries   int
+
+	// Feature flag: endpoint compuesto de checkout para el POS de venta rápida.
+	POSFastCheckoutEnabled bool
 
 	// Billing async queue (Redis LIST)
 	BillingAsyncEnabled   bool
@@ -66,13 +69,13 @@ type Config struct {
 	BillingRetryBaseDelay time.Duration
 
 	// Migraciones CLI (lotes)
-	MigrationBatchSize  int
-	MigrationBatchPause time.Duration
-	MigrationAlertWebhook string
-	MigrationAlertEmail   string
-	FleetFailedThreshold          int
-	FleetCircuitBreakerThreshold  int
-	InternalAPIKey                string
+	MigrationBatchSize           int
+	MigrationBatchPause          time.Duration
+	MigrationAlertWebhook        string
+	MigrationAlertEmail          string
+	FleetFailedThreshold         int
+	FleetCircuitBreakerThreshold int
+	InternalAPIKey               string
 
 	// SMTP opcional (alertas migración)
 	SMTPHost     string
@@ -81,13 +84,13 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string
 
-	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. bendey.cloud).
+	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. tukifac.com).
 	// Alias env: ROOT_DOMAIN (tiene prioridad sobre APP_DOMAIN).
 	AppDomain string
 
-	// URL pública del API (CORS). Ej: https://api.bendey.cloud
+	// URL pública del API (CORS). Ej: https://api.tukifac.com
 	APIPublicURL string
-	// Host del API sin esquema (alternativa a API_PUBLIC_URL). Ej: api.bendey.cloud
+	// Host del API sin esquema (alternativa a API_PUBLIC_URL). Ej: api.tukifac.com
 	APIHost string
 
 	// Subdominios reservados (no son tenants): api, app, www, admin, central + extras en .env
@@ -101,17 +104,21 @@ type Config struct {
 	SAJWTSecret string
 
 	// Servidor HTTP
-	ServerPort      string
-	BodyLimitBytes  int
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
+	ServerPort     string
+	BodyLimitBytes int
+	ReadTimeout    time.Duration
+	WriteTimeout   time.Duration
+	IdleTimeout    time.Duration
 
 	// Facturación electrónica externa
-	FacturadorBaseURL         string
-	FacturadorToken           string
-	FiscalQueueWorkers        int
-	InvoiceStoragePath        string
+	FacturadorBaseURL          string
+	FacturadorToken            string
+	FiscalQueueWorkers         int
+	// SunatMaxBackdateDays días calendario hacia atrás admitidos al reemitir un
+	// comprobante con otra fecha de emisión. Configurable porque el plazo lo fija
+	// SUNAT y ha cambiado con el tiempo.
+	SunatMaxBackdateDays       int
+	InvoiceStoragePath         string
 	ValidaPSEManagementBaseURL string
 	ValidaPSEManagementToken   string
 
@@ -186,8 +193,8 @@ func Load() error {
 
 		DBCentralMaxOpen:  getEnvInt("DB_CENTRAL_MAX_OPEN", 25),
 		DBCentralMaxIdle:  getEnvInt("DB_CENTRAL_MAX_IDLE", 10),
-		DBTenantMaxOpen:   getEnvInt("DB_TENANT_MAX_OPEN", 2),
-		DBTenantMaxIdle:   getEnvInt("DB_TENANT_MAX_IDLE", 1),
+		DBTenantMaxOpen:   getEnvInt("DB_TENANT_MAX_OPEN", 6),
+		DBTenantMaxIdle:   getEnvInt("DB_TENANT_MAX_IDLE", 3),
 		DBConnMaxLifetime: getEnvDuration("DB_CONN_MAX_LIFETIME", "30m"),
 		DBConnMaxIdleTime: getEnvDuration("DB_CONN_MAX_IDLE_TIME", "5m"),
 		DBReadTimeout:     getEnvDuration("DB_READ_TIMEOUT", "3s"),
@@ -203,14 +210,16 @@ func Load() error {
 		TenantPoolMaxActive:     getEnvInt("TENANT_POOL_MAX_ACTIVE", 200),
 		TenantPoolEvictInterval: getEnvDuration("TENANT_POOL_EVICT_INTERVAL", "2m"),
 
-		BillingAsyncEnabled:   getEnvBool("BILLING_ASYNC_ENABLED", true),
-		BillingQueueWorkers:   getEnvInt("BILLING_QUEUE_WORKERS", 4),
-		BillingMaxRetries:     getEnvInt("BILLING_MAX_RETRIES", 5),
-		BillingRetryBaseDelay: getEnvDuration("BILLING_RETRY_BASE_DELAY", "30s"),
-		MigrationBatchSize:    getEnvInt("MIGRATION_BATCH_SIZE", 50),
-		MigrationBatchPause:   getEnvDuration("MIGRATION_BATCH_PAUSE", "2s"),
-		MigrationAlertWebhook: getEnv("MIGRATION_ALERT_WEBHOOK", ""),
-		MigrationAlertEmail:   getEnv("MIGRATION_ALERT_EMAIL", ""),
+		POSFastCheckoutEnabled: getEnvBool("POS_FAST_CHECKOUT_ENABLED", true),
+
+		BillingAsyncEnabled:          getEnvBool("BILLING_ASYNC_ENABLED", true),
+		BillingQueueWorkers:          getEnvInt("BILLING_QUEUE_WORKERS", 4),
+		BillingMaxRetries:            getEnvInt("BILLING_MAX_RETRIES", 5),
+		BillingRetryBaseDelay:        getEnvDuration("BILLING_RETRY_BASE_DELAY", "30s"),
+		MigrationBatchSize:           getEnvInt("MIGRATION_BATCH_SIZE", 50),
+		MigrationBatchPause:          getEnvDuration("MIGRATION_BATCH_PAUSE", "2s"),
+		MigrationAlertWebhook:        getEnv("MIGRATION_ALERT_WEBHOOK", ""),
+		MigrationAlertEmail:          getEnv("MIGRATION_ALERT_EMAIL", ""),
 		FleetFailedThreshold:         getEnvInt("FLEET_FAILED_THRESHOLD", 25),
 		FleetCircuitBreakerThreshold: getEnvInt("FLEET_CIRCUIT_BREAKER_THRESHOLD", 10),
 		InternalAPIKey:               getEnv("INTERNAL_API_KEY", ""),
@@ -219,7 +228,7 @@ func Load() error {
 		SMTPPort:     getEnvInt("SMTP_PORT", 587),
 		SMTPUser:     getEnv("SMTP_USER", ""),
 		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
-		SMTPFrom:     getEnv("SMTP_FROM", "noreply@bendey.cloud"),
+		SMTPFrom:     getEnv("SMTP_FROM", "noreply@tukifac.com"),
 
 		AppDomain:          resolveRootDomain(),
 		APIPublicURL:       strings.TrimSpace(getEnv("API_PUBLIC_URL", "")),
@@ -239,6 +248,7 @@ func Load() error {
 		FacturadorBaseURL:          getEnv("FACTURADOR_BASE_URL", ""),
 		FacturadorToken:            getEnv("FACTURADOR_TOKEN", ""),
 		FiscalQueueWorkers:         getEnvInt("FISCAL_QUEUE_WORKERS", 4),
+		SunatMaxBackdateDays:       getEnvInt("SUNAT_MAX_BACKDATE_DAYS", 3),
 		InvoiceStoragePath:         getEnv("INVOICE_STORAGE_PATH", "./storage/invoices"),
 		ValidaPSEManagementBaseURL: getEnv("VALIDAPSE_MGMT_BASE_URL", "https://app.validapse.com/api"),
 		ValidaPSEManagementToken:   getEnv("VALIDAPSE_MGMT_TOKEN", ""),

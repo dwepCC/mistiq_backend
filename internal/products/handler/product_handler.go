@@ -12,9 +12,11 @@ import (
 	"tukifac/internal/products/service"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
+	"tukifac/pkg/middleware"
+	"tukifac/pkg/saas"
+	"tukifac/pkg/tax"
 	"tukifac/pkg/tenantstorage"
 	"tukifac/pkg/uploadlimits"
-	"tukifac/pkg/tax"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -78,7 +80,7 @@ func (h *ProductHandler) CreateForm(c fiber.Ctx) error {
 	taxCfg := tax.LoadFromDB(db(c))
 	input := buildProductInput(c, taxCfg)
 
-	if _, err := svc.Create(input); err != nil {
+	if _, _, err := svc.Create(input); err != nil {
 		cats, _ := svc.ListCategories()
 		modGroups, _ := svc.ListModifierGroups()
 		return c.Render("products/form", fiber.Map{
@@ -136,7 +138,7 @@ func (h *ProductHandler) UpdateForm(c fiber.Ctx) error {
 	taxCfg := tax.LoadFromDB(db(c))
 	input := buildProductInput(c, taxCfg)
 
-	if err := svc.Update(uint(id), input); err != nil {
+	if _, err := svc.Update(uint(id), input); err != nil {
 		cats, _ := svc.ListCategories()
 		modGroups, _ := svc.ListModifierGroups()
 		p, _ := svc.GetByID(uint(id))
@@ -169,30 +171,36 @@ func (h *ProductHandler) DeleteForm(c fiber.Ctx) error {
 // CreateAPI crea un producto vía JSON.
 func (h *ProductHandler) CreateAPI(c fiber.Ctx) error {
 	var body struct {
-		CategoryID         *uint   `json:"category_id"`
-		Code               string  `json:"code"`
-		Name               string  `json:"name"`
-		Description        string  `json:"description"`
-		Type               string  `json:"type"`
-		Unit               string  `json:"unit"`
-		SalePrice          float64 `json:"sale_price"`
-		PurchasePrice      float64 `json:"purchase_price"`
-		IgvAffectationType string  `json:"igv_affectation_type"`
-		PriceIncludesIgv   bool    `json:"price_includes_igv"`
-		ManageStock        bool    `json:"manage_stock"`
-		ManageSeries       bool    `json:"manage_series"`
-		HasVariants        bool    `json:"has_variants"`
-		HasModifiers       bool    `json:"has_modifiers"`
-		MinStock           float64 `json:"min_stock"`
-		IsRestaurant       bool    `json:"is_restaurant"`
-		PreparationArea    string  `json:"preparation_area"`
-		ImageURL           string  `json:"image_url"`
-		ModifierGroupIDs   []uint  `json:"modifier_group_ids"`
-		Presentations      []struct {
-			Name      string  `json:"name"`
-			SalePrice float64 `json:"sale_price"`
+		CategoryID           *uint   `json:"category_id"`
+		Code                 string  `json:"code"`
+		Name                 string  `json:"name"`
+		Description          string  `json:"description"`
+		Type                 string  `json:"type"`
+		Unit                 string  `json:"unit"`
+		SalePrice            float64 `json:"sale_price"`
+		PurchasePrice        float64 `json:"purchase_price"`
+		IgvAffectationType   string  `json:"igv_affectation_type"`
+		PriceIncludesIgv     bool    `json:"price_includes_igv"`
+		ManageStock          bool    `json:"manage_stock"`
+		ManageSeries         bool    `json:"manage_series"`
+		HasVariants          bool    `json:"has_variants"`
+		HasModifiers         bool    `json:"has_modifiers"`
+		MinStock             float64 `json:"min_stock"`
+		HasExpiryDate        bool    `json:"has_expiry_date"`
+		ExpiryDate           string  `json:"expiry_date"`
+		IsRestaurant         bool    `json:"is_restaurant"`
+		ShowInDigitalCatalog bool    `json:"show_in_digital_catalog"`
+		PreparationAreaID    *uint   `json:"preparation_area_id"`
+		PreparationArea      string  `json:"preparation_area"`
+		ImageURL             string  `json:"image_url"`
+		ModifierGroupIDs     []uint  `json:"modifier_group_ids"`
+		Presentations        []struct {
+			Name         string  `json:"name"`
+			SalePrice    float64 `json:"sale_price"`
+			InitialStock float64 `json:"initial_stock"`
 		} `json:"presentations"`
-		InitialStock float64 `json:"initial_stock"`
+		ComboGroups  []comboGroupBody `json:"combo_groups"`
+		InitialStock float64          `json:"initial_stock"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -200,40 +208,52 @@ func (h *ProductHandler) CreateAPI(c fiber.Ctx) error {
 	if body.Name == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "El nombre del producto es requerido"})
 	}
+	// Cuota de productos del plan (los servicios no cuentan; ver CheckCreateQuota).
+	if body.Type != "service" && middleware.EnforceCreateQuota(c, db(c), saas.QuotaProducts) {
+		return nil
+	}
 	if body.InitialStock < 0 {
 		return c.Status(400).JSON(fiber.Map{"error": "initial_stock no puede ser negativo"})
 	}
-	manageStock := body.ManageStock
-	if body.InitialStock > 0 {
-		manageStock = true
+	if body.InitialStock > 0 && !body.ManageStock {
+		return c.Status(400).JSON(fiber.Map{"error": service.InitialStockRequiresManageStock})
 	}
+	expiryDate, err := service.ParseProductExpiryDate(body.ExpiryDate)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	manageStock := body.ManageStock
 	taxCfg := tax.LoadFromDB(db(c))
 	igvType := body.IgvAffectationType
 	if igvType == "" {
 		igvType = "10"
 	}
 	input := service.ProductInput{
-		CategoryID:         body.CategoryID,
-		Code:               body.Code,
-		Name:               body.Name,
-		Description:        body.Description,
-		Type:               body.Type,
-		Unit:               body.Unit,
-		SalePrice:          body.SalePrice,
-		PurchasePrice:      body.PurchasePrice,
-		TaxRate:            taxCfg.EffectiveRate(igvType),
-		IgvAffectationType: igvType,
-		PriceIncludesIgv:   body.PriceIncludesIgv,
-		ManageStock:        manageStock,
-		ManageSeries:       body.ManageSeries,
-		HasVariants:        body.HasVariants,
-		HasModifiers:       body.HasModifiers,
-		MinStock:           body.MinStock,
-		IsRestaurant:       body.IsRestaurant,
-		PreparationArea:    body.PreparationArea,
-		ImageURL:           body.ImageURL,
-		Active:             true,
-		ModifierGroupIDs: &body.ModifierGroupIDs,
+		CategoryID:           body.CategoryID,
+		Code:                 body.Code,
+		Name:                 body.Name,
+		Description:          body.Description,
+		Type:                 body.Type,
+		Unit:                 body.Unit,
+		SalePrice:            body.SalePrice,
+		PurchasePrice:        body.PurchasePrice,
+		TaxRate:              taxCfg.EffectiveRate(igvType),
+		IgvAffectationType:   igvType,
+		PriceIncludesIgv:     body.PriceIncludesIgv,
+		ManageStock:          manageStock,
+		ManageSeries:         body.ManageSeries,
+		HasVariants:          body.HasVariants,
+		HasModifiers:         body.HasModifiers,
+		MinStock:             body.MinStock,
+		HasExpiryDate:        body.HasExpiryDate,
+		ExpiryDate:           expiryDate,
+		IsRestaurant:         body.IsRestaurant,
+		ShowInDigitalCatalog: body.ShowInDigitalCatalog,
+		PreparationAreaID:    body.PreparationAreaID,
+		PreparationArea:      body.PreparationArea,
+		ImageURL:             body.ImageURL,
+		Active:               true,
+		ModifierGroupIDs:     &body.ModifierGroupIDs,
 	}
 	if len(body.Presentations) > 0 {
 		pres := make([]service.ProductPresentationInput, 0, len(body.Presentations))
@@ -241,9 +261,16 @@ func (h *ProductHandler) CreateAPI(c fiber.Ctx) error {
 			if strings.TrimSpace(row.Name) == "" {
 				continue
 			}
+			if row.InitialStock < 0 {
+				return c.Status(400).JSON(fiber.Map{"error": "el stock inicial de una presentación no puede ser negativo"})
+			}
+			if row.InitialStock > 0 && !body.ManageStock {
+				return c.Status(400).JSON(fiber.Map{"error": service.InitialStockRequiresManageStock})
+			}
 			pres = append(pres, service.ProductPresentationInput{
-				Name:      strings.TrimSpace(row.Name),
-				SalePrice: row.SalePrice,
+				Name:         strings.TrimSpace(row.Name),
+				SalePrice:    row.SalePrice,
+				InitialStock: row.InitialStock,
 			})
 		}
 		if len(pres) > 0 {
@@ -251,17 +278,27 @@ func (h *ProductHandler) CreateAPI(c fiber.Ctx) error {
 			input.HasVariants = true
 		}
 	}
-	p, err := service.NewProductService(db(c)).Create(input)
+	if len(body.ComboGroups) > 0 {
+		groups := toComboGroupInputs(body.ComboGroups)
+		input.ComboGroups = &groups
+	}
+	branchID, berr := branch.ResolveWriteBranchID(c, 0)
+	if body.IsRestaurant {
+		if berr != nil {
+			return c.Status(403).JSON(fiber.Map{"error": berr.Error(), "code": branch.CodeBranchRequired})
+		}
+		input.BranchID = branchID
+	}
+	p, presResults, err := service.NewProductService(db(c)).Create(input)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
-	branchID, berr := branch.ResolveWriteBranchID(c, 0)
 	if body.IsRestaurant && berr == nil && branchID > 0 {
 		inv := invsvc.NewInventoryService(db(c))
 		if body.InitialStock > 0 {
 			if !p.ManageStock {
 				_ = service.NewProductService(db(c)).Delete(p.ID)
-				return c.Status(400).JSON(fiber.Map{"error": "stock inicial requiere control de inventario activo"})
+				return c.Status(400).JSON(fiber.Map{"error": service.InitialStockRequiresManageStock})
 			}
 			uid, _ := c.Locals("user_id").(uint)
 			if err := inv.RecordInitialStock(
@@ -277,7 +314,7 @@ func (h *ProductHandler) CreateAPI(c fiber.Ctx) error {
 	} else if body.InitialStock > 0 {
 		if !p.ManageStock {
 			_ = service.NewProductService(db(c)).Delete(p.ID)
-			return c.Status(400).JSON(fiber.Map{"error": "stock inicial requiere control de inventario activo"})
+			return c.Status(400).JSON(fiber.Map{"error": service.InitialStockRequiresManageStock})
 		}
 		if berr != nil {
 			_ = service.NewProductService(db(c)).Delete(p.ID)
@@ -290,6 +327,28 @@ func (h *ProductHandler) CreateAPI(c fiber.Ctx) error {
 			_ = service.NewProductService(db(c)).Delete(p.ID)
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
+	} else if p.ManageStock && berr == nil && branchID > 0 {
+		if err := invsvc.NewInventoryService(db(c)).EnsureProductBranchLink(p.ID, branchID); err != nil {
+			_ = service.NewProductService(db(c)).Delete(p.ID)
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+	// Stock inicial por presentación (ej. Rojo: 5, Azul: 3, Amarillo: 2): solo tiene sentido con
+	// una sucursal resuelta; si no hay una (berr != nil), las presentaciones quedan en 0 y el
+	// tenant las ajusta después con "Ajustar stock".
+	if p.ManageStock && berr == nil && branchID > 0 {
+		inv := invsvc.NewInventoryService(db(c))
+		uid, _ := c.Locals("user_id").(uint)
+		for _, res := range presResults {
+			if !res.IsNew || res.InitialStock <= 0 {
+				continue
+			}
+			if err := inv.RecordInitialPresentationStock(
+				p.ID, res.Presentation.ID, branchID, res.InitialStock, uid, "Stock inicial — alta de producto",
+			); err != nil {
+				return c.Status(400).JSON(fiber.Map{"error": fmt.Sprintf("presentación '%s': %s", res.Presentation.Name, err.Error())})
+			}
+		}
 	}
 	return c.Status(201).JSON(fiber.Map{"data": p})
 }
@@ -301,33 +360,56 @@ func (h *ProductHandler) UpdateAPI(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	var body struct {
-		CategoryID         *uint   `json:"category_id"`
-		Code               string  `json:"code"`
-		Name               string  `json:"name"`
-		Description        string  `json:"description"`
-		Type               string  `json:"type"`
-		Unit               string  `json:"unit"`
-		SalePrice          float64 `json:"sale_price"`
-		PurchasePrice      float64 `json:"purchase_price"`
-		IgvAffectationType string  `json:"igv_affectation_type"`
-		PriceIncludesIgv   bool    `json:"price_includes_igv"`
-		ManageStock        bool    `json:"manage_stock"`
-		ManageSeries       bool    `json:"manage_series"`
-		HasVariants        bool    `json:"has_variants"`
-		HasModifiers       bool    `json:"has_modifiers"`
-		MinStock           float64 `json:"min_stock"`
-		IsRestaurant       bool    `json:"is_restaurant"`
-		PreparationArea    string  `json:"preparation_area"`
-		ImageURL           string  `json:"image_url"`
-		Active             *bool   `json:"active"`
+		CategoryID           *uint   `json:"category_id"`
+		Code                 string  `json:"code"`
+		Name                 string  `json:"name"`
+		Description          string  `json:"description"`
+		Type                 string  `json:"type"`
+		Unit                 string  `json:"unit"`
+		SalePrice            float64 `json:"sale_price"`
+		PurchasePrice        float64 `json:"purchase_price"`
+		IgvAffectationType   string  `json:"igv_affectation_type"`
+		PriceIncludesIgv     bool    `json:"price_includes_igv"`
+		ManageStock          bool    `json:"manage_stock"`
+		ManageSeries         bool    `json:"manage_series"`
+		HasVariants          bool    `json:"has_variants"`
+		HasModifiers         bool    `json:"has_modifiers"`
+		MinStock             float64 `json:"min_stock"`
+		HasExpiryDate        bool    `json:"has_expiry_date"`
+		ExpiryDate           string  `json:"expiry_date"`
+		IsRestaurant         bool    `json:"is_restaurant"`
+		ShowInDigitalCatalog bool    `json:"show_in_digital_catalog"`
+		PreparationAreaID    *uint   `json:"preparation_area_id"`
+		PreparationArea      string  `json:"preparation_area"`
+		// nil = conservar la imagen actual; "" = quitarla.
+		ImageURL         *string `json:"image_url"`
+		Active           *bool   `json:"active"`
 		ModifierGroupIDs *[]uint `json:"modifier_group_ids"`
 		Presentations    *[]struct {
+			ID        uint    `json:"id"`
 			Name      string  `json:"name"`
 			SalePrice float64 `json:"sale_price"`
+			// InitialStock: solo aplica a filas nuevas (sin ID) agregadas durante la edición;
+			// las existentes ya tienen su stock y se corrigen con "Ajustar stock".
+			InitialStock float64 `json:"initial_stock"`
 		} `json:"presentations"`
+		// nil = no tocar el combo; [] = deja de ser combo.
+		ComboGroups *[]comboGroupBody `json:"combo_groups"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	svc := service.NewProductService(db(c))
+	existing, err := svc.GetByID(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "producto no encontrado"})
+	}
+	if msg, denied := h.productBranchDenied(c, existing); denied {
+		return c.Status(403).JSON(fiber.Map{"error": msg})
+	}
+	expiryDate, err := service.ParseProductExpiryDate(body.ExpiryDate)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	taxCfg := tax.LoadFromDB(db(c))
 	igvType := body.IgvAffectationType
@@ -335,26 +417,33 @@ func (h *ProductHandler) UpdateAPI(c fiber.Ctx) error {
 		igvType = "10"
 	}
 	input := service.ProductInput{
-		CategoryID:         body.CategoryID,
-		Code:               body.Code,
-		Name:               body.Name,
-		Description:        body.Description,
-		Type:               body.Type,
-		Unit:               body.Unit,
-		SalePrice:          body.SalePrice,
-		PurchasePrice:      body.PurchasePrice,
-		TaxRate:            taxCfg.EffectiveRate(igvType),
-		IgvAffectationType: igvType,
-		PriceIncludesIgv:   body.PriceIncludesIgv,
-		ManageStock:        body.ManageStock,
-		ManageSeries:       body.ManageSeries,
-		HasVariants:        body.HasVariants,
-		HasModifiers:       body.HasModifiers,
-		MinStock:           body.MinStock,
-		IsRestaurant:       body.IsRestaurant,
-		PreparationArea:    body.PreparationArea,
-		ImageURL:           body.ImageURL,
-		ModifierGroupIDs:   body.ModifierGroupIDs,
+		CategoryID:           body.CategoryID,
+		Code:                 body.Code,
+		Name:                 body.Name,
+		Description:          body.Description,
+		Type:                 body.Type,
+		Unit:                 body.Unit,
+		SalePrice:            body.SalePrice,
+		PurchasePrice:        body.PurchasePrice,
+		TaxRate:              taxCfg.EffectiveRate(igvType),
+		IgvAffectationType:   igvType,
+		PriceIncludesIgv:     body.PriceIncludesIgv,
+		ManageStock:          body.ManageStock,
+		ManageSeries:         body.ManageSeries,
+		HasVariants:          body.HasVariants,
+		HasModifiers:         body.HasModifiers,
+		MinStock:             body.MinStock,
+		HasExpiryDate:        body.HasExpiryDate,
+		ExpiryDate:           expiryDate,
+		IsRestaurant:         body.IsRestaurant,
+		ShowInDigitalCatalog: body.ShowInDigitalCatalog,
+		PreparationAreaID:    body.PreparationAreaID,
+		PreparationArea:      body.PreparationArea,
+		ModifierGroupIDs:     body.ModifierGroupIDs,
+	}
+	if body.ImageURL != nil {
+		input.ImageURL = *body.ImageURL
+		input.ImageURLSet = true
 	}
 	if body.Active != nil {
 		input.Active = *body.Active
@@ -366,18 +455,66 @@ func (h *ProductHandler) UpdateAPI(c fiber.Ctx) error {
 			if strings.TrimSpace(row.Name) == "" {
 				continue
 			}
-			pres = append(pres, service.ProductPresentationInput{
-				Name:      strings.TrimSpace(row.Name),
-				SalePrice: row.SalePrice,
-			})
+			if row.InitialStock < 0 {
+				return c.Status(400).JSON(fiber.Map{"error": "el stock inicial de una presentación no puede ser negativo"})
+			}
+			if row.InitialStock > 0 && !body.ManageStock {
+				return c.Status(400).JSON(fiber.Map{"error": service.InitialStockRequiresManageStock})
+			}
+			p := service.ProductPresentationInput{
+				Name:         strings.TrimSpace(row.Name),
+				SalePrice:    row.SalePrice,
+				InitialStock: row.InitialStock,
+			}
+			if row.ID > 0 {
+				rid := row.ID
+				p.ID = &rid
+			}
+			pres = append(pres, p)
 		}
 		input.Presentations = &pres
 		if len(pres) > 0 {
 			input.HasVariants = true
 		}
 	}
-	if err := service.NewProductService(db(c)).Update(uint(id), input); err != nil {
+	if body.ComboGroups != nil {
+		groups := toComboGroupInputs(*body.ComboGroups)
+		input.ComboGroups = &groups
+	}
+	presResults, err := svc.Update(uint(id), input)
+	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	if body.IsRestaurant || existing.IsRestaurant {
+		branchID, berr := branch.ResolveWriteBranchID(c, 0)
+		if berr != nil {
+			return c.Status(403).JSON(fiber.Map{"error": berr.Error(), "code": branch.CodeBranchForbidden})
+		}
+		if branchID > 0 {
+			if err := invsvc.NewInventoryService(db(c)).EnsureProductBranchLink(uint(id), branchID); err != nil {
+				return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+			}
+		}
+	}
+	// Stock inicial para presentaciones nuevas agregadas en esta edición (ej. se agrega un color
+	// "Verde" a un producto ya existente): solo tiene sentido con una sucursal resuelta; si no hay
+	// una, la presentación queda en 0 y el tenant la ajusta después con "Ajustar stock".
+	if body.ManageStock && len(presResults) > 0 {
+		branchID, berr := branch.ResolveWriteBranchID(c, 0)
+		if berr == nil && branchID > 0 {
+			inv := invsvc.NewInventoryService(db(c))
+			uid, _ := c.Locals("user_id").(uint)
+			for _, res := range presResults {
+				if !res.IsNew || res.InitialStock <= 0 {
+					continue
+				}
+				if err := inv.RecordInitialPresentationStock(
+					uint(id), res.Presentation.ID, branchID, res.InitialStock, uid, "Stock inicial — alta de producto",
+				); err != nil {
+					return c.Status(400).JSON(fiber.Map{"error": fmt.Sprintf("presentación '%s': %s", res.Presentation.Name, err.Error())})
+				}
+			}
+		}
 	}
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -393,6 +530,9 @@ func (h *ProductHandler) ToggleAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "producto no encontrado"})
 	}
+	if msg, denied := h.productBranchDenied(c, p); denied {
+		return c.Status(403).JSON(fiber.Map{"error": msg})
+	}
 	if err := db(c).Model(p).Update("active", !p.Active).Error; err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -405,7 +545,15 @@ func (h *ProductHandler) DeleteAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	if err := service.NewProductService(db(c)).Delete(uint(id)); err != nil {
+	svc := service.NewProductService(db(c))
+	p, err := svc.GetByID(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "producto no encontrado"})
+	}
+	if msg, denied := h.productBranchDenied(c, p); denied {
+		return c.Status(403).JSON(fiber.Map{"error": msg})
+	}
+	if err := svc.Delete(uint(id)); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
@@ -414,8 +562,11 @@ func (h *ProductHandler) DeleteAPI(c fiber.Ctx) error {
 func (h *ProductHandler) SearchAPI(c fiber.Ctx) error {
 	svc := service.NewProductService(db(c))
 	catID, _ := strconv.ParseUint(c.Query("category_id"), 10, 32)
+	inactiveOnly := c.Query("inactive_only") == "true" || c.Query("inactive_only") == "1"
 	activeOnly := c.Query("active_only")
-	if activeOnly == "" {
+	if inactiveOnly {
+		activeOnly = "false"
+	} else if activeOnly == "" {
 		activeOnly = "true"
 	}
 	perPage, _ := strconv.Atoi(c.Query("per_page"))
@@ -425,13 +576,20 @@ func (h *ProductHandler) SearchAPI(c fiber.Ctx) error {
 	}
 	report := c.Query("report") == "true" || c.Query("report") == "1"
 	params := service.ProductListParams{
-		Query:           c.Query("q"),
-		CategoryID:      uint(catID),
-		Type:            c.Query("type"),
-		ActiveOnly:      activeOnly == "true" || activeOnly == "1",
-		ManageStockOnly: c.Query("manage_stock_only") == "true" || c.Query("manage_stock_only") == "1",
-		RestaurantOnly:  c.Query("restaurant_only") == "true" || c.Query("restaurant_only") == "1",
-		PreparationArea: c.Query("preparation_area"),
+		Query:             c.Query("q"),
+		CategoryID:        uint(catID),
+		Type:              c.Query("type"),
+		ActiveOnly:        !inactiveOnly && (activeOnly == "true" || activeOnly == "1"),
+		InactiveOnly:      inactiveOnly,
+		ManageStockOnly:   c.Query("manage_stock_only") == "true" || c.Query("manage_stock_only") == "1",
+		NoManageStockOnly: c.Query("no_manage_stock_only") == "true" || c.Query("no_manage_stock_only") == "1",
+		RestaurantOnly:    c.Query("restaurant_only") == "true" || c.Query("restaurant_only") == "1",
+		CombosOnly:        c.Query("combos_only") == "true" || c.Query("combos_only") == "1",
+		ExcludeCombos:     c.Query("exclude_combos") == "true" || c.Query("exclude_combos") == "1",
+		PreparationArea:   c.Query("preparation_area"),
+	}
+	if prepAreaID, err := strconv.ParseUint(c.Query("preparation_area_id"), 10, 32); err == nil && prepAreaID > 0 {
+		params.PreparationAreaID = uint(prepAreaID)
 	}
 	if v := strings.TrimSpace(c.Query("stock_less_than")); v != "" {
 		if x, err := strconv.ParseFloat(v, 64); err == nil {
@@ -450,6 +608,8 @@ func (h *ProductHandler) SearchAPI(c fiber.Ctx) error {
 		params.Limit = perPage
 		params.Offset = (page - 1) * perPage
 	}
+	params.SortBy = strings.TrimSpace(c.Query("sort_by"))
+	params.SortDir = strings.TrimSpace(c.Query("sort_dir"))
 	if report {
 		items, total, err := svc.ListReport(params)
 		if err != nil {
@@ -460,11 +620,40 @@ func (h *ProductHandler) SearchAPI(c fiber.Ctx) error {
 		}
 		return c.JSON(fiber.Map{"data": items})
 	}
-	products, total, _ := svc.List(params)
+	products, total, err := svc.ListWithCategoryNames(params)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 	if perPage > 0 {
 		return c.JSON(fiber.Map{"data": products, "total": total})
 	}
 	return c.JSON(fiber.Map{"data": products})
+}
+
+// LookupByCodeAPI — búsqueda exacta por código de barras (POS / cámara). GET /api/products/lookup-by-code?code=
+func (h *ProductHandler) LookupByCodeAPI(c fiber.Ctx) error {
+	code := strings.TrimSpace(c.Query("code"))
+	if code == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "código requerido"})
+	}
+	svc := service.NewProductService(db(c))
+	var branchID uint
+	if reqB, err := strconv.ParseUint(c.Query("branch_id"), 10, 32); err == nil && reqB > 0 {
+		branchID = branch.ResolveReadBranchFilter(c, uint(reqB))
+	} else if branch.ActiveBranchID(c) > 0 {
+		branchID = branch.ActiveBranchID(c)
+	}
+	p, err := svc.FindProductByBarcode(code, branchID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if p == nil {
+		return c.Status(404).JSON(fiber.Map{"error": "producto no encontrado"})
+	}
+	if msg, denied := h.productBranchDenied(c, p); denied {
+		return c.Status(403).JSON(fiber.Map{"error": msg})
+	}
+	return c.JSON(fiber.Map{"data": svc.ProductListItemFrom(*p)})
 }
 
 // GetAPI devuelve un producto por ID con modifier_group_ids (para edición y panel avanzado).
@@ -478,13 +667,25 @@ func (h *ProductHandler) GetAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "producto no encontrado"})
 	}
+	if msg, denied := h.productBranchDenied(c, p); denied {
+		return c.Status(403).JSON(fiber.Map{"error": msg})
+	}
 	modIds := svc.GetProductModifierGroupIDs(p.ID)
 	presentations, _ := svc.ListProductPresentations(p.ID)
-	return c.JSON(fiber.Map{
+	comboGroups, _ := svc.ListComboGroups(p.ID)
+	resp := fiber.Map{
 		"data":               p,
 		"modifier_group_ids": modIds,
 		"presentations":      presentations,
-	})
+		"combo_groups":       comboGroups,
+	}
+	if p.HasCombo {
+		// Referencia para mostrar el ahorro frente al precio fijo del combo.
+		if total, err := svc.ComboComponentsTotal(p.ID); err == nil {
+			resp["combo_components_total"] = total
+		}
+	}
+	return c.JSON(resp)
 }
 
 // ProductSerialsAPI devuelve los números de serie del producto (todas las sucursales) para el detalle.
@@ -501,6 +702,7 @@ func (h *ProductHandler) ProductSerialsAPI(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"data": serials})
 }
+
 // POST /api/products/:id/image — multipart/form-data, campo "image".
 const maxProductImageSize = uploadlimits.MaxFileBytes
 
@@ -517,6 +719,9 @@ func (h *ProductHandler) UploadImageAPI(c fiber.Ctx) error {
 	p, err := svc.GetByID(uint(id))
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "producto no encontrado"})
+	}
+	if msg, denied := h.productBranchDenied(c, p); denied {
+		return c.Status(403).JSON(fiber.Map{"error": msg})
 	}
 
 	file, err := c.FormFile("image")
@@ -548,29 +753,137 @@ func (h *ProductHandler) UploadImageAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"image_url": imageURL})
 }
 
-// CategoryListAPI devuelve todas las categorías activas.
+// CategoryListAPI devuelve categorías activas (POS y selects).
 func (h *ProductHandler) CategoryListAPI(c fiber.Ctx) error {
-	cats, err := service.NewProductService(db(c)).ListCategories()
+	svc := service.NewProductService(db(c))
+	if c.Query("with_counts") == "true" || c.Query("with_counts") == "1" {
+		items, err := svc.ListCategoriesWithCounts()
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"data": items})
+	}
+	cats, err := svc.ListCategories()
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"data": cats})
 }
 
-// CategoryCreateAPI crea una categoría inline desde el formulario de producto.
+// CategoryCreateAPI crea una categoría inline desde el formulario de producto o panel.
 func (h *ProductHandler) CategoryCreateAPI(c fiber.Ctx) error {
 	var body struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		SortOrder   *int   `json:"sort_order"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
-	cat, err := service.NewProductService(db(c)).CreateCategory(body.Name, body.Description)
+	cat, err := service.NewProductService(db(c)).CreateCategory(body.Name, body.Description, body.SortOrder)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.Status(201).JSON(fiber.Map{"data": cat})
+}
+
+// CategoryUpdateAPI actualiza nombre, descripción y orden.
+func (h *ProductHandler) CategoryUpdateAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		SortOrder   int    `json:"sort_order"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	cat, err := service.NewProductService(db(c)).UpdateCategory(uint(id), body.Name, body.Description, body.SortOrder)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": cat})
+}
+
+// CategoryDeleteAPI elimina categoría si no tiene productos vinculados.
+func (h *ProductHandler) CategoryDeleteAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := service.NewProductService(db(c)).DeleteCategory(uint(id)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// PreparationAreaListAPI devuelve áreas de preparación activas.
+func (h *ProductHandler) PreparationAreaListAPI(c fiber.Ctx) error {
+	svc := service.NewProductService(db(c))
+	if c.Query("with_counts") == "true" || c.Query("with_counts") == "1" {
+		items, err := svc.ListPreparationAreasWithCounts()
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"data": items})
+	}
+	areas, err := svc.ListPreparationAreas()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": areas})
+}
+
+// PreparationAreaCreateAPI crea un área de preparación.
+func (h *ProductHandler) PreparationAreaCreateAPI(c fiber.Ctx) error {
+	var body struct {
+		Name      string `json:"name"`
+		Slug      string `json:"slug"`
+		SortOrder *int   `json:"sort_order"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	area, err := service.NewProductService(db(c)).CreatePreparationArea(body.Name, body.Slug, body.SortOrder)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"data": area})
+}
+
+// PreparationAreaUpdateAPI actualiza nombre y orden (slug inmutable).
+func (h *ProductHandler) PreparationAreaUpdateAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Name      string `json:"name"`
+		SortOrder int    `json:"sort_order"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	area, err := service.NewProductService(db(c)).UpdatePreparationArea(uint(id), body.Name, body.SortOrder)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": area})
+}
+
+// PreparationAreaDeleteAPI elimina área si no tiene productos vinculados.
+func (h *ProductHandler) PreparationAreaDeleteAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := service.NewProductService(db(c)).DeletePreparationArea(uint(id)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }
 
 // ModifierGroupsAPI devuelve todos los grupos con opciones.
@@ -632,6 +945,17 @@ func (h *ProductHandler) ModifierGroupDeleteAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
+func (h *ProductHandler) productBranchDenied(c fiber.Ctx, p *database.TenantProduct) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	bid := branch.ResolveReadBranchFilter(c, 0)
+	if err := service.NewProductService(db(c)).EnsureRestaurantBranchAccess(p, bid); err != nil {
+		return err.Error(), true
+	}
+	return "", false
+}
+
 func buildProductInput(c fiber.Ctx, taxCfg tax.Config) service.ProductInput {
 	salePrice, _ := strconv.ParseFloat(c.FormValue("sale_price"), 64)
 	purchasePrice, _ := strconv.ParseFloat(c.FormValue("purchase_price"), 64)
@@ -681,7 +1005,27 @@ func buildProductInput(c fiber.Ctx, taxCfg tax.Config) service.ProductInput {
 		HasModifiers:       c.FormValue("has_modifiers") == "1",
 		MinStock:           minStock,
 		ImageURL:           c.FormValue("image_url"),
-		Active:             c.FormValue("active") == "1",
-		ModifierGroupIDs:   &modGroupIDs,
+		// El form siempre trae el campo (aunque sea vacío): conserva el comportamiento previo.
+		ImageURLSet:      true,
+		Active:           c.FormValue("active") == "1",
+		ModifierGroupIDs: &modGroupIDs,
 	}
+}
+
+// NextCodeAPI sugiere un código libre para el formulario de alta.
+//
+// El formulario lo prellena y el usuario puede reemplazarlo por el suyo; el backend lo
+// completa igual si llega vacío, así que esto es comodidad, no la validación.
+func (h *ProductHandler) NextCodeAPI(c fiber.Ctx) error {
+	svc := service.NewProductService(db(c))
+	branchID := branch.ActiveBranchID(c)
+	if reqB, err := strconv.ParseUint(c.Query("branch_id"), 10, 32); err == nil && reqB > 0 {
+		branchID = branch.ResolveReadBranchFilter(c, uint(reqB))
+	}
+	isRestaurant := strings.EqualFold(strings.TrimSpace(c.Query("scope")), "restaurant")
+	code, err := svc.NextProductCode(branchID, isRestaurant && branchID > 0)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"code": code})
 }

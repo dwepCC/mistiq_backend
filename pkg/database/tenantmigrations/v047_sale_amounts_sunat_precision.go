@@ -9,7 +9,7 @@ import (
 // V047SaleAmountsSunatPrecision amplía montos de venta a DECIMAL(15,6) para cálculos SUNAT.
 type V047SaleAmountsSunatPrecision struct{}
 
-func (V047SaleAmountsSunatPrecision) Version() int  { return 47 }
+func (V047SaleAmountsSunatPrecision) Version() int { return 47 }
 func (V047SaleAmountsSunatPrecision) Name() string { return "sale_amounts_sunat_precision" }
 
 func (V047SaleAmountsSunatPrecision) Up(db *gorm.DB) error {

@@ -3,19 +3,24 @@ package service
 import (
 	"errors"
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 	"time"
 
+	cashbanksvc "tukifac/internal/cashbank/service"
+	invsvc "tukifac/internal/inventory/service"
 	"tukifac/internal/restaurant/staff"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/gormutil"
 	"tukifac/pkg/money"
+	"tukifac/pkg/saas/docusage"
 	"tukifac/pkg/tax"
-	cashbanksvc "tukifac/internal/cashbank/service"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type RestaurantService struct {
@@ -36,6 +41,9 @@ func restaurantLinePayableTotal(
 ) float64 {
 	if strings.TrimSpace(affType) == "" {
 		affType = "10"
+	}
+	if tax.IsBonificacionGravada(affType) {
+		return 0
 	}
 	_, _, total := tax.CalcItem(unitPrice, quantity, 0, affType, priceIncludesIgv, taxCfg)
 	return money.RoundSunat(total)
@@ -191,7 +199,12 @@ func (s *RestaurantService) ListTables(branchID, floorID uint) ([]TableWithSessi
 	q := s.db.Table("tenant_restaurant_tables t").
 		Select("t.*, f.name AS floor_name, ts.id AS session_id, COALESCE(ts.total_amount,0) AS total_amount, COALESCE(NULLIF(st.display_name,''), u.name, '') AS waiter_name").
 		Joins("JOIN tenant_restaurant_floors f ON f.id = t.floor_id").
-		Joins("LEFT JOIN tenant_table_sessions ts ON ts.table_id = t.id AND ts.status = 'open'").
+		Joins(`LEFT JOIN tenant_table_sessions ts ON ts.id = (
+			SELECT s2.id FROM tenant_table_sessions s2
+			WHERE s2.table_id = t.id AND s2.status = 'open'
+			ORDER BY s2.opened_at DESC, s2.id DESC
+			LIMIT 1
+		)`).
 		Joins("LEFT JOIN tenant_restaurant_staff st ON st.id = ts.staff_id").
 		Joins("LEFT JOIN tenant_users u ON u.id = st.user_id").
 		Where("t.active = ? AND t.deleted_at IS NULL", true)
@@ -205,8 +218,11 @@ func (s *RestaurantService) ListTables(branchID, floorID uint) ([]TableWithSessi
 
 	result := make([]TableWithSession, len(rows))
 	for i, r := range rows {
+		displayStatus := resolveTableDisplayStatus(r.Status, r.SessionID)
+		tbl := r.TenantRestaurantTable
+		tbl.Status = displayStatus
 		result[i] = TableWithSession{
-			TenantRestaurantTable: r.TenantRestaurantTable,
+			TenantRestaurantTable: tbl,
 			FloorName:             r.FloorName,
 			SessionID:             r.SessionID,
 			TotalAmount:           r.TotalAmount,
@@ -285,9 +301,14 @@ func (s *RestaurantService) tableDeleteBlockReason(table *database.TenantRestaur
 		return "la mesa tiene un pedido abierto; anúlelo o ciérrelo antes de eliminar la mesa"
 	}
 
+	// Solo las sesiones realmente en curso bloquean: 'open' (abierta) y 'billing' (cobro en
+	// proceso). 'billed' es una operación TERMINADA —la mesa ya se liberó y las comandas se
+	// borraron— así que no debe bloquear; antes sí lo hacía (se usaba "billed" en vez de
+	// "billing"), y como los pedidos quedaban 'active' para siempre, ninguna mesa cobrada
+	// podía eliminarse.
 	var sessionIDs []uint
 	if err := s.db.Model(&database.TenantTableSession{}).
-		Where("table_id = ? AND status IN ?", table.ID, []string{"open", "billed"}).
+		Where("table_id = ? AND status IN ?", table.ID, []string{sessionStatusOpen, sessionStatusBilling}).
 		Pluck("id", &sessionIDs).Error; err != nil {
 		return "no se pudo verificar operaciones vinculadas a la mesa"
 	}
@@ -297,7 +318,7 @@ func (s *RestaurantService) tableDeleteBlockReason(table *database.TenantRestaur
 
 	var activeOrders int64
 	s.db.Model(&database.TenantTableOrder{}).
-		Where("session_id IN ? AND status = ?", sessionIDs, "active").
+		Where("session_id IN ? AND status = ?", sessionIDs, tableOrderActive).
 		Count(&activeOrders)
 	if activeOrders > 0 {
 		return fmt.Sprintf("la mesa tiene %d pedido(s) activo(s); finalice o anule la operación antes de eliminarla", activeOrders)
@@ -331,6 +352,57 @@ func (s *RestaurantService) DeleteTable(id uint) error {
 		return err
 	}
 	return nil
+}
+
+// CleanupAbandonedQuickSales cancela ventas rápidas abandonadas y saca sus comandas de la
+// cocina.
+//
+// Abandonada = sesión abierta, sin mesa (quick_sale/takeaway/delivery), sin venta generada
+// (sale_id nulo) y abierta ANTES de hoy. El corte por día evita tocar una operación del
+// turno actual que todavía no se ha cobrado. Devuelve cuántas sesiones se cancelaron.
+//
+// Re-ejecutable: es un mantenimiento recurrente (estas ventas se siguen abandonando y no
+// hay cierre automático), no una corrección de una sola vez.
+func (s *RestaurantService) CleanupAbandonedQuickSales() (int64, error) {
+	if !s.db.Migrator().HasTable("tenant_table_sessions") {
+		return 0, nil
+	}
+
+	// Corte "inicio de hoy" calculado en Go (portable: SQLite en tests no tiene CURDATE).
+	now := time.Now()
+	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// Sesión abierta, sin mesa, sin venta, abierta antes de hoy.
+	var sessionIDs []uint
+	if err := s.db.Model(&database.TenantTableSession{}).
+		Where("status = 'open' AND table_id IS NULL AND sale_id IS NULL AND opened_at < ?", startOfToday).
+		Pluck("id", &sessionIDs).Error; err != nil {
+		return 0, err
+	}
+	if len(sessionIDs) == 0 {
+		return 0, nil
+	}
+
+	if err := s.db.Model(&database.TenantComanda{}).
+		Where("session_id IN ? AND cancelled_at IS NULL", sessionIDs).
+		Updates(map[string]interface{}{
+			"cancelled_at":  now,
+			"cancel_reason": "Venta rápida abandonada (limpieza)",
+		}).Error; err != nil {
+		return 0, err
+	}
+
+	if err := s.db.Model(&database.TenantTableSession{}).
+		Where("id IN ?", sessionIDs).
+		Updates(map[string]interface{}{
+			"status":       "cancelled",
+			"order_status": "cancelled",
+			"closed_at":    now,
+		}).Error; err != nil {
+		return 0, err
+	}
+
+	return int64(len(sessionIDs)), nil
 }
 
 // ============================= SESIONES DE MESA =============================
@@ -413,7 +485,10 @@ func (s *RestaurantService) GetSessionDetail(sessionID uint) (*SessionDetail, er
 	detail.Orders = make([]OrderDetail, 0, len(orders))
 	for _, o := range orders {
 		var comandas []database.TenantComanda
-		s.db.Where("order_id = ?", o.ID).Order("created_at ASC").Find(&comandas)
+		s.db.Where("order_id = ? AND cancelled_at IS NULL", o.ID).Order("created_at ASC").Find(&comandas)
+		if len(comandas) == 0 {
+			continue
+		}
 		detail.Orders = append(detail.Orders, OrderDetail{TenantTableOrder: o, Comandas: comandas})
 	}
 
@@ -421,8 +496,20 @@ func (s *RestaurantService) GetSessionDetail(sessionID uint) (*SessionDetail, er
 }
 
 func (s *RestaurantService) GetActiveSessionByTable(tableID uint) (*database.TenantTableSession, error) {
+	var count int64
+	if err := s.db.Model(&database.TenantTableSession{}).
+		Where("table_id = ? AND status = ?", tableID, sessionStatusOpen).
+		Count(&count).Error; err != nil {
+		return nil, err
+	}
+	if count > 1 {
+		log.Printf("[restaurant] ADVERTENCIA: mesa id=%d tiene %d sesiones open; usando la más reciente", tableID, count)
+	}
+
 	var sess database.TenantTableSession
-	err := s.db.Where("table_id = ? AND status = 'open'", tableID).First(&sess).Error
+	err := s.db.Where("table_id = ? AND status = ?", tableID, sessionStatusOpen).
+		Order("opened_at DESC, id DESC").
+		First(&sess).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -432,15 +519,21 @@ func (s *RestaurantService) GetActiveSessionByTable(tableID uint) (*database.Ten
 // ============================= PEDIDOS Y COMANDAS =============================
 
 type NewOrderItem struct {
-	ProductID          *uint   `json:"product_id"`
-	ProductCode        string  `json:"product_code"`
-	ProductName        string  `json:"product_name"`
+	ProductID   *uint  `json:"product_id"`
+	ProductCode string `json:"product_code"`
+	ProductName string `json:"product_name"`
+	// PresentationID: se resuelve en resolveRestaurantOrderItem a partir de modifiers_json
+	// (entrada type:"variant"); no lo envía el cliente directamente.
+	PresentationID     *uint   `json:"-"`
 	Quantity           float64 `json:"quantity"`
 	UnitPrice          float64 `json:"unit_price"`
 	Notes              string  `json:"notes"`
 	ModifiersJSON      string  `json:"modifiers_json"`
 	IgvAffectationType string  `json:"igv_affectation_type"`
 	PriceIncludesIgv   bool    `json:"price_includes_igv"`
+	// ComboJSON: elección del cliente por grupo cuando el producto es un combo.
+	// [{ group_id, items: [{ product_id, quantity }] }]. Los grupos fijos no hace falta enviarlos.
+	ComboJSON string `json:"combo_json"`
 }
 
 // comandaIgvForCalc devuelve afectación e «incluye IGV» de la línea (snapshot en comanda).
@@ -466,49 +559,70 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 	if len(items) == 0 {
 		return nil, errors.New("el pedido debe tener al menos un ítem")
 	}
-	var sess database.TenantTableSession
-	if err := s.db.First(&sess, sessionID).Error; err != nil {
-		return nil, errors.New("sesión no encontrada")
-	}
-	if sess.Status != "open" {
-		return nil, errors.New("la sesión ya está cerrada")
-	}
 
-	// Siguiente número de pedido
-	var lastOrder database.TenantTableOrder
-	var nextNum int = 1
-	if s.db.Where("session_id = ?", sessionID).Order("order_number DESC").First(&lastOrder).Error == nil {
-		nextNum = lastOrder.OrderNumber + 1
-	}
-
-	if staffID == nil && sess.StaffID != nil {
-		staffID = sess.StaffID
-	}
-
-	order := &database.TenantTableOrder{
-		SessionID:   sessionID,
-		StaffID:     staffID,
-		UserID:      userID,
-		OrderNumber: nextNum,
-		Notes:       notes,
-		Status:      "active",
-	}
-
+	var order database.TenantTableOrder
 	var comandas []database.TenantComanda
-	var sessionTotal float64
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(order).Error; err != nil {
+		var sess database.TenantTableSession
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&sess, sessionID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("sesión no encontrada")
+			}
 			return err
 		}
+		if sess.Status != sessionStatusOpen {
+			return errors.New("la sesión ya está cerrada")
+		}
+
+		resolvedStaff := staffID
+		if resolvedStaff == nil && sess.StaffID != nil {
+			resolvedStaff = sess.StaffID
+		}
+
+		var lastOrder database.TenantTableOrder
+		nextNum := 1
+		if tx.Where("session_id = ?", sessionID).Order("order_number DESC").First(&lastOrder).Error == nil {
+			nextNum = lastOrder.OrderNumber + 1
+		}
+
+		order = database.TenantTableOrder{
+			SessionID:   sessionID,
+			StaffID:     resolvedStaff,
+			UserID:      userID,
+			OrderNumber: nextNum,
+			Notes:       notes,
+			Status:      "active",
+		}
+		if err := tx.Create(&order).Error; err != nil {
+			return err
+		}
+
+		var sessionTotal float64
 		taxCfg := tax.LoadFromDB(tx)
 		for i := range items {
 			item := &items[i]
-			if err := resolveRestaurantOrderItem(tx, item); err != nil {
+			product, err := resolveRestaurantOrderItem(tx, item)
+			if err != nil {
 				return err
 			}
-			prepArea := resolveProductPreparationArea(tx, item.ProductID)
-			// Cada ítem es una fila de comanda; la ronda (TenantTableOrder) es el ticket de cocina.
+			comboDrafts, err := resolveComboOrderItem(tx, item, product)
+			if err != nil {
+				return err
+			}
+			if len(comboDrafts) > 0 {
+				comboComandas, err := createComboComandas(tx, order.ID, sessionID, item, comboDrafts)
+				if err != nil {
+					return err
+				}
+				comandas = append(comandas, comboComandas...)
+				// El combo cobra una sola vez su precio fijo: las comandas de componentes van a 0.
+				sessionTotal += money.RoundSunat(tax.CalcItemPayableTotal(
+					item.UnitPrice, item.Quantity, 0, item.IgvAffectationType, item.PriceIncludesIgv, taxCfg,
+				))
+				continue
+			}
+			prepArea := resolveProductPreparationArea(tx, item.ProductID, product)
 			affType := strings.TrimSpace(item.IgvAffectationType)
 			if affType == "" {
 				affType = "10"
@@ -516,32 +630,30 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 			c := database.TenantComanda{
 				OrderID:            order.ID,
 				SessionID:          sessionID,
-				ProductID:            item.ProductID,
-				ProductCode:          item.ProductCode,
-				ProductName:          item.ProductName,
-				PreparationArea:      prepArea,
-				Quantity:             item.Quantity,
-				UnitPrice:            item.UnitPrice,
-				Notes:                item.Notes,
-				ModifiersJSON:        strings.TrimSpace(item.ModifiersJSON),
-				IgvAffectationType:   affType,
-				PriceIncludesIgv:     item.PriceIncludesIgv,
-				Status:               "pendiente",
+				ProductID:          item.ProductID,
+				PresentationID:     item.PresentationID,
+				ProductCode:        item.ProductCode,
+				ProductName:        item.ProductName,
+				PreparationArea:    prepArea,
+				Quantity:           item.Quantity,
+				UnitPrice:          item.UnitPrice,
+				Notes:              item.Notes,
+				ModifiersJSON:      strings.TrimSpace(item.ModifiersJSON),
+				IgvAffectationType: affType,
+				PriceIncludesIgv:   item.PriceIncludesIgv,
+				Status:             "pendiente",
 			}
 			if err := tx.Create(&c).Error; err != nil {
 				return err
 			}
-			// price_includes_igv=false debe persistirse explícitamente (GORM + default:true en columna).
 			if err := gormutil.PersistBoolWithDefault(tx, &c, "price_includes_igv", item.PriceIncludesIgv); err != nil {
 				return err
 			}
 			c.PriceIncludesIgv = item.PriceIncludesIgv
 			comandas = append(comandas, c)
-			_, _, lineTotal := tax.CalcItem(item.UnitPrice, item.Quantity, 0, affType, item.PriceIncludesIgv, taxCfg)
-			sessionTotal += money.RoundSunat(lineTotal)
+			sessionTotal += money.RoundSunat(tax.CalcItemPayableTotal(item.UnitPrice, item.Quantity, 0, affType, item.PriceIncludesIgv, taxCfg))
 		}
 
-		// Actualizar total acumulado de la sesión
 		tx.Model(&database.TenantTableSession{}).Where("id = ?", sessionID).
 			UpdateColumn("total_amount", gorm.Expr("total_amount + ?", sessionTotal))
 
@@ -562,8 +674,7 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 	if err != nil {
 		return nil, err
 	}
-
-	return &OrderDetail{TenantTableOrder: *order, Comandas: comandas}, nil
+	return &OrderDetail{TenantTableOrder: order, Comandas: comandas}, nil
 }
 
 func comandaStatusRank(status string) int {
@@ -620,12 +731,18 @@ func (s *RestaurantService) UpdateComandaStatus(id uint, status string, userID u
 	return s.syncSessionOrderStatus(s.db, c.SessionID)
 }
 
-// CancelComanda anula una comanda (solo admin).
+// CancelComanda anula una comanda (permiso o.cx / s.m + PIN de operaciones).
 func (s *RestaurantService) CancelComanda(id uint, reason string, cancelledByID uint) error {
 	var c database.TenantComanda
 	if err := s.db.First(&c, id).Error; err != nil {
 		return errors.New("comanda no encontrada")
 	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		return s.cancelComandaTx(tx, &c, reason, cancelledByID)
+	})
+}
+
+func (s *RestaurantService) cancelComandaTx(tx *gorm.DB, c *database.TenantComanda, reason string, cancelledByID uint) error {
 	if c.CancelledAt != nil {
 		return errors.New("la comanda ya fue anulada")
 	}
@@ -633,33 +750,103 @@ func (s *RestaurantService) CancelComanda(id uint, reason string, cancelledByID 
 		return errors.New("no se puede anular una comanda ya entregada")
 	}
 	now := time.Now()
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&c).Updates(map[string]interface{}{
-			"cancelled_at":    now,
-			"cancelled_by_id": cancelledByID,
-			"cancel_reason":   reason,
-			"status":          "entregada", // marca como procesada para que no aparezca en cocina
-		}).Error; err != nil {
-			return err
-		}
-		// Restar del total de la sesión (mismo criterio tributario que al agregar la comanda)
-		taxCfg := tax.LoadFromDB(tx)
-		affType, priceIncludes := comandaIgvForCalc(tx, &c)
-		_, _, deduct := tax.CalcItem(c.UnitPrice, c.Quantity, 0, affType, priceIncludes, taxCfg)
-		deduct = money.RoundSunat(deduct)
-		tx.Model(&database.TenantTableSession{}).Where("id = ?", c.SessionID).
-			UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", deduct))
-		return nil
-	})
+	if err := tx.Model(c).Updates(map[string]interface{}{
+		"cancelled_at":    now,
+		"cancelled_by_id": cancelledByID,
+		"cancel_reason":   reason,
+		"status":          "entregada",
+	}).Error; err != nil {
+		return err
+	}
+	taxCfg := tax.LoadFromDB(tx)
+	affType, priceIncludes := comandaIgvForCalc(tx, c)
+	_, _, deduct := tax.CalcItem(c.UnitPrice, c.Quantity, 0, affType, priceIncludes, taxCfg)
+	deduct = money.RoundSunat(deduct)
+	if err := tx.Model(&database.TenantTableSession{}).Where("id = ?", c.SessionID).
+		UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", deduct)).Error; err != nil {
+		return err
+	}
+	return s.syncSessionOrderStatus(tx, c.SessionID)
 }
 
-func resolveProductPreparationArea(tx *gorm.DB, productID *uint) string {
+// CancelAllComandasResult resultado de anulación masiva de comandas.
+type CancelAllComandasResult struct {
+	CancelledCount int `json:"cancelled_count"`
+}
+
+// CancelAllComandas anula todas las comandas cancelables de una sesión (opcionalmente solo una ronda/order_id).
+func (s *RestaurantService) CancelAllComandas(sessionID uint, orderID *uint, pin, reason string, userID uint) (*CancelAllComandasResult, error) {
+	if err := s.VerifyDeletionPin(pin); err != nil {
+		return nil, err
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil, errors.New("indique el motivo de anulación")
+	}
+
+	var sess database.TenantTableSession
+	if err := s.db.First(&sess, sessionID).Error; err != nil {
+		return nil, errors.New("pedido no encontrado")
+	}
+	if sess.Status != "open" {
+		return nil, errors.New("solo se pueden anular comandas de pedidos abiertos")
+	}
+	if sess.SaleID != nil {
+		return nil, errors.New("no se puede anular: el pedido ya fue facturado")
+	}
+
+	q := s.db.Where(
+		"session_id = ? AND cancelled_at IS NULL AND status != ?",
+		sessionID, "entregada",
+	)
+	if orderID != nil && *orderID > 0 {
+		q = q.Where("order_id = ?", *orderID)
+	}
+	var comandas []database.TenantComanda
+	if err := q.Order("id ASC").Find(&comandas).Error; err != nil {
+		return nil, err
+	}
+	if len(comandas) == 0 {
+		return nil, errors.New("no hay comandas que se puedan anular")
+	}
+
+	result := &CancelAllComandasResult{}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		for i := range comandas {
+			c := comandas[i]
+			if err := s.cancelComandaTx(tx, &c, reason, userID); err != nil {
+				return err
+			}
+			result.CancelledCount++
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// El producto ya viene resuelto por resolveRestaurantOrderItem; solo se relee si no lo
+// tenemos (ítem manual o llamador sin producto a mano).
+func resolveProductPreparationArea(tx *gorm.DB, productID *uint, resolved *database.TenantProduct) string {
 	if productID == nil || *productID == 0 {
 		return "cocina"
 	}
 	var p database.TenantProduct
-	if err := tx.Select("preparation_area").First(&p, *productID).Error; err != nil {
+	if resolved != nil && resolved.ID == *productID {
+		p = *resolved
+	} else if err := tx.Select("preparation_area_id", "preparation_area").First(&p, *productID).Error; err != nil {
 		return "cocina"
+	}
+	if p.PreparationAreaID != nil && *p.PreparationAreaID > 0 {
+		var area database.TenantPreparationArea
+		if err := tx.Select("slug").First(&area, *p.PreparationAreaID).Error; err == nil {
+			slug := strings.TrimSpace(strings.ToLower(area.Slug))
+			if slug != "" {
+				return slug
+			}
+		}
 	}
 	area := strings.TrimSpace(strings.ToLower(p.PreparationArea))
 	if area == "" {
@@ -710,18 +897,18 @@ func (s *RestaurantService) MarkTableOrderPrinted(tableOrderID uint, userID uint
 
 // KitchenSessionMeta contexto del pedido para la vista de cocina.
 type KitchenSessionMeta struct {
-	OrderCode       string     `json:"order_code"`
-	OrderType       string     `json:"order_type"`
-	OrderStatus     string     `json:"order_status"`
-	TableID         *uint      `json:"table_id"`
-	TableName       string     `json:"table_name"`
-	FloorName       string     `json:"floor_name"`
-	CustomerName    string     `json:"customer_name"`
-	CustomerPhone   string     `json:"customer_phone"`
-	DeliveryAddress string     `json:"delivery_address"`
-	WaiterName      string     `json:"waiter_name"`
-	DriverName      string     `json:"driver_name"`
-	OpenedAt        time.Time  `json:"session_opened_at"`
+	OrderCode       string    `json:"order_code"`
+	OrderType       string    `json:"order_type"`
+	OrderStatus     string    `json:"order_status"`
+	TableID         *uint     `json:"table_id"`
+	TableName       string    `json:"table_name"`
+	FloorName       string    `json:"floor_name"`
+	CustomerName    string    `json:"customer_name"`
+	CustomerPhone   string    `json:"customer_phone"`
+	DeliveryAddress string    `json:"delivery_address"`
+	WaiterName      string    `json:"waiter_name"`
+	DriverName      string    `json:"driver_name"`
+	OpenedAt        time.Time `json:"session_opened_at"`
 }
 
 // KitchenComandaView línea de cocina con datos del pedido y de la ronda.
@@ -834,18 +1021,21 @@ func (s *RestaurantService) kitchenSessionMetaMap(sessionIDs []uint) map[uint]Ki
 // ============================= COBRO Y CIERRE =============================
 
 type BillInput struct {
-	SessionID      uint
-	UserID         uint
-	EmployeeType   string // staff restaurante: bloquea efectivo a waiter
-	SeriesID       uint
-	DocType        string
-	IssueDate      time.Time
-	Currency       string
-	ContactID      *uint
-	Payments       []PaymentInput
-	CashSessionID  *uint
-	CloseSession   bool // si es false, genera la venta pero no cierra la mesa (cliente puede seguir consumiendo)
-	DiscountAmount float64 // descuento global en moneda (se reparte proporcionalmente entre ítems)
+	SessionID       uint
+	UserID          uint
+	EmployeeType    string // staff restaurante: bloquea efectivo a waiter
+	SeriesID        uint
+	DocType         string
+	IssueDate       time.Time
+	Currency        string
+	ContactID       *uint
+	Payments        []PaymentInput
+	CashSessionID   *uint
+	CloseSession    bool    // si es false, genera la venta pero no cierra la mesa (cliente puede seguir consumiendo)
+	DiscountAmount  float64 // descuento global en moneda sobre base imponible (subtotal)
+	DiscountMode    string  // "percent" | "amount" (opcional; recalcula descuento en servidor)
+	DiscountValue   float64 // valor del descuento (% o monto según DiscountMode)
+	CentralTenantID uint    // tenant SaaS (cupo documentos electrónicos)
 }
 
 type PaymentInput struct {
@@ -853,6 +1043,27 @@ type PaymentInput struct {
 	Amount    float64 `json:"amount"`
 	Reference string  `json:"reference"`
 	Notes     string  `json:"notes"`
+}
+
+func resolveBillDiscountAmount(subtotalBase float64, input BillInput) float64 {
+	subtotalBase = money.RoundSunat(subtotalBase)
+	var amount float64
+	if input.DiscountValue > 0 {
+		mode := strings.TrimSpace(strings.ToLower(input.DiscountMode))
+		if mode == "" {
+			mode = "amount"
+		}
+		amount = money.CalcCheckoutDiscountAmount(subtotalBase, mode, input.DiscountValue)
+	} else {
+		amount = money.RoundSunat(input.DiscountAmount)
+	}
+	if amount < 0 {
+		amount = 0
+	}
+	if amount > subtotalBase {
+		amount = subtotalBase
+	}
+	return money.RoundSunat(amount)
 }
 
 // BillTable cierra la sesión, genera una venta formal y registra los pagos.
@@ -880,19 +1091,24 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		return nil, errors.New("no hay ítems para facturar en esta sesión")
 	}
 
-	resolvedCash, err := s.resolveCashSessionForPayments(sess.BranchID, input.UserID, input.EmployeeType, input.CashSessionID, input.Payments)
+	resolvedCash, err := s.resolveCashSessionForSale(sess.BranchID, input.UserID, input.EmployeeType, input.CashSessionID, input.Payments)
 	if err != nil {
 		return nil, err
 	}
 	input.CashSessionID = resolvedCash
 
-	if _, err := docseries.ValidateForBranch(s.db, input.SeriesID, sess.BranchID); err != nil {
+	seriesRow, err := docseries.ValidateForBranch(s.db, input.SeriesID, sess.BranchID)
+	if err != nil {
+		return nil, err
+	}
+	if err := docusage.GuardCountableSunatQuota(input.CentralTenantID, seriesRow.SunatCode); err != nil {
 		return nil, err
 	}
 
 	// Construir ítems de venta desde las comandas (con tipo de afectación IGV para Lycet)
 	type saleItemData struct {
 		ProductID          *uint
+		PresentationID     *uint
 		Code               string
 		Description        string
 		Unit               string
@@ -904,83 +1120,95 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		ModifiersJSON      string
 	}
 	itemMap := make(map[string]*saleItemData)
-	for _, c := range comandas {
-		key := comandaSaleLineKey(c)
-		if existing, ok := itemMap[key]; ok {
-			existing.Quantity += c.Quantity
-		} else {
-			affType, priceIncludesIgv := comandaIgvForCalc(s.db, &c)
-			itemMap[key] = &saleItemData{
-				ProductID:          c.ProductID,
-				Code:               c.ProductCode,
-				Description:        c.ProductName,
-				Unit:               "NIU",
-				Quantity:           c.Quantity,
-				UnitPrice:          c.UnitPrice,
-				TaxRate:            taxCfg.EffectiveRate(affType),
-				IgvAffectationType: affType,
-				PriceIncludesIgv:   priceIncludesIgv,
-				ModifiersJSON:      strings.TrimSpace(c.ModifiersJSON),
-			}
+	// Las N comandas de un combo colapsan en una sola línea con su precio fijo.
+	for _, line := range comandasToBillLines(comandas) {
+		if existing, ok := itemMap[line.Key]; ok {
+			existing.Quantity += line.Quantity
+			continue
+		}
+		affType, priceIncludesIgv := line.IgvAffectationType, line.PriceIncludesIgv
+		if !line.IsCombo {
+			affType, priceIncludesIgv = comandaIgvForCalc(s.db, line.Comanda)
+		}
+		if strings.TrimSpace(affType) == "" {
+			affType = "10"
+		}
+		var presentationID *uint
+		if line.Comanda != nil {
+			presentationID = line.Comanda.PresentationID
+		}
+		itemMap[line.Key] = &saleItemData{
+			ProductID:          line.ProductID,
+			PresentationID:     presentationID,
+			Code:               line.Code,
+			Description:        line.Name,
+			Unit:               "NIU",
+			Quantity:           line.Quantity,
+			UnitPrice:          line.UnitPrice,
+			TaxRate:            taxCfg.EffectiveRate(affType),
+			IgvAffectationType: affType,
+			PriceIncludesIgv:   priceIncludesIgv,
+			ModifiersJSON:      line.ModifiersJSON,
 		}
 	}
 
-	// Calcular totales (con descuento global repartido proporcionalmente)
-	type pricedLine struct {
-		data  *saleItemData
-		gross float64
+	// Calcular totales con motor unificado (solo descuento global en restaurante).
+	mapKeys := make([]string, 0, len(itemMap))
+	for k := range itemMap {
+		mapKeys = append(mapKeys, k)
 	}
-	var lines []pricedLine
-	var grossTotal float64
-	for _, item := range itemMap {
-		_, _, iTotal := tax.CalcItem(item.UnitPrice, item.Quantity, 0, item.IgvAffectationType, item.PriceIncludesIgv, taxCfg)
-		lines = append(lines, pricedLine{data: item, gross: iTotal})
-		grossTotal += iTotal
-	}
-	discountAmount := money.RoundSunat(input.DiscountAmount)
-	if discountAmount < 0 {
-		discountAmount = 0
-	}
-	grossTotal = money.RoundSunat(grossTotal)
-	if discountAmount > grossTotal {
-		discountAmount = grossTotal
-	}
-
-	var subtotal, taxAmount, total float64
-	var saleItems []database.TenantSaleItem
-	remainingDisc := discountAmount
-	for i, ln := range lines {
-		itemDisc := 0.0
-		if discountAmount > 0 && grossTotal > 0 {
-			if i == len(lines)-1 {
-				itemDisc = remainingDisc
-			} else {
-				itemDisc = money.RoundSunat(discountAmount * (ln.gross / grossTotal))
-				remainingDisc = money.RoundSunat(remainingDisc - itemDisc)
-			}
-		}
-		item := ln.data
-		iSub, iTax, iTotal := tax.CalcItem(item.UnitPrice, item.Quantity, itemDisc, item.IgvAffectationType, item.PriceIncludesIgv, taxCfg)
-		subtotal = money.RoundSunat(subtotal + iSub)
-		taxAmount = money.RoundSunat(taxAmount + iTax)
-		total = money.RoundSunat(total + iTotal)
-		itemDisc = money.RoundSunat(itemDisc)
-		saleItems = append(saleItems, database.TenantSaleItem{
-			ProductID:          item.ProductID,
-			Code:               item.Code,
-			Description:        item.Description,
-			Unit:               item.Unit,
-			Quantity:           item.Quantity,
+	sort.Strings(mapKeys)
+	saleLines := make([]tax.SaleLineInput, 0, len(mapKeys))
+	lineDataOrder := make([]*saleItemData, 0, len(mapKeys))
+	for _, k := range mapKeys {
+		item := itemMap[k]
+		saleLines = append(saleLines, tax.SaleLineInput{
 			UnitPrice:          item.UnitPrice,
-			Discount:           itemDisc,
-			TaxRate:            item.TaxRate,
+			Quantity:           item.Quantity,
 			IgvAffectationType: item.IgvAffectationType,
-			Subtotal:           iSub,
-			TaxAmount:          iTax,
-			Total:              iTotal,
-			ModifiersJSON:      item.ModifiersJSON,
+			PriceIncludesIgv:   item.PriceIncludesIgv,
+		})
+		lineDataOrder = append(lineDataOrder, item)
+	}
+	globalMode := strings.TrimSpace(strings.ToLower(input.DiscountMode))
+	globalValue := input.DiscountValue
+	if globalValue <= 0 && input.DiscountAmount > 0 {
+		globalMode = "amount"
+		globalValue = input.DiscountAmount
+	}
+	calcResult := tax.CalcSaleCheckout(tax.SaleCheckoutInput{
+		Lines:               saleLines,
+		GlobalDiscountMode:  globalMode,
+		GlobalDiscountValue: globalValue,
+		TaxCfg:              taxCfg,
+	})
+
+	var saleItems []database.TenantSaleItem
+	for i, item := range lineDataOrder {
+		lr := calcResult.Lines[i]
+		saleItems = append(saleItems, database.TenantSaleItem{
+			ProductID:              item.ProductID,
+			PresentationID:         item.PresentationID,
+			Code:                   item.Code,
+			Description:            item.Description,
+			Unit:                   item.Unit,
+			Quantity:               item.Quantity,
+			UnitPrice:              item.UnitPrice,
+			Discount:               lr.StoredDiscount,
+			LineDiscountSubtotal:   lr.LineDiscountSubtotal,
+			GlobalDiscountSubtotal: lr.GlobalDiscountSubtotal,
+			TaxRate:                lr.TaxRate,
+			IgvAffectationType:     item.IgvAffectationType,
+			Subtotal:               lr.Subtotal,
+			TaxAmount:              lr.TaxAmount,
+			Total:                  lr.Total,
+			ModifiersJSON:          item.ModifiersJSON,
 		})
 	}
+	subtotal := calcResult.Subtotal
+	taxAmount := calcResult.TaxAmount
+	total := calcResult.Total
+	discountAmount := calcResult.GlobalDiscountAmount
 
 	var totalPaid float64
 	for _, p := range input.Payments {
@@ -996,30 +1224,57 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 	}
 
 	var sale *database.TenantSale
-	var seriesRow database.TenantDocumentSeries
 	var correlative uint
 	var saleNumber string
 
 	sale = &database.TenantSale{
-		BranchID:            sess.BranchID,
-		UserID:              input.UserID,
-		ContactID:           input.ContactID,
-		RestaurantSessionID: &input.SessionID,
-		CashSessionID:       input.CashSessionID,
-		SeriesID:            input.SeriesID,
-		DocType:             input.DocType,
-		IssueDate:     input.IssueDate,
-		Subtotal:      money.RoundSunat(subtotal),
-		TaxAmount:     money.RoundSunat(taxAmount),
-		Total:         money.RoundSunat(total),
-		Currency:      currency,
-		PaymentMethod: input.Payments[0].Method, // método principal
-		Status:        "paid",
-		BillingStatus: "pending",
+		BranchID:             sess.BranchID,
+		UserID:               input.UserID,
+		ContactID:            input.ContactID,
+		RestaurantSessionID:  &input.SessionID,
+		CashSessionID:        input.CashSessionID,
+		SeriesID:             input.SeriesID,
+		DocType:              input.DocType,
+		IssueDate:            input.IssueDate,
+		Subtotal:             money.RoundSunat(subtotal),
+		TaxAmount:            money.RoundSunat(taxAmount),
+		Total:                money.RoundSunat(total),
+		GlobalDiscountAmount: money.RoundSunat(discountAmount),
+		GlobalDiscountMode:   globalMode,
+		GlobalDiscountValue:  globalValue,
+		Currency:             currency,
+		PaymentMethod:        input.Payments[0].Method, // método principal
+		Status:               "paid",
+		BillingStatus:        "pending",
 	}
 
 	now := time.Now()
 	return sale, s.db.Transaction(func(tx *gorm.DB) error {
+		var lockedSess database.TenantTableSession
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&lockedSess, input.SessionID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("sesión no encontrada")
+			}
+			return err
+		}
+		if lockedSess.Status != sessionStatusOpen {
+			return errors.New("la sesión ya está cerrada o facturada")
+		}
+
+		// Reclamo atómico de la sesión. El FOR UPDATE de arriba solo bloquea la fila en
+		// MySQL/InnoDB; este UPDATE guardado no depende del motor: si otra transacción ya
+		// reclamó la sesión, afecta 0 filas y ese cobro se rechaza. Es lo que impide cobrar
+		// dos veces la misma mesa.
+		claim := tx.Model(&database.TenantTableSession{}).
+			Where("id = ? AND status = ?", input.SessionID, sessionStatusOpen).
+			Update("status", sessionStatusBilling)
+		if claim.Error != nil {
+			return claim.Error
+		}
+		if claim.RowsAffected == 0 {
+			return errors.New("la sesión ya está cerrada o facturada")
+		}
+
 		var err error
 		correlative, seriesRow, err = docseries.ReserveNext(tx, input.SeriesID)
 		if err != nil {
@@ -1041,6 +1296,7 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		}
 
 		// Descontar stock y registrar kardex para productos con control de stock
+		inv := invsvc.NewInventoryService(tx)
 		for _, item := range saleItems {
 			if item.ProductID == nil {
 				continue
@@ -1049,35 +1305,54 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 			if tx.First(&product, *item.ProductID).Error != nil {
 				continue
 			}
+			// Un combo no tiene stock propio: lo mueven sus componentes (abajo).
+			if product.HasCombo {
+				continue
+			}
 			if !product.ManageStock {
 				continue
 			}
-			var stock database.TenantProductStock
-			tx.Where("product_id = ? AND branch_id = ?", *item.ProductID, sess.BranchID).First(&stock)
-			newQty := stock.Quantity - item.Quantity
-			if stock.ID == 0 {
-				tx.Create(&database.TenantProductStock{
-					ProductID: *item.ProductID,
-					BranchID:  sess.BranchID,
-					Quantity:  newQty,
-				})
-			} else {
-				tx.Model(&stock).Update("quantity", newQty)
+			var itemPresentationID *uint
+			if product.HasVariants && item.PresentationID != nil && *item.PresentationID > 0 {
+				itemPresentationID = item.PresentationID
 			}
-			tx.Create(&database.TenantStockMovement{
-				ProductID: *item.ProductID,
-				BranchID:  sess.BranchID,
-				Type:      "out",
-				Quantity:  item.Quantity,
-				Balance:   newQty,
-				Reference: "VENTA/" + sale.Number,
-				UserID:    input.UserID,
-				CreatedAt: now,
-			})
+			currentItemID := item.ID
+			if err := inv.RecordMovementTx(tx, invsvc.MovementInput{
+				ProductID:      *item.ProductID,
+				PresentationID: itemPresentationID,
+				BranchID:       sess.BranchID,
+				Type:           "out",
+				Quantity:       item.Quantity,
+				Reference:      "VENTA/" + sale.Number,
+				UserID:         input.UserID,
+				OperationCode:  "SALE",
+				SaleItemID:     &currentItemID,
+			}); err != nil {
+				return err
+			}
+		}
+		// Combos: el movimiento se toma de las comandas de componentes, que ya llevan el
+		// producto real y la cantidad ya multiplicada por los combos pedidos. Solo descuenta
+		// el componente que tenga control de stock activado; el resto no toca el kardex.
+		if err := recordComboComponentStock(tx, inv, comandas, comboStockContext{
+			BranchID:  sess.BranchID,
+			Reference: "VENTA/" + sale.Number,
+			UserID:    input.UserID,
+		}); err != nil {
+			return err
 		}
 
 		// Registrar pagos múltiples: distribuir a caja o cuenta bancaria según método
 		cbSvc := cashbanksvc.NewCashBankService(s.db)
+		var recordAmounts []float64
+		for _, p := range input.Payments {
+			if p.Amount <= 0 || p.Method == "" {
+				continue
+			}
+			recordAmounts = append(recordAmounts, p.Amount)
+		}
+		netRecordAmounts := money.AllocateSalePaymentNetAmounts(total, recordAmounts)
+		recordIdx := 0
 		for _, p := range input.Payments {
 			tx.Create(&database.TenantSalePayment{
 				SaleID:    sale.ID,
@@ -1087,24 +1362,41 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 				Notes:     p.Notes,
 			})
 			desc := "Venta " + sale.Number
-			_ = cbSvc.RecordPayment(tx, p.Method, p.Amount, input.CashSessionID, sale.Number, desc, &sale.ID, input.UserID)
+			recordAmt := p.Amount
+			if p.Amount > 0 && p.Method != "" {
+				recordAmt = netRecordAmounts[recordIdx]
+				recordIdx++
+			}
+			_ = cbSvc.RecordPayment(tx, p.Method, recordAmt, input.CashSessionID, sale.Number, desc, &sale.ID, input.UserID)
 		}
 
 		if input.CloseSession {
 			// Cerrar sesión y liberar mesa
-			tx.Model(&sess).Updates(map[string]interface{}{
-				"status": "billed", "closed_at": now, "sale_id": sale.ID,
+			tx.Model(&lockedSess).Updates(map[string]interface{}{
+				"status": sessionStatusBilled, "closed_at": now, "sale_id": sale.ID,
 				"order_status": OrderStatusPaid, "paid_at": now,
 			})
-			if sess.TableID != nil {
-				tx.Model(&database.TenantRestaurantTable{}).Where("id = ?", *sess.TableID).
-					Update("status", "libre")
+			if lockedSess.TableID != nil {
+				if err := s.syncTableStatusFromOpenSession(tx, *lockedSess.TableID); err != nil {
+					return err
+				}
 			}
+			// Finalizar los pedidos de la sesión. Sin esto quedaban "active" para siempre y
+			// bloqueaban eliminar la mesa aunque estuviera libre y ya cobrada.
+			tx.Model(&database.TenantTableOrder{}).
+				Where("session_id = ? AND status = ?", input.SessionID, tableOrderActive).
+				Update("status", tableOrderClosed)
 			// Eliminar comandas de la sesión cerrada (ya facturadas en la venta; no aparecen en cocina)
 			tx.Where("session_id = ?", input.SessionID).Delete(&database.TenantComanda{})
 		} else {
 			// Generar venta pero mantener mesa abierta: descontar lo facturado del total de la sesión
-			tx.Model(&sess).UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", total))
+			// y soltar el reclamo (vuelve a "open") para que la mesa siga operativa.
+			if err := tx.Model(&database.TenantTableSession{}).
+				Where("id = ?", input.SessionID).
+				Update("status", sessionStatusOpen).Error; err != nil {
+				return err
+			}
+			tx.Model(&lockedSess).UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", total))
 			// Marcar solo las comandas facturadas en este cobro (evita doble facturación en cobros parciales)
 			billedIDs := make([]uint, 0, len(comandas))
 			for _, c := range comandas {
@@ -1164,8 +1456,9 @@ func (s *RestaurantService) CancelSession(sessionID uint, pin, reason string, us
 			return err
 		}
 		if sess.TableID != nil {
-			tx.Model(&database.TenantRestaurantTable{}).Where("id = ?", *sess.TableID).
-				Update("status", "libre")
+			if err := s.syncTableStatusFromOpenSession(tx, *sess.TableID); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -1186,8 +1479,9 @@ func (s *RestaurantService) CloseSessionOnly(sessionID uint) error {
 			"status": "closed", "closed_at": now,
 		})
 		if sess.TableID != nil {
-			tx.Model(&database.TenantRestaurantTable{}).Where("id = ?", *sess.TableID).
-				Update("status", "libre")
+			if err := s.syncTableStatusFromOpenSession(tx, *sess.TableID); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -1219,6 +1513,15 @@ func (s *RestaurantService) RegisterPayments(saleID uint, payments []PaymentInpu
 
 	cbSvc := cashbanksvc.NewCashBankService(s.db)
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		var recordAmounts []float64
+		for _, p := range payments {
+			if p.Amount <= 0 || p.Method == "" {
+				continue
+			}
+			recordAmounts = append(recordAmounts, p.Amount)
+		}
+		netRecordAmounts := money.AllocateSalePaymentNetAmounts(sale.Total, recordAmounts)
+		recordIdx := 0
 		for _, p := range payments {
 			tx.Create(&database.TenantSalePayment{
 				SaleID:    saleID,
@@ -1228,7 +1531,12 @@ func (s *RestaurantService) RegisterPayments(saleID uint, payments []PaymentInpu
 				Notes:     p.Notes,
 			})
 			desc := "Venta " + sale.Number
-			_ = cbSvc.RecordPayment(tx, p.Method, p.Amount, sale.CashSessionID, sale.Number, desc, &sale.ID, userID)
+			recordAmt := p.Amount
+			if p.Amount > 0 && p.Method != "" {
+				recordAmt = netRecordAmounts[recordIdx]
+				recordIdx++
+			}
+			_ = cbSvc.RecordPayment(tx, p.Method, recordAmt, sale.CashSessionID, sale.Number, desc, &sale.ID, userID)
 		}
 		// Actualizar método de pago principal en la venta
 		if len(payments) > 0 {
@@ -1246,7 +1554,7 @@ func (s *RestaurantService) GetSalePayments(saleID uint) ([]database.TenantSaleP
 
 // ============================= HELPERS =============================
 
-func (s *RestaurantService) resolveCashSessionForPayments(
+func (s *RestaurantService) resolveCashSessionForSale(
 	branchID, userID uint,
 	employeeType string,
 	cashSessionID *uint,
@@ -1254,43 +1562,25 @@ func (s *RestaurantService) resolveCashSessionForPayments(
 ) (*uint, error) {
 	cbSvc := cashbanksvc.NewCashBankService(s.db)
 	needsCash := false
+	payLines := make([]cashbanksvc.PaymentLineInput, 0, len(payments))
 	for _, p := range payments {
 		if p.Amount <= 0 {
 			continue
 		}
+		payLines = append(payLines, cashbanksvc.PaymentLineInput{Method: p.Method, Amount: p.Amount})
 		pm, err := cbSvc.GetPaymentMethodByCode(p.Method)
 		if err == nil && pm != nil && pm.DestinationType == "cash" {
 			needsCash = true
-			break
 		}
 		if strings.EqualFold(strings.TrimSpace(p.Method), "cash") || strings.EqualFold(strings.TrimSpace(p.Method), "efectivo") {
 			needsCash = true
-			break
 		}
 	}
-	if !needsCash {
-		return cashSessionID, nil
-	}
-	et := strings.ToLower(strings.TrimSpace(employeeType))
-	if et == "waiter" || et == "mozo" {
-		return nil, errors.New("los mozos no pueden cobrar en efectivo; use otro método de pago o un cajero")
-	}
-	var sid uint
-	if cashSessionID != nil && *cashSessionID > 0 {
-		sid = *cashSessionID
-	} else {
-		sess, err := cbSvc.GetOpenSession(branchID, userID)
-		if err != nil {
-			return nil, err
+	if needsCash {
+		et := strings.ToLower(strings.TrimSpace(employeeType))
+		if et == "waiter" || et == "mozo" {
+			return nil, errors.New("los mozos no pueden cobrar en efectivo; use otro método de pago o un cajero")
 		}
-		if sess == nil {
-			return nil, errors.New("debe abrir su caja para cobrar en efectivo")
-		}
-		sid = sess.ID
 	}
-	if _, err := cbSvc.ValidateCashSessionForUser(sid, userID, branchID); err != nil {
-		return nil, err
-	}
-	return &sid, nil
+	return cbSvc.ResolveCashSessionForSale(branchID, userID, cashSessionID, payLines)
 }
-

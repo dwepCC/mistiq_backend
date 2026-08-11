@@ -2,6 +2,7 @@ package handler
 
 import (
 	"strconv"
+	"strings"
 
 	"tukifac/internal/company/service"
 	"tukifac/pkg/database"
@@ -212,12 +213,20 @@ func (h *CompanyHandler) SeriesPage(c fiber.Ctx) error {
 func (h *CompanyHandler) CreateSeriesForm(c fiber.Ctx) error {
 	svc := service.NewCompanyService(db(c))
 	branchID, _ := strconv.ParseUint(c.FormValue("branch_id"), 10, 32)
+	var corr *uint
+	if v := strings.TrimSpace(c.FormValue("correlative")); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).SendString("correlativo inválido")
+		}
+		u := uint(n)
+		corr = &u
+	}
 	if err := svc.CreateSeries(
 		uint(branchID),
 		c.FormValue("doc_type"),
-		c.FormValue("sunat_code"),
-		c.FormValue("category"),
 		c.FormValue("series"),
+		corr,
 	); err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
@@ -230,7 +239,7 @@ func (h *CompanyHandler) UpdateSeriesForm(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("ID inválido")
 	}
 	active := c.FormValue("is_active") == "true" || c.FormValue("is_active") == "on"
-	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), c.FormValue("series"), active, "", "", "", nil); err != nil {
+	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), c.FormValue("series"), active, "", nil); err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 	return c.Redirect().To("/company/series?success=updated")

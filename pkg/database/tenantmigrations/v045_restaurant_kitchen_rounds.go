@@ -26,7 +26,7 @@ func (v045TableOrder) TableName() string { return "tenant_table_orders" }
 // V045RestaurantKitchenRounds snapshot de área en comanda y auditoría de impresión por ronda.
 type V045RestaurantKitchenRounds struct{}
 
-func (V045RestaurantKitchenRounds) Version() int  { return 45 }
+func (V045RestaurantKitchenRounds) Version() int { return 45 }
 func (V045RestaurantKitchenRounds) Name() string { return "restaurant_kitchen_rounds" }
 
 func (V045RestaurantKitchenRounds) Up(db *gorm.DB) error {

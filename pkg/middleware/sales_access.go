@@ -25,10 +25,8 @@ func RequireSalesAccess(action string) fiber.Handler {
 		if !ok || claims == nil {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Sin contexto de autenticación"})
 		}
-		for _, p := range claims.Permissions {
-			if p == tenantPerm || p == "sales.manage" {
-				return c.Next()
-			}
+		if tenantHasPermission(claims.Permissions, tenantPerm) {
+			return c.Next()
 		}
 		if claims.AuthMethod == "pin" || claims.EmployeeType != "" {
 			if action == "view" {

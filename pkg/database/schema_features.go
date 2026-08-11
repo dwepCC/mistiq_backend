@@ -39,11 +39,11 @@ func schemaAtLeastFallback(db *gorm.DB, minVersion int) bool {
 // TenantFeatureFlags capacidades derivadas del esquema (para API / frontends).
 func TenantFeatureFlags(db *gorm.DB) map[string]bool {
 	flags := map[string]bool{
-		"multi_branch":       SchemaAtLeast(db, 31),
-		"restaurant_orders":  SchemaAtLeast(db, 32),
+		"multi_branch":        SchemaAtLeast(db, 31),
+		"restaurant_orders":   SchemaAtLeast(db, 32),
 		"restaurant_staff_v2": SchemaAtLeast(db, 35),
-		"restaurant_recipes": false,
-		"advanced_inventory": false,
+		"restaurant_recipes":  false,
+		"advanced_inventory":  false,
 	}
 	if SchemaAtLeast(db, 35) {
 		var cfg TenantRestaurantSetting

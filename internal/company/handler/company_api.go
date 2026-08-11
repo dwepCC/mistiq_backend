@@ -1,12 +1,23 @@
 package handler
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"tukifac/internal/company/service"
 	"tukifac/pkg/database"
+	"tukifac/pkg/docseries"
+	"tukifac/pkg/middleware"
+	"tukifac/pkg/saas"
+	"tukifac/pkg/taxregime"
 	"tukifac/pkg/tenantstorage"
+	"tukifac/pkg/uploadlimits"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -17,37 +28,189 @@ func (h *CompanyHandler) GetConfigAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	// El logo viaja embebido: así cualquier dispositivo lo tiene al iniciar sesión y no
+	// depende de poder descargar /uploads por su cuenta.
+	if ruc, rucErr := tenantstorage.ResolveTenantRUC(c); rucErr == nil {
+		attachLogoDataURL(ruc, cfg)
+	}
 	return c.JSON(cfg)
 }
 
 // PUT /api/company/config
 func (h *CompanyHandler) UpdateConfigAPI(c fiber.Ctx) error {
-	var input database.TenantCompanyConfig
-	if err := c.Bind().JSON(&input); err != nil {
+	var patch service.CompanyConfigPatch
+	// Unmarshal directo: Bind de Fiber a veces no rellena *string en patches parciales.
+	if err := json.Unmarshal(c.Body(), &patch); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
 	svc := service.NewCompanyService(db(c))
-	if err := svc.SaveConfig(input); err != nil {
+	if err := svc.ApplyConfigPatch(patch); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
-		if ruc := tenantstorage.SanitizeRUC(input.RUC); ruc != "" {
-			_ = database.CentralDB.Model(&database.Tenant{}).Where("id = ?", t.ID).Update("ruc", ruc).Error
-			t.RUC = ruc
-			c.Locals("tenant_ruc", ruc)
+		if patch.LogoURL != nil {
+			if ruc := tenantstorage.SanitizeRUC(t.RUC); ruc != "" {
+				c.Locals("tenant_ruc", ruc)
+			}
 		}
 	}
-	// Si el tenant tiene SUNAT conectado, sincronizar logo con Lycet y actualizar BD central
+	// Solo sincronizar logo con Lycet cuando el usuario envió un logo (acción explícita).
+	if svc.IsSunatEnabled() && patch.LogoURL != nil {
+		logoBase64 := extractBase64FromDataURL(*patch.LogoURL)
+		if logoBase64 != "" {
+			syncSvc := svc
+			if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
+				syncSvc = svc.WithSaaSContext(t.ID, t.Slug)
+			}
+			_ = syncSvc.SyncFacturadorConfigWithFiles("", "", logoBase64, "", "", "", "")
+		}
+		if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
+			_ = database.CentralDB.Model(&database.Tenant{}).Where("id = ?", t.ID).Update("logo_url", strings.TrimSpace(*patch.LogoURL)).Error
+		}
+	}
+	cfg, _ := svc.GetConfig()
+	return c.JSON(fiber.Map{"success": true, "data": cfg})
+}
+
+// PUT /api/company/receipt-wallet — QR Yape/Plin y cuentas bancarias en comprobantes locales.
+func (h *CompanyHandler) UpdateReceiptWalletAPI(c fiber.Ctx) error {
+	var body struct {
+		WalletProvider        string          `json:"wallet_provider"`
+		WalletPhone           string          `json:"wallet_phone"`
+		WalletQrURL           string          `json:"wallet_qr_url"`
+		WalletShowOnA4        bool            `json:"wallet_show_on_a4"`
+		WalletShowOnTicket    bool            `json:"wallet_show_on_ticket"`
+		ReceiptBankAccountIDs json.RawMessage `json:"receipt_bank_account_ids"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+	bankIDs, err := service.ParseReceiptBankAccountIDsJSON(body.ReceiptBankAccountIDs)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	svc := service.NewCompanyService(db(c))
+	if err := svc.SaveReceiptWallet(
+		body.WalletProvider, body.WalletPhone, body.WalletQrURL,
+		body.WalletShowOnA4, body.WalletShowOnTicket,
+		bankIDs,
+	); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	cfg, _ := svc.GetConfig()
+	return c.JSON(fiber.Map{"success": true, "data": cfg})
+}
+
+// UploadReceiptWalletQRAPI POST /api/company/receipt-wallet/qr — imagen en uploads/tenants/{RUC}/receipts/.
+func (h *CompanyHandler) UploadReceiptWalletQRAPI(c fiber.Ctx) error {
+	ruc, err := tenantstorage.ResolveTenantRUC(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	file, err := c.FormFile("image")
+	if err != nil || file == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "envía un archivo en el campo 'image'"})
+	}
+	if file.Size > uploadlimits.MaxFileBytes {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "la imagen no debe superar 10 MB"})
+	}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	allowed := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".webp": true}
+	if !allowed[ext] {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "formato no permitido. Usa JPG, PNG o WebP"})
+	}
+
+	dir := tenantstorage.TenantUploadDir(ruc, "receipts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("no se pudo crear carpeta %s: %v", dir, err),
+		})
+	}
+	filename := "wallet-qr" + ext
+	savePath := filepath.Join(dir, filename)
+	if err := c.SaveFile(file, savePath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("error guardando QR en %s: %v", savePath, err),
+		})
+	}
+	imageURL := tenantstorage.TenantUploadPublicURL(ruc, "receipts", filename)
+	svc := service.NewCompanyService(db(c))
+	if err := svc.UpdateWalletQrURL(imageURL); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "wallet_qr_url": imageURL})
+}
+
+// UploadCompanyLogoAPI POST /api/company/logo — imagen en uploads/tenants/{RUC}/company/.
+func (h *CompanyHandler) UploadCompanyLogoAPI(c fiber.Ctx) error {
+	ruc, err := tenantstorage.ResolveTenantRUC(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	file, err := c.FormFile("image")
+	if err != nil || file == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "envía un archivo en el campo 'image'"})
+	}
+	if file.Size > uploadlimits.MaxFileBytes {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "la imagen no debe superar 10 MB"})
+	}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	allowed := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".webp": true}
+	if !allowed[ext] {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "formato no permitido. Usa JPG, PNG o WebP"})
+	}
+
+	dir := tenantstorage.TenantUploadDir(ruc, "company")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("no se pudo crear carpeta %s: %v", dir, err),
+		})
+	}
+	filename := "logo" + ext
+	savePath := filepath.Join(dir, filename)
+	for _, oldExt := range []string{".jpg", ".jpeg", ".png", ".webp"} {
+		if oldExt == ext {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, "logo"+oldExt))
+	}
+	if err := c.SaveFile(file, savePath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("error guardando logo en %s: %v", savePath, err),
+		})
+	}
+	imageURL := tenantstorage.TenantUploadPublicURL(ruc, "company", filename)
+	// ?v= evita caché del navegador al reemplazar el mismo archivo logo.*
+	storedURL := fmt.Sprintf("%s?v=%d", imageURL, time.Now().UnixMilli())
+	svc := service.NewCompanyService(db(c))
+	if err := svc.UpdateLogoURL(storedURL); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	if svc.IsSunatEnabled() {
-		logoBase64 := extractBase64FromDataURL(input.LogoURL)
-		syncSvc := svc
-		if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
-			syncSvc = svc.WithSaaSContext(t.ID, t.Slug)
+		logoBytes, readErr := os.ReadFile(savePath)
+		if readErr == nil && len(logoBytes) > 0 {
+			logoBase64 := base64.StdEncoding.EncodeToString(logoBytes)
+			syncSvc := svc
+			if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
+				syncSvc = svc.WithSaaSContext(t.ID, t.Slug)
+				_ = database.CentralDB.Model(&database.Tenant{}).Where("id = ?", t.ID).Update("logo_url", storedURL).Error
+			}
+			_ = syncSvc.SyncFacturadorConfigWithFiles("", "", logoBase64, "", "", "", "")
 		}
-		_ = syncSvc.SyncFacturadorConfigWithFiles("", "", logoBase64, "", "", "", "")
-		if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
-			_ = database.CentralDB.Model(&database.Tenant{}).Where("id = ?", t.ID).Update("logo_url", input.LogoURL).Error
-		}
+	}
+	cfg, _ := svc.GetConfig()
+	attachLogoDataURL(ruc, cfg)
+	return c.JSON(fiber.Map{"success": true, "logo_url": storedURL, "data": cfg})
+}
+
+// DeleteCompanyLogoAPI DELETE /api/company/logo — quita logo del tenant.
+func (h *CompanyHandler) DeleteCompanyLogoAPI(c fiber.Ctx) error {
+	svc := service.NewCompanyService(db(c))
+	if err := svc.UpdateLogoURL(""); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
+		_ = database.CentralDB.Model(&database.Tenant{}).Where("id = ?", t.ID).Update("logo_url", "").Error
 	}
 	cfg, _ := svc.GetConfig()
 	return c.JSON(fiber.Map{"success": true, "data": cfg})
@@ -76,6 +239,10 @@ func (h *CompanyHandler) GetSunatAPI(c fiber.Ctx) error {
 		"tax_rate":         cfg.TaxRate,
 		"igv_regime":       cfg.IgvRegime,
 		"tax_benefit_zone": cfg.TaxBenefitZone,
+		// Régimen tributario del contribuyente + capacidades resueltas. Los
+		// frontends consumen `capabilities` y no reimplementan reglas del régimen.
+		"taxpayer_regime": taxregime.Normalize(cfg.TaxpayerRegime),
+		"capabilities":    taxregime.CapabilitiesFor(cfg.TaxpayerRegime),
 	})
 }
 
@@ -90,9 +257,9 @@ func (h *CompanyHandler) GetInvoicingAPI(c fiber.Ctx) error {
 		sendMode = "sunat_direct"
 	}
 	return c.JSON(fiber.Map{
-		"send_mode":          sendMode,
-		"fiscal_enabled":     cfg.SunatEnabled,
-		"connection_status":  cfg.FiscalConnectionStatus,
+		"send_mode":         sendMode,
+		"fiscal_enabled":    cfg.SunatEnabled,
+		"connection_status": cfg.FiscalConnectionStatus,
 	})
 }
 
@@ -172,6 +339,9 @@ func (h *CompanyHandler) CreateBranchAPI(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
+	if middleware.EnforceCreateQuota(c, db(c), saas.QuotaBranches) {
+		return nil
+	}
 	b, err := service.NewCompanyService(db(c)).CreateBranch(body.Name, body.Address, body.Phone, body.FiscalDomicileCode, body.IsMain)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
@@ -213,13 +383,47 @@ func (h *CompanyHandler) DeleteBranchAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
-// GET /api/company/series?branch_id=1&category=venta
+// filterActiveSeries descarta las series desactivadas. Se aplica a todo consumidor que
+// vaya a emitir un documento; la pantalla de configuración se salta este filtro.
+func filterActiveSeries(series []service.SeriesListItem) []service.SeriesListItem {
+	out := make([]service.SeriesListItem, 0, len(series))
+	for _, s := range series {
+		if s.Active {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// isTruthyFlag interpreta el valor de un flag booleano de query string. Cualquier valor
+// no reconocido es false, para que el filtrado por defecto sea el comportamiento seguro.
+func isTruthyFlag(v string) bool {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// queryFlag lee un query param booleano tolerando "1", "true", "yes" y mayúsculas.
+func queryFlag(c fiber.Ctx, name string) bool {
+	return isTruthyFlag(c.Query(name))
+}
+
+// GET /api/company/series?branch_id=1&category=venta&include_inactive=1
 func (h *CompanyHandler) ListSeriesAPI(c fiber.Ctx) error {
 	svc := service.NewCompanyService(db(c))
 	branchID, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
 	series, err := svc.ListSeriesEnriched(uint(branchID))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Por defecto solo series activas: una serie desactivada no debe poder elegirse al
+	// emitir una venta, un comprobante o cualquier otro documento. Solo la pantalla de
+	// configuración pide include_inactive=1, porque necesita verlas para reactivarlas.
+	if !queryFlag(c, "include_inactive") {
+		series = filterActiveSeries(series)
 	}
 	// Filtro opcional por categoría (vacío en BD = venta para series 00/01/03)
 	category := strings.TrimSpace(strings.ToLower(c.Query("category")))
@@ -243,21 +447,29 @@ func (h *CompanyHandler) ListSeriesAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": series})
 }
 
+// GET /api/company/series/document-types?context=restaurant
+func (h *CompanyHandler) ListSeriesDocumentTypesAPI(c fiber.Ctx) error {
+	svc := service.NewCompanyService(db(c))
+	restaurant := strings.TrimSpace(strings.ToLower(c.Query("context"))) == "restaurant"
+	types := docseries.ListFormDocumentTypes(svc.IsSunatEnabled(), restaurant)
+	return c.JSON(fiber.Map{
+		"data":            types,
+		"category_labels": docseries.CategoryLabels(),
+	})
+}
+
 // POST /api/company/series
 func (h *CompanyHandler) CreateSeriesAPI(c fiber.Ctx) error {
 	var body struct {
-		BranchID  uint   `json:"branch_id"`
-		DocType   string `json:"doc_type"`
-		SunatCode string `json:"sunat_code"`
-		Category  string `json:"category"`
-		Series    string `json:"series"`
+		BranchID    uint   `json:"branch_id"`
+		DocType     string `json:"doc_type"`
+		Series      string `json:"series"`
+		Correlative *uint  `json:"correlative"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
-	if err := service.NewCompanyService(db(c)).CreateSeries(
-		body.BranchID, body.DocType, body.SunatCode, body.Category, body.Series,
-	); err != nil {
+	if err := service.NewCompanyService(db(c)).CreateSeries(body.BranchID, body.DocType, body.Series, body.Correlative); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true})
@@ -273,8 +485,6 @@ func (h *CompanyHandler) UpdateSeriesAPI(c fiber.Ctx) error {
 		Series      string `json:"series"`
 		Active      bool   `json:"active"`
 		DocType     string `json:"doc_type"`
-		SunatCode   string `json:"sunat_code"`
-		Category    string `json:"category"`
 		Correlative *uint  `json:"correlative"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
@@ -284,7 +494,7 @@ func (h *CompanyHandler) UpdateSeriesAPI(c fiber.Ctx) error {
 	if body.Correlative != nil {
 		corr = body.Correlative
 	}
-	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), body.Series, body.Active, body.DocType, body.SunatCode, body.Category, corr); err != nil {
+	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), body.Series, body.Active, body.DocType, corr); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

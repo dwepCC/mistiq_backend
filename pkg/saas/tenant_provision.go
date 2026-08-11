@@ -10,7 +10,7 @@ import (
 )
 
 // ProvisionInitialSubscription crea suscripción activa + ciclo de facturación inicial.
-func ProvisionInitialSubscription(tenantID uint, planName string, months int, notes string) (*database.SaasSubscription, error) {
+func ProvisionInitialSubscription(tenantID uint, planName string, months int, notes string, discount ...Discount) (*database.SaasSubscription, error) {
 	if tenantID == 0 {
 		return nil, errors.New("tenant_id requerido")
 	}
@@ -24,7 +24,7 @@ func ProvisionInitialSubscription(tenantID uint, planName string, months int, no
 		}
 		return nil, err
 	}
-	sub, err := ExtendSubscription(tenantID, plan.ID, months, notes)
+	sub, err := ExtendSubscription(tenantID, plan.ID, months, notes, discount...)
 	if err != nil {
 		return nil, err
 	}

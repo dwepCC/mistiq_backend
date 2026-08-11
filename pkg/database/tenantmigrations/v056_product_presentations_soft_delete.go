@@ -21,7 +21,7 @@ func (v056Presentation) TableName() string { return "tenant_product_presentation
 // v055 creó la tabla sin soft delete; GORM filtra deleted_at IS NULL en cada consulta.
 type V056ProductPresentationsSoftDelete struct{}
 
-func (V056ProductPresentationsSoftDelete) Version() int  { return 56 }
+func (V056ProductPresentationsSoftDelete) Version() int { return 56 }
 func (V056ProductPresentationsSoftDelete) Name() string { return "product_presentations_soft_delete" }
 
 func (V056ProductPresentationsSoftDelete) Up(db *gorm.DB) error {

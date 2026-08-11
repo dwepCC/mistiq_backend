@@ -46,7 +46,7 @@ func (v032DeliveryDriver) TableName() string { return "tenant_delivery_drivers" 
 // V032RestaurantOrders pedidos restaurante: tipo, estado, delivery, vínculo venta.
 type V032RestaurantOrders struct{}
 
-func (V032RestaurantOrders) Version() int  { return 32 }
+func (V032RestaurantOrders) Version() int { return 32 }
 func (V032RestaurantOrders) Name() string { return "restaurant_orders" }
 
 func (V032RestaurantOrders) Up(db *gorm.DB) error {

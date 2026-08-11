@@ -99,3 +99,56 @@ func (h *PlanHandler) ListModulesAPI(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"data": modules})
 }
+
+// POST /api/superadmin/saas-modules
+func (h *PlanHandler) CreateModuleAPI(c fiber.Ctx) error {
+	var input service.ModuleInput
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+	m, err := h.svc.CreateModule(input)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "data": m})
+}
+
+// PUT /api/superadmin/saas-modules/:id
+func (h *PlanHandler) UpdateModuleAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var input service.ModuleInput
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+	if err := h.svc.UpdateModule(uint(id), input); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// PATCH /api/superadmin/saas-modules/:id/toggle
+func (h *PlanHandler) ToggleModuleAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := h.svc.ToggleModule(uint(id)); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// DELETE /api/superadmin/saas-modules/:id
+func (h *PlanHandler) DeleteModuleAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := h.svc.DeleteModule(uint(id)); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}

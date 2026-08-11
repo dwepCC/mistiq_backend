@@ -9,7 +9,7 @@ import (
 // V043FiscalSaleLinks vincula retención/percepción con venta fiscal (pipeline unificado).
 type V043FiscalSaleLinks struct{}
 
-func (V043FiscalSaleLinks) Version() int  { return 43 }
+func (V043FiscalSaleLinks) Version() int { return 43 }
 func (V043FiscalSaleLinks) Name() string { return "fiscal_sale_links_retention_perception" }
 
 type v043RetentionSaleID struct {

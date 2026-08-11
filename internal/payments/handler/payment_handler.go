@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"tukifac/internal/payments/service"
+	"tukifac/pkg/database"
+	"tukifac/pkg/saas"
 	"tukifac/pkg/tenantstorage"
 	"tukifac/pkg/uploadlimits"
 
@@ -52,12 +54,18 @@ func (h *PaymentHandler) CreateAPI(c fiber.Ctx) error {
 	amount, _ := strconv.ParseFloat(c.FormValue("amount"), 64)
 	months, _ := strconv.Atoi(c.FormValue("period_months"))
 
+	cycleID, _ := strconv.ParseUint(c.FormValue("billing_cycle_id"), 10, 32)
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+
 	input := service.CreatePaymentInput{
-		TenantID:     uint(tenantID),
-		Amount:       amount,
-		Currency:     c.FormValue("currency"),
-		PeriodMonths: months,
-		Notes:        c.FormValue("notes"),
+		TenantID:       uint(tenantID),
+		Amount:         amount,
+		Currency:       c.FormValue("currency"),
+		PeriodMonths:   months,
+		Notes:          c.FormValue("notes"),
+		PaymentMethod:  c.FormValue("payment_method"),
+		BillingCycleID: uint(cycleID),
+		ReviewedBy:     saUserID,
 	}
 
 	// Subida de comprobante
@@ -133,4 +141,66 @@ func (h *PaymentHandler) RejectAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
+}
+
+// POST /api/superadmin/payments/:id/fiscal-document — sube la boleta/factura del pago.
+//
+// Es el comprobante que la empresa entrega AL cliente por su pago de suscripción, distinto
+// del voucher que el cliente subió. Se guarda y el tenant lo descarga desde ese mismo pago.
+func (h *PaymentHandler) UploadFiscalDocAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+
+	detail, err := h.svc.GetByID(uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "pago no encontrado"})
+	}
+	if detail.Status != database.SaasPayApproved {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "solo se puede adjuntar el comprobante a un pago aprobado",
+		})
+	}
+
+	file, err := c.FormFile("document")
+	if err != nil || file == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "adjunte el comprobante"})
+	}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	// Solo PDF: es el documento que el cliente descarga e imprime.
+	if ext != ".pdf" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "el comprobante debe ser un PDF"})
+	}
+	if file.Size > uploadlimits.MaxFileBytes {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "el comprobante no debe superar 10 MB"})
+	}
+
+	ruc, rucErr := tenantstorage.TenantRUCFromID(detail.TenantID)
+	if rucErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": rucErr.Error()})
+	}
+	filename := fmt.Sprintf("%s_%d%s", uuid.New().String(), time.Now().Unix(), ext)
+	dir := tenantstorage.TenantUploadDir(ruc, "fiscal_docs")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "no se pudo crear la carpeta"})
+	}
+	if err := c.SaveFile(file, filepath.Join(dir, filename)); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "error guardando el comprobante"})
+	}
+
+	url := tenantstorage.TenantUploadPublicURL(ruc, "fiscal_docs", filename)
+	if err := h.svc.SetFiscalDoc(uint(id), url); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "fiscal_doc_url": url})
+}
+
+// CollectionAlertsAPI GET /api/superadmin/payments/alerts — campana de cobranza del panel.
+func (h *PaymentHandler) CollectionAlertsAPI(c fiber.Ctx) error {
+	alerts, err := saas.GetCollectionAlerts()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(alerts)
 }

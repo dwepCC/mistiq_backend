@@ -20,7 +20,13 @@ func (h *DashboardHandler) StatsAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	tenants, _ := h.svc.List("", "", "", "")
+	tenants, _, err := h.svc.List(service.TenantListParams{
+		Page:    1,
+		PerPage: 10,
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 	recent := tenants
 	if len(recent) > 5 {
 		recent = recent[:5]

@@ -24,3 +24,12 @@ func RoundDisplay(v float64) float64 {
 func PaidCoversTotal(paid, expected float64) bool {
 	return RoundDisplay(paid)+PaymentTolerance >= RoundDisplay(expected)
 }
+
+// CalcPaymentChange devuelve el vuelto cuando el cliente entrega más del monto cobrable.
+func CalcPaymentChange(paid, payable float64) float64 {
+	diff := RoundDisplay(paid) - RoundDisplay(payable)
+	if diff <= PaymentTolerance {
+		return 0
+	}
+	return RoundDisplay(diff)
+}

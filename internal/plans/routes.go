@@ -10,6 +10,10 @@ func RegisterRoutes(saAPI fiber.Router) {
 	h := handler.NewPlanHandler()
 
 	saAPI.Get("/saas-modules", h.ListModulesAPI)
+	saAPI.Post("/saas-modules", h.CreateModuleAPI)
+	saAPI.Put("/saas-modules/:id", h.UpdateModuleAPI)
+	saAPI.Patch("/saas-modules/:id/toggle", h.ToggleModuleAPI)
+	saAPI.Delete("/saas-modules/:id", h.DeleteModuleAPI)
 	saAPI.Get("/plans", h.ListAPI)
 	saAPI.Get("/plans/:id", h.GetAPI)
 	saAPI.Post("/plans", h.CreateAPI)

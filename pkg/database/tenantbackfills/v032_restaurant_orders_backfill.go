@@ -10,7 +10,7 @@ import (
 // V032RestaurantOrdersBackfill tipos y códigos en sesiones existentes.
 type V032RestaurantOrdersBackfill struct{}
 
-func (V032RestaurantOrdersBackfill) Version() int  { return 32 }
+func (V032RestaurantOrdersBackfill) Version() int { return 32 }
 func (V032RestaurantOrdersBackfill) Name() string { return "restaurant_orders_backfill" }
 
 func (V032RestaurantOrdersBackfill) Run(db *gorm.DB) error {

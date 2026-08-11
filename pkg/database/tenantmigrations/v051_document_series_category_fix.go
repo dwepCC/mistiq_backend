@@ -10,8 +10,8 @@ import (
 // V051DocumentSeriesCategoryFix alinea category con sunat_code 07/08 (NC/ND).
 type V051DocumentSeriesCategoryFix struct{}
 
-func (V051DocumentSeriesCategoryFix) Version() int  { return 51 }
-func (V051DocumentSeriesCategoryFix) Name() string  { return "document_series_category_fix" }
+func (V051DocumentSeriesCategoryFix) Version() int { return 51 }
+func (V051DocumentSeriesCategoryFix) Name() string { return "document_series_category_fix" }
 
 func (V051DocumentSeriesCategoryFix) Up(db *gorm.DB) error {
 	if !db.Migrator().HasTable("tenant_document_series") {

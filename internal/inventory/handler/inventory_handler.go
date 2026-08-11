@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -84,10 +85,10 @@ func (h *InventoryHandler) AdjustmentPage(c fiber.Ctx) error {
 	db(c).Where("active = ?", true).Find(&branches)
 
 	return c.Render("inventory/adjustment", fiber.Map{
-		"Title":    "Ajuste de Inventario",
+		"Title":     "Ajuste de Inventario",
 		"UserEmail": email(c),
-		"Products": products,
-		"Branches": branches,
+		"Products":  products,
+		"Branches":  branches,
 	}, "layouts/base")
 }
 
@@ -118,11 +119,11 @@ func (h *InventoryHandler) AdjustmentSubmit(c fiber.Ctx) error {
 		var branches []database.TenantBranch
 		db(c).Where("active = ?", true).Find(&branches)
 		return c.Render("inventory/adjustment", fiber.Map{
-			"Title":    "Ajuste de Inventario",
+			"Title":     "Ajuste de Inventario",
 			"UserEmail": email(c),
-			"Products": products,
-			"Branches": branches,
-			"Error":    err.Error(),
+			"Products":  products,
+			"Branches":  branches,
+			"Error":     err.Error(),
 		}, "layouts/base")
 	}
 	return c.Redirect().To("/inventory?success=adjusted")
@@ -136,10 +137,10 @@ func (h *InventoryHandler) TransferPage(c fiber.Ctx) error {
 	db(c).Where("active = ?", true).Find(&branches)
 
 	return c.Render("inventory/transfer", fiber.Map{
-		"Title":    "Transferencia entre Sucursales",
+		"Title":     "Transferencia entre Sucursales",
 		"UserEmail": email(c),
-		"Products": products,
-		"Branches": branches,
+		"Products":  products,
+		"Branches":  branches,
 	}, "layouts/base")
 }
 
@@ -159,12 +160,13 @@ func (h *InventoryHandler) TransferSubmit(c fiber.Ctx) error {
 // TransferAPI crea una transferencia en estado pending (flujo por estados). Body: from_branch_id, to_branch_id, notes, items: [{ product_id, quantity }].
 func (h *InventoryHandler) TransferAPI(c fiber.Ctx) error {
 	var body struct {
-		FromBranchID uint `json:"from_branch_id"`
-		ToBranchID   uint `json:"to_branch_id"`
+		FromBranchID uint   `json:"from_branch_id"`
+		ToBranchID   uint   `json:"to_branch_id"`
 		Notes        string `json:"notes"`
 		Items        []struct {
-			ProductID uint    `json:"product_id"`
-			Quantity  float64 `json:"quantity"`
+			ProductID      uint    `json:"product_id"`
+			PresentationID uint    `json:"presentation_id"`
+			Quantity       float64 `json:"quantity"`
 		} `json:"items"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
@@ -184,7 +186,11 @@ func (h *InventoryHandler) TransferAPI(c fiber.Ctx) error {
 		if it.ProductID == 0 || it.Quantity <= 0 {
 			continue
 		}
-		lines = append(lines, service.TransferLineInput{ProductID: it.ProductID, Quantity: it.Quantity})
+		var presentationID *uint
+		if it.PresentationID > 0 {
+			presentationID = &it.PresentationID
+		}
+		lines = append(lines, service.TransferLineInput{ProductID: it.ProductID, PresentationID: presentationID, Quantity: it.Quantity})
 	}
 	if len(lines) == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cada ítem debe tener product_id y quantity > 0"})
@@ -219,8 +225,12 @@ func (h *InventoryHandler) TransfersListAPI(c fiber.Ctx) error {
 	}
 	productNames := make(map[uint]string)
 	productIDs := make(map[uint]struct{})
+	presentationIDs := make(map[uint]struct{})
 	for _, l := range logs {
 		productIDs[l.ProductID] = struct{}{}
+		if l.PresentationID != nil && *l.PresentationID > 0 {
+			presentationIDs[*l.PresentationID] = struct{}{}
+		}
 	}
 	if len(productIDs) > 0 {
 		ids := make([]uint, 0, len(productIDs))
@@ -233,24 +243,38 @@ func (h *InventoryHandler) TransfersListAPI(c fiber.Ctx) error {
 			productNames[p.ID] = p.Name
 		}
 	}
+	presentationNames := make(map[uint]string)
+	if len(presentationIDs) > 0 {
+		ids := make([]uint, 0, len(presentationIDs))
+		for id := range presentationIDs {
+			ids = append(ids, id)
+		}
+		var pres []database.TenantProductPresentation
+		db(c).Where("id IN ?", ids).Find(&pres)
+		for _, p := range pres {
+			presentationNames[p.ID] = p.Name
+		}
+	}
 
 	type lineRow struct {
-		ProductID   uint    `json:"product_id"`
-		ProductName string  `json:"product_name"`
-		Quantity    float64 `json:"quantity"`
-		WithSerials bool    `json:"with_serials"`
+		ProductID        uint    `json:"product_id"`
+		ProductName      string  `json:"product_name"`
+		PresentationID   *uint   `json:"presentation_id,omitempty"`
+		PresentationName string  `json:"presentation_name,omitempty"`
+		Quantity         float64 `json:"quantity"`
+		WithSerials      bool    `json:"with_serials"`
 	}
 	type transferRow struct {
-		ID             uint        `json:"id"`
-		FromBranchID   uint        `json:"from_branch_id"`
-		FromBranchName string      `json:"from_branch_name"`
-		ToBranchID     uint        `json:"to_branch_id"`
-		ToBranchName   string      `json:"to_branch_name"`
-		Status         string      `json:"status"`
-		Notes          string      `json:"notes"`
-		CreatedAt      time.Time   `json:"created_at"`
-		ConfirmedAt    *time.Time  `json:"confirmed_at"`
-		Lines          []lineRow   `json:"lines"`
+		ID             uint       `json:"id"`
+		FromBranchID   uint       `json:"from_branch_id"`
+		FromBranchName string     `json:"from_branch_name"`
+		ToBranchID     uint       `json:"to_branch_id"`
+		ToBranchName   string     `json:"to_branch_name"`
+		Status         string     `json:"status"`
+		Notes          string     `json:"notes"`
+		CreatedAt      time.Time  `json:"created_at"`
+		ConfirmedAt    *time.Time `json:"confirmed_at"`
+		Lines          []lineRow  `json:"lines"`
 	}
 	out := make([]transferRow, 0, len(transfers))
 	logsByTransfer := make(map[uint][]database.TenantTransferLog)
@@ -262,11 +286,17 @@ func (h *InventoryHandler) TransfersListAPI(c fiber.Ctx) error {
 	for _, t := range transfers {
 		linesOut := make([]lineRow, 0)
 		for _, l := range logsByTransfer[t.ID] {
+			var presName string
+			if l.PresentationID != nil {
+				presName = presentationNames[*l.PresentationID]
+			}
 			linesOut = append(linesOut, lineRow{
-				ProductID:   l.ProductID,
-				ProductName: productNames[l.ProductID],
-				Quantity:    l.Quantity,
-				WithSerials: l.SerialsJSON != "",
+				ProductID:        l.ProductID,
+				ProductName:      productNames[l.ProductID],
+				PresentationID:   l.PresentationID,
+				PresentationName: presName,
+				Quantity:         l.Quantity,
+				WithSerials:      l.SerialsJSON != "",
 			})
 		}
 		out = append(out, transferRow{
@@ -278,7 +308,7 @@ func (h *InventoryHandler) TransfersListAPI(c fiber.Ctx) error {
 			Status:         t.Status,
 			Notes:          t.Notes,
 			CreatedAt:      t.CreatedAt,
-			ConfirmedAt:   t.ConfirmedAt,
+			ConfirmedAt:    t.ConfirmedAt,
 			Lines:          linesOut,
 		})
 	}
@@ -329,6 +359,26 @@ func (h *InventoryHandler) StockAPI(c fiber.Ctx) error {
 	productID, _ := strconv.ParseUint(c.Params("productId"), 10, 32)
 	branchID, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
 
+	var product database.TenantProduct
+	if err := db(c).Select("has_variants").First(&product, productID).Error; err == nil && product.HasVariants {
+		type presStockRow struct {
+			ProductID uint    `json:"product_id"`
+			BranchID  uint    `json:"branch_id"`
+			Quantity  float64 `json:"quantity"`
+		}
+		var rows []presStockRow
+		pq := db(c).Table("tenant_product_presentation_stocks AS ps").
+			Select("pr.product_id AS product_id, ps.branch_id, SUM(ps.quantity) AS quantity").
+			Joins("JOIN tenant_product_presentations pr ON pr.id = ps.presentation_id AND pr.deleted_at IS NULL").
+			Where("pr.product_id = ?", productID).
+			Group("pr.product_id, ps.branch_id")
+		if branchID > 0 {
+			pq = pq.Where("ps.branch_id = ?", branchID)
+		}
+		_ = pq.Scan(&rows).Error
+		return c.JSON(fiber.Map{"data": rows})
+	}
+
 	var stocks []database.TenantProductStock
 	q := db(c).Where("product_id = ?", productID)
 	if branchID > 0 {
@@ -338,7 +388,7 @@ func (h *InventoryHandler) StockAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": stocks})
 }
 
-// StockSummaryAPI devuelve stock total por producto para una lista de IDs (query product_ids=1,2,3).
+// StockSummaryAPI devuelve stock por producto para una lista de IDs (query product_ids=1,2,3; opcional branch_id).
 func (h *InventoryHandler) StockSummaryAPI(c fiber.Ctx) error {
 	idsStr := c.Query("product_ids")
 	if idsStr == "" {
@@ -357,8 +407,12 @@ func (h *InventoryHandler) StockSummaryAPI(c fiber.Ctx) error {
 	if len(ids) == 0 {
 		return c.JSON(fiber.Map{"data": map[string]float64{}})
 	}
+	var branchID uint
+	if reqB, err := strconv.ParseUint(c.Query("branch_id"), 10, 32); err == nil && reqB > 0 {
+		branchID = branch.ResolveReadBranchFilter(c, uint(reqB))
+	}
 	svc := service.NewInventoryService(db(c))
-	totals, err := svc.StockTotalsByProductIDs(ids)
+	totals, err := svc.StockTotalsByProductIDs(ids, branchID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -372,12 +426,13 @@ func (h *InventoryHandler) StockSummaryAPI(c fiber.Ctx) error {
 // AdjustmentAPI recibe un ajuste de inventario (aumentar o disminuir) y opcionalmente series.
 func (h *InventoryHandler) AdjustmentAPI(c fiber.Ctx) error {
 	var body struct {
-		ProductID uint     `json:"product_id"`
-		BranchID  uint     `json:"branch_id"`
-		Type      string   `json:"type"` // "in" | "out"
-		Quantity  float64  `json:"quantity"`
-		Notes     string   `json:"notes"`
-		Serials   []string `json:"serials"`
+		ProductID      uint     `json:"product_id"`
+		PresentationID *uint    `json:"presentation_id"`
+		BranchID       uint     `json:"branch_id"`
+		Type           string   `json:"type"` // "in" | "out"
+		Quantity       float64  `json:"quantity"`
+		Notes          string   `json:"notes"`
+		Serials        []string `json:"serials"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "payload inválido"})
@@ -391,12 +446,13 @@ func (h *InventoryHandler) AdjustmentAPI(c fiber.Ctx) error {
 	}
 	svc := service.NewInventoryService(db(c))
 	err = svc.RecordAdjustment(service.AdjustmentInput{
-		ProductID: body.ProductID,
-		BranchID:  branchID,
-		Type:      body.Type,
-		Quantity:  body.Quantity,
-		Notes:     body.Notes,
-		Serials:   body.Serials,
+		ProductID:      body.ProductID,
+		PresentationID: body.PresentationID,
+		BranchID:       branchID,
+		Type:           body.Type,
+		Quantity:       body.Quantity,
+		Notes:          body.Notes,
+		Serials:        body.Serials,
 	}, userID(c))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
@@ -408,8 +464,10 @@ func (h *InventoryHandler) MovementsAPI(c fiber.Ctx) error {
 	svc := service.NewInventoryService(db(c))
 	tdb := db(c)
 	productID, _ := strconv.ParseUint(c.Query("product_id"), 10, 32)
+	catID, _ := strconv.ParseUint(c.Query("category_id"), 10, 32)
 	reqB, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
 	branchID := branch.ResolveReadBranchFilter(c, uint(reqB))
+	restaurantOnly := c.Query("restaurant_only") == "true" || c.Query("restaurant_only") == "1"
 
 	var dateFrom, dateTo *time.Time
 	if df := c.Query("date_from"); df != "" {
@@ -430,14 +488,21 @@ func (h *InventoryHandler) MovementsAPI(c fiber.Ctx) error {
 	if page < 1 {
 		page = 1
 	}
+	opTypeID, _ := strconv.ParseUint(c.Query("operation_type_id"), 10, 32)
 	params := service.KardexParams{
-		ProductID:     uint(productID),
-		ProductSearch:   c.Query("product_q"),
-		BranchID:      uint(branchID),
-		DateFrom:      dateFrom,
-		DateTo:        dateTo,
-		MovementKind:  c.Query("movement_kind"),
-		TextSearch:    c.Query("q"),
+		ProductID:          uint(productID),
+		ProductSearch:      c.Query("product_q"),
+		CategoryID:         uint(catID),
+		BranchID:           uint(branchID),
+		DateFrom:           dateFrom,
+		DateTo:             dateTo,
+		MovementKind:       c.Query("movement_kind"),
+		TextSearch:         c.Query("q"),
+		OperationTypeID:    uint(opTypeID),
+		OperationCode:      c.Query("operation_code"),
+		OperationDirection: c.Query("direction"),
+		SunatCode:          c.Query("sunat_code"),
+		RestaurantOnly:     restaurantOnly,
 	}
 	if perPage > 0 {
 		params.Limit = perPage
@@ -507,23 +572,134 @@ func (h *InventoryHandler) MovementsAPI(c fiber.Ctx) error {
 		}
 	}
 
-	type movementRow struct {
-		ID           uint      `json:"id"`
-		ProductID    uint      `json:"product_id"`
-		ProductCode  string    `json:"product_code"`
-		ProductName  string    `json:"product_name"`
-		BranchID     uint      `json:"branch_id"`
-		BranchName   string    `json:"branch_name"`
-		Type         string    `json:"type"`
-		Quantity     float64   `json:"quantity"`
-		UnitCost     float64   `json:"unit_cost"`
-		Balance      float64   `json:"balance"`
-		Reference    string    `json:"reference"`
-		Notes        string    `json:"notes"`
-		UserID       uint      `json:"user_id"`
-		UserName     string    `json:"user_name"`
-		CreatedAt    time.Time `json:"created_at"`
+	// Presentación/variante afectada por cada movimiento (cuando aplica).
+	presentationIDSet := make(map[uint]struct{})
+	docIDSet := make(map[uint]struct{})
+	transferIDSet := make(map[uint]struct{})
+	saleItemIDSet := make(map[uint]struct{})
+	for _, m := range movements {
+		if m.PresentationID != nil && *m.PresentationID > 0 {
+			presentationIDSet[*m.PresentationID] = struct{}{}
+		}
+		if m.InventoryDocumentID != nil {
+			docIDSet[*m.InventoryDocumentID] = struct{}{}
+		}
+		if m.TransferID != nil {
+			transferIDSet[*m.TransferID] = struct{}{}
+		}
+		if m.SaleItemID != nil {
+			saleItemIDSet[*m.SaleItemID] = struct{}{}
+		}
 	}
+	presNameMap := make(map[uint]string)
+	if len(presentationIDSet) > 0 {
+		ids := make([]uint, 0, len(presentationIDSet))
+		for id := range presentationIDSet {
+			ids = append(ids, id)
+		}
+		var pres []database.TenantProductPresentation
+		if tdb.Where("id IN ?", ids).Find(&pres).Error == nil {
+			for _, p := range pres {
+				presNameMap[p.ID] = p.Name
+			}
+		}
+	}
+
+	// Números de serie que participaron en cada movimiento: se resuelven por el enlace directo
+	// al origen (documento de inventario, transferencia o línea de venta) — no por inferencia de
+	// fecha/referencia.
+	type docKey struct {
+		DocID, ProductID, PresentationID uint
+	}
+	docSerials := make(map[docKey][]string)
+	if len(docIDSet) > 0 {
+		ids := make([]uint, 0, len(docIDSet))
+		for id := range docIDSet {
+			ids = append(ids, id)
+		}
+		var details []database.TenantInventoryDocumentDetail
+		if tdb.Where("document_id IN ?", ids).Find(&details).Error == nil {
+			for _, d := range details {
+				if d.SerialsJSON == "" {
+					continue
+				}
+				var serials []string
+				if json.Unmarshal([]byte(d.SerialsJSON), &serials) == nil && len(serials) > 0 {
+					pres := uint(0)
+					if d.PresentationID != nil {
+						pres = *d.PresentationID
+					}
+					docSerials[docKey{d.DocumentID, d.ProductID, pres}] = serials
+				}
+			}
+		}
+	}
+	transferSerials := make(map[docKey][]string)
+	if len(transferIDSet) > 0 {
+		ids := make([]uint, 0, len(transferIDSet))
+		for id := range transferIDSet {
+			ids = append(ids, id)
+		}
+		var logs []database.TenantTransferLog
+		if tdb.Where("transfer_id IN ?", ids).Find(&logs).Error == nil {
+			for _, l := range logs {
+				if l.SerialsJSON == "" || l.TransferID == nil {
+					continue
+				}
+				var serials []string
+				if json.Unmarshal([]byte(l.SerialsJSON), &serials) == nil && len(serials) > 0 {
+					pres := uint(0)
+					if l.PresentationID != nil {
+						pres = *l.PresentationID
+					}
+					transferSerials[docKey{*l.TransferID, l.ProductID, pres}] = serials
+				}
+			}
+		}
+	}
+	saleItemSerials := make(map[uint][]string)
+	if len(saleItemIDSet) > 0 {
+		ids := make([]uint, 0, len(saleItemIDSet))
+		for id := range saleItemIDSet {
+			ids = append(ids, id)
+		}
+		var serialRows []database.TenantProductSerial
+		if tdb.Where("sale_item_id IN ?", ids).Find(&serialRows).Error == nil {
+			for _, s := range serialRows {
+				if s.SaleItemID == nil {
+					continue
+				}
+				saleItemSerials[*s.SaleItemID] = append(saleItemSerials[*s.SaleItemID], s.Serial)
+			}
+		}
+	}
+
+	type movementRow struct {
+		ID                  uint      `json:"id"`
+		ProductID           uint      `json:"product_id"`
+		ProductCode         string    `json:"product_code"`
+		ProductName         string    `json:"product_name"`
+		PresentationID      *uint     `json:"presentation_id,omitempty"`
+		PresentationName    string    `json:"presentation_name,omitempty"`
+		BranchID            uint      `json:"branch_id"`
+		BranchName          string    `json:"branch_name"`
+		Type                string    `json:"type"`
+		Quantity            float64   `json:"quantity"`
+		UnitCost            float64   `json:"unit_cost"`
+		Balance             float64   `json:"balance"`
+		Reference           string    `json:"reference"`
+		Notes               string    `json:"notes"`
+		OperationTypeID     *uint     `json:"operation_type_id,omitempty"`
+		OperationTypeCode   string    `json:"operation_type_code,omitempty"`
+		OperationTypeName   string    `json:"operation_type_name,omitempty"`
+		SunatCode           string    `json:"sunat_code,omitempty"`
+		InventoryDocumentID *uint     `json:"inventory_document_id,omitempty"`
+		Serials             []string  `json:"serials,omitempty"`
+		UserID              uint      `json:"user_id"`
+		UserName            string    `json:"user_name"`
+		CreatedAt           time.Time `json:"created_at"`
+	}
+	opMap := enrichMovementsWithOperationTypes(tdb, movements)
 	out := make([]movementRow, 0, len(movements))
 	for _, m := range movements {
 		pc, pn := "", ""
@@ -531,23 +707,49 @@ func (h *InventoryHandler) MovementsAPI(c fiber.Ctx) error {
 			pc = p.Code
 			pn = p.Name
 		}
-		out = append(out, movementRow{
-			ID:          m.ID,
-			ProductID:   m.ProductID,
-			ProductCode: pc,
-			ProductName: pn,
-			BranchID:    m.BranchID,
-			BranchName:  brMap[m.BranchID],
-			Type:        m.Type,
-			Quantity:    m.Quantity,
-			UnitCost:    m.UnitCost,
-			Balance:     m.Balance,
-			Reference:   m.Reference,
-			Notes:       m.Notes,
-			UserID:      m.UserID,
-			UserName:    userNames[m.UserID],
-			CreatedAt:   m.CreatedAt,
-		})
+		row := movementRow{
+			ID:                  m.ID,
+			ProductID:           m.ProductID,
+			ProductCode:         pc,
+			ProductName:         pn,
+			PresentationID:      m.PresentationID,
+			BranchID:            m.BranchID,
+			BranchName:          brMap[m.BranchID],
+			Type:                m.Type,
+			Quantity:            m.Quantity,
+			UnitCost:            m.UnitCost,
+			Balance:             m.Balance,
+			Reference:           m.Reference,
+			Notes:               m.Notes,
+			OperationTypeID:     m.OperationTypeID,
+			InventoryDocumentID: m.InventoryDocumentID,
+			UserID:              m.UserID,
+			UserName:            userNames[m.UserID],
+			CreatedAt:           m.CreatedAt,
+		}
+		if m.PresentationID != nil {
+			row.PresentationName = presNameMap[*m.PresentationID]
+		}
+		if m.OperationTypeID != nil {
+			if op, ok := opMap[*m.OperationTypeID]; ok {
+				row.OperationTypeCode = op.Code
+				row.OperationTypeName = op.Name
+				row.SunatCode = op.SunatCode
+			}
+		}
+		pres := uint(0)
+		if m.PresentationID != nil {
+			pres = *m.PresentationID
+		}
+		switch {
+		case m.InventoryDocumentID != nil:
+			row.Serials = docSerials[docKey{*m.InventoryDocumentID, m.ProductID, pres}]
+		case m.TransferID != nil:
+			row.Serials = transferSerials[docKey{*m.TransferID, m.ProductID, pres}]
+		case m.SaleItemID != nil:
+			row.Serials = saleItemSerials[*m.SaleItemID]
+		}
+		out = append(out, row)
 	}
 	return c.JSON(fiber.Map{"data": out, "total": total})
 }

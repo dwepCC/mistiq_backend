@@ -55,6 +55,7 @@ func ProcessJob(job fiscalqueue.Job) error {
 
 	_, err = svc.EmitFiscal(job.SaleID)
 	if err != nil {
+		errMsg := err.Error()
 		logger.L.Error("fiscal_queue_emit_failed",
 			slog.Uint64("tenant_id", uint64(tenantID)),
 			slog.String("tenant_slug", tenantSlug),
@@ -64,9 +65,11 @@ func ProcessJob(job fiscalqueue.Job) error {
 		_ = db.Model(&database.TenantInvoice{}).Where("sale_id = ?", job.SaleID).Updates(map[string]interface{}{
 			"job_status":      billingqueue.StatusFailed,
 			"pipeline_status": billingstate.FAILED,
-			"job_last_error":  err.Error(),
+			"job_last_error":  errMsg,
+			"sunat_message":   errMsg,
 		}).Error
 		_ = billingstate.SyncSaleBillingStatus(db, job.SaleID, billingstate.FAILED)
+		billingsvc.NotifyBillingStatusUpdated(tenantID, job.SaleID, billingstate.FAILED, errMsg)
 		return err
 	}
 	metrics.FiscalQueueProcessed.Add(1)

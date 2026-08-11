@@ -2,35 +2,45 @@ package routes
 
 import (
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"tukifac/config"
-	"tukifac/pkg/corspolicy"
-	"tukifac/pkg/logger"
-	authHandler "tukifac/internal/auth/handler"
 	"tukifac/internal/auth"
+	authHandler "tukifac/internal/auth/handler"
 	"tukifac/internal/billing"
 	"tukifac/internal/cashbank"
+	catalogs "tukifac/internal/catalogs"
 	"tukifac/internal/company"
 	consultaHandler "tukifac/internal/consulta/handler"
 	"tukifac/internal/contacts"
 	"tukifac/internal/dashboard"
+	"tukifac/internal/ecommerce"
+	"tukifac/internal/fiscal"
+	"tukifac/internal/fleet"
 	"tukifac/internal/inventory"
 	"tukifac/internal/memberships"
 	"tukifac/internal/modules"
+	"tukifac/internal/paymentcatalog"
+	"tukifac/internal/prepayment"
 	"tukifac/internal/products"
 	"tukifac/internal/purchases"
+	"tukifac/internal/quotations"
+	"tukifac/internal/receivables"
 	"tukifac/internal/restaurant"
 	"tukifac/internal/sales"
-	"tukifac/internal/tenantportal"
 	superadmin "tukifac/internal/superadmin"
-	"tukifac/internal/fiscal"
+	"tukifac/internal/tenantportal"
 	"tukifac/internal/ubigeo"
 	"tukifac/internal/users"
+	"tukifac/pkg/corspolicy"
 	"tukifac/pkg/database"
 	"tukifac/pkg/domains"
 	"tukifac/pkg/health"
+	"tukifac/pkg/logger"
 	"tukifac/pkg/middleware"
+	"tukifac/pkg/storagepaths"
 	"tukifac/pkg/tenantstorage"
 
 	"github.com/gofiber/fiber/v3"
@@ -89,7 +99,19 @@ func Setup(app *fiber.App) {
 		if p == "" {
 			return c.Status(fiber.StatusNotFound).SendString("not found")
 		}
-		return c.SendFile("./storage/" + p)
+		path := storagepaths.FilePath(p)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "archivo no encontrado"})
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		// QR SaaS y assets editables: no cachear agresivamente (reemplazo mantiene misma ruta legacy).
+		if strings.HasPrefix(filepath.ToSlash(p), "saas/") {
+			c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+			c.Set("Pragma", "no-cache")
+		}
+		return c.SendFile(path)
 	})
 
 	// Middleware global de resolución de tenant por subdominio / header
@@ -147,6 +169,9 @@ func Setup(app *fiber.App) {
 	// Restaurante: config y PIN (sin JWT, con tenant)
 	restaurant.RegisterPublicRoutes(app.Group("/api"))
 
+	// Catálogo Digital: tienda pública (sin JWT, con tenant + módulo + suscripción activa)
+	ecommerce.RegisterPublicRoutes(app.Group("/api"))
+
 	// Utilidades de desarrollo
 	if config.AppConfig.IsDev() {
 		app.Get("/dev/enter/:slug", func(c fiber.Ctx) error {
@@ -180,6 +205,7 @@ func Setup(app *fiber.App) {
 	sessionH := authHandler.NewSessionHandler()
 	tenantAPI.Get("/session/context", sessionH.GetContext)
 	tenantAPI.Get("/session/capabilities", sessionH.GetCapabilities)
+	tenantAPI.Get("/session/modules", sessionH.GetModules)
 	tenantAPI.Post("/session/switch-branch", sessionH.SwitchBranch)
 
 	ubigeoTenant := ubigeo.NewTenantHandler()
@@ -187,18 +213,27 @@ func Setup(app *fiber.App) {
 	tenantAPI.Get("/ubigeo/provincias", ubigeoTenant.ProvinciasAPI)
 	tenantAPI.Get("/ubigeo/distritos", ubigeoTenant.DistritosAPI)
 
+	tenantAPI.Get("/consulta/tipo-cambio", consultaH.TipoCambioAPI)
+	catalogs.RegisterRoutes(tenantAPI)
+
 	tenantportal.RegisterRoutes(tenantAPI)
 	dashboard.RegisterRoutes(tenantAPI)
 	company.RegisterRoutes(tenantAPI)
 	users.RegisterRoutes(tenantAPI)
 	contacts.RegisterRoutes(tenantAPI)
 	products.RegisterRoutes(tenantAPI)
+	ecommerce.RegisterRoutes(tenantAPI)
 	inventory.RegisterRoutes(tenantAPI)
 	sales.RegisterRoutes(tenantAPI)
+	prepayment.RegisterRoutes(tenantAPI)
+	quotations.RegisterRoutes(tenantAPI)
 	memberships.RegisterRoutes(tenantAPI)
 	billing.RegisterRoutes(tenantAPI)
+	fleet.RegisterRoutes(tenantAPI)
 	purchases.RegisterRoutes(tenantAPI)
 	cashbank.RegisterRoutes(tenantAPI)
+	paymentcatalog.RegisterRoutes(tenantAPI)
+	receivables.RegisterRoutes(tenantAPI)
 	restaurant.RegisterRoutes(tenantAPI)
 	restaurant.RegisterSalePaymentRoutes(tenantAPI)
 	modules.RegisterRoutes(tenantAPI)

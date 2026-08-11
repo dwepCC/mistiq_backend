@@ -199,7 +199,7 @@ func RunMigrateTenants() int {
 		return 1
 	}
 	fmt.Println("LEGACY: bootstrap AutoMigrate per tenant (use migrate-fleet in production)...")
-	return printTenantsSummary(database.MigrateTenantsBatch(true, printTenantProgress))
+	return printEngineTenantsSummary(engine.MigrateTenantsBatch(true, printTenantProgress))
 }
 
 // RunMigrateBackfillBranch alias backfill V31.
@@ -210,11 +210,53 @@ func RunMigrateBackfillBranch() int {
 // RunMigrateTenant bootstrap un tenant.
 func RunMigrateTenant(slug string) int {
 	fmt.Printf("Bootstrap migrate tenant: %s\n", slug)
-	if err := database.MigrateTenantBySlug(slug); err != nil {
+	if err := engine.MigrateTenantBySlug(slug); err != nil {
 		fmt.Printf("✗ failed: %v\n", err)
 		return 1
 	}
 	fmt.Println("✓ completed")
+	return 0
+}
+
+// RunRepairTenantMigrations reconcilia drift y re-ejecuta migraciones faltantes.
+func RunRepairTenantMigrations(args []string) int {
+	fs := flag.NewFlagSet("repair-tenant-migrations", flag.ExitOnError)
+	slug := fs.String("slug", "", "tenant específico por slug")
+	limit := fs.Int("limit", 50, "máximo tenants por lote")
+	dryRun := fs.Bool("dry-run", false, "solo reportar drift sin modificar")
+	reconcileOnly := fs.Bool("reconcile-only", false, "reconciliar drift sin ejecutar migraciones")
+	_ = fs.Parse(args)
+
+	mode := "repair+migrate"
+	if *dryRun {
+		mode = "dry-run"
+	} else if *reconcileOnly {
+		mode = "reconcile-only"
+	}
+	fmt.Printf("repair-tenant-migrations mode=%s limit=%d slug=%q\n", mode, *limit, *slug)
+
+	outcomes, err := engine.RepairTenantMigrations(engine.RepairOptions{
+		Slug:          *slug,
+		Limit:         *limit,
+		DryRun:        *dryRun,
+		ReconcileOnly: *reconcileOnly,
+	})
+	if err != nil {
+		fmt.Printf("✗ repair failed: %v\n", err)
+		return 1
+	}
+	drifted := 0
+	migrated := 0
+	for _, o := range outcomes {
+		fmt.Println(" ", engine.FormatRepairOutcome(o))
+		if o.DriftDetected {
+			drifted++
+		}
+		if o.Migrated {
+			migrated++
+		}
+	}
+	fmt.Printf("✓ processed=%d drifted=%d migrated=%d\n", len(outcomes), drifted, migrated)
 	return 0
 }
 
@@ -246,8 +288,17 @@ func printTenantsSummary(summary database.MigrateSummary) int {
 	return 1
 }
 
+func printEngineTenantsSummary(summary engine.MigrateSummary) int {
+	converted := database.MigrateSummary{
+		Success: summary.Success,
+		Failed:  summary.Failed,
+	}
+	return printTenantsSummary(converted)
+}
+
 // InitDatabase conecta la BD central y el tenant DB manager.
 func InitDatabase() error {
+	engine.SyncSchemaTargetVersion()
 	if err := database.ConnectCentral(); err != nil {
 		return err
 	}

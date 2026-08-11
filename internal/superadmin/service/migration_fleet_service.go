@@ -30,8 +30,10 @@ type MigrationListItem struct {
 	Status          string     `json:"status"`
 	Attempts        int        `json:"attempts"`
 	LastError       *string    `json:"last_error"`
-	LastMigratedAt  *time.Time `json:"last_migrated_at"`
-	Outdated        bool       `json:"outdated"`
+	LastMigratedAt     *time.Time `json:"last_migrated_at"`
+	Outdated           bool       `json:"outdated"`
+	MigrationsApplied  int        `json:"migrations_applied"`
+	MigrationsPending  int        `json:"migrations_pending"`
 }
 
 // MigrationListParams filtros listado.
@@ -44,8 +46,11 @@ type MigrationListParams struct {
 	Outdated       bool
 	Failed         bool
 	Pending        bool
-	TenantSlug     string
-	TenantName     string
+	TenantSlug         string
+	TenantName         string
+	Drifted            bool
+	LastMigratedFrom   string
+	LastMigratedTo     string
 }
 
 // MigrationSummary resumen global.
@@ -56,8 +61,11 @@ type MigrationSummary struct {
 	Failed              int64  `json:"failed"`
 	Running             int64  `json:"running"`
 	Paused              int64  `json:"paused"`
-	Blocked             int64  `json:"blocked"`
-	Outdated            int64  `json:"outdated"`
+	Blocked             int64      `json:"blocked"`
+	Drifted             int64      `json:"drifted"`
+	Outdated            int64      `json:"outdated"`
+	AvgMigrationMs      int64      `json:"avg_migration_duration_ms"`
+	LastFleetRunAt      *time.Time `json:"last_fleet_run_at,omitempty"`
 	SchemaTargetVersion int    `json:"schema_target_version"`
 	WithoutRegistry     int64  `json:"without_registry"`
 	CircuitOpen         bool   `json:"circuit_open"`
@@ -72,7 +80,8 @@ func (s *MigrationFleetService) Summary() (*MigrationSummary, error) {
 	return &MigrationSummary{
 		Total: raw.Total, Completed: raw.Completed, Pending: raw.Pending,
 		Failed: raw.Failed, Running: raw.Running, Paused: raw.Paused,
-		Blocked: raw.Blocked, Outdated: raw.Outdated,
+		Blocked: raw.Blocked, Drifted: raw.Drifted, Outdated: raw.Outdated,
+		AvgMigrationMs: raw.AvgMigrationMs, LastFleetRunAt: raw.LastFleetRunAt,
 		SchemaTargetVersion: raw.SchemaTargetVersion,
 		WithoutRegistry: raw.WithoutRegistry,
 		CircuitOpen: raw.CircuitOpen, CircuitReason: raw.CircuitReason,
@@ -123,6 +132,15 @@ func (s *MigrationFleetService) List(p MigrationListParams) ([]MigrationListItem
 	if p.Failed {
 		q = q.Where("tsv.status = ?", database.TenantSchemaStatusFailed)
 	}
+	if p.Drifted {
+		q = q.Where("tsv.status = ?", database.TenantSchemaStatusDrifted)
+	}
+	if p.LastMigratedFrom != "" {
+		q = q.Where("tsv.last_migrated_at >= ?", p.LastMigratedFrom)
+	}
+	if p.LastMigratedTo != "" {
+		q = q.Where("tsv.last_migrated_at <= ?", p.LastMigratedTo+" 23:59:59")
+	}
 	if p.Pending {
 		q = q.Where("COALESCE(tsv.current_version, ?) < COALESCE(tsv.target_version, ?)",
 			database.TenantSchemaBaselineVersion, target)
@@ -158,6 +176,9 @@ func (s *MigrationFleetService) List(p MigrationListParams) ([]MigrationListItem
 	}
 	if items == nil {
 		items = make([]MigrationListItem, 0)
+	}
+	for i := range items {
+		enrichListItem(&items[i])
 	}
 	return items, total, nil
 }
@@ -231,15 +252,32 @@ func (s *MigrationFleetService) runIncrementalForTenant(tenant *database.Tenant,
 	if tsv.Status == database.TenantSchemaStatusPaused {
 		return errors.New("tenant en pausa; use resume primero")
 	}
-	if tsv.CurrentVersion >= tsv.TargetVersion {
+
+	target := database.TenantSchemaTargetVersion()
+	if tsv.TargetVersion < target {
+		tsv.TargetVersion = target
+	}
+
+	res, err := engine.ReconcileTenantSchemaDrift(tenant.ID, tenant.Slug, tenant.DBName, tsv.CurrentVersion, engine.ReconcileOpts{})
+	if err != nil {
+		return err
+	}
+	if err := database.CentralDB.Where("tenant_id = ?", tenant.ID).First(&tsv).Error; err != nil {
+		return err
+	}
+	if !res.NeedsMigration(tsv.TargetVersion) {
+		if res.ProvenVersion >= tsv.TargetVersion {
+			return engine.MarkTenantSchemaCompletedFromHistory(tenant.ID, tenant.DBName, tsv.TargetVersion)
+		}
 		return nil
 	}
+
 	database.RecoverStaleMigrationLocks()
 	row := database.PendingTenantRow{
 		TenantID: tenant.ID, Slug: tenant.Slug, DBName: tenant.DBName,
-		CurrentVersion: tsv.CurrentVersion, TargetVersion: tsv.TargetVersion,
+		CurrentVersion: res.MigrationFrom, TargetVersion: tsv.TargetVersion,
 	}
-	err := engine.MigrateFleetOne(row, fmt.Sprintf("sa-%d", saUserID), 15*time.Minute)
+	err = engine.MigrateFleetOne(row, fmt.Sprintf("sa-%d", saUserID), 15*time.Minute)
 	if err != nil {
 		_ = database.MarkTenantSchemaFailed(tenant.ID, err)
 		var attempts int

@@ -10,7 +10,7 @@ import (
 // V040FiscalMetadataColumns añade metadatos fiscales en tenant_company_configs (SSOT en facturador).
 type V040FiscalMetadataColumns struct{}
 
-func (V040FiscalMetadataColumns) Version() int  { return 40 }
+func (V040FiscalMetadataColumns) Version() int { return 40 }
 func (V040FiscalMetadataColumns) Name() string { return "fiscal_metadata_columns" }
 
 type v040CompanyConfigFiscal struct {

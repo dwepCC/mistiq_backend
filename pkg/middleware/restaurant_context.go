@@ -83,10 +83,8 @@ func RequireProductsViewOrRestaurantCatalog() fiber.Handler {
 	}
 	return func(c fiber.Ctx) error {
 		if claims, ok := c.Locals("tenant_claims").(*TenantClaims); ok && claims != nil {
-			for _, p := range claims.Permissions {
-				if p == "products.view" {
-					return c.Next()
-				}
+			if tenantHasPermission(claims.Permissions, "products.view") {
+				return c.Next()
 			}
 		}
 		for _, p := range catalogPerms {

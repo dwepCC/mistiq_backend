@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/paymentcondition"
+	"tukifac/pkg/taxpayment"
 
 	"gorm.io/gorm"
 )
@@ -237,6 +239,21 @@ func (s *CashBankService) GetOpenSession(branchID, userID uint) (*database.Tenan
 	return &session, err
 }
 
+// GetAnyOpenSessionInBranch sesión abierta más reciente de la sucursal (cualquier cajero).
+// Sirve para vincular ventas de usuarios sin caja propia (p. ej. administrador) al turno activo.
+func (s *CashBankService) GetAnyOpenSessionInBranch(branchID uint) (*database.TenantCashSession, error) {
+	if branchID == 0 {
+		return nil, nil
+	}
+	var session database.TenantCashSession
+	err := s.db.Where("branch_id = ? AND status = ?", branchID, "open").
+		Order("opened_at DESC").First(&session).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &session, err
+}
+
 // OpenSessionListItem fila para listado de cajas abiertas en sucursal (solo lectura).
 type OpenSessionListItem struct {
 	ID              uint    `json:"id"`
@@ -358,6 +375,9 @@ type CashSessionListItem struct {
 	ClosedByName string  `json:"closed_by_name,omitempty"`
 	TotalIncome  float64 `json:"total_income"`
 	TotalExpense float64 `json:"total_expense"`
+	// Empty caja sin movimientos ni ventas: se puede eliminar sin perder nada.
+	// No basta con que los totales den cero (un ingreso y un egreso iguales se anulan).
+	Empty bool `json:"empty"`
 }
 
 func (s *CashBankService) ListSessionsEnriched(branchID uint) ([]CashSessionListItem, error) {
@@ -371,6 +391,9 @@ func (s *CashBankService) ListSessionsEnriched(branchID uint) ([]CashSessionList
 		income, expense := s.sessionMovementTotals(st.ID)
 		item.TotalIncome = income
 		item.TotalExpense = expense
+		if usage, err := s.SessionUsageOf(st.ID); err == nil {
+			item.Empty = usage.Empty()
+		}
 		var opener database.TenantUser
 		if s.db.Select("name").First(&opener, st.OpenedBy).Error == nil {
 			item.OpenedByName = opener.Name
@@ -467,28 +490,27 @@ func (s *CashBankService) ListBankAccounts() ([]database.TenantBankAccount, erro
 	return accounts, err
 }
 
-// ListPaymentMethods devuelve los códigos de métodos de pago (legacy). Preferir ListPaymentMethodRecords.
+// ListPaymentMethods devuelve códigos operativos de cobro (legacy). Preferir ListPaymentMethodRecords.
 func (s *CashBankService) ListPaymentMethods() []string {
-	var records []database.TenantPaymentMethod
-	if err := s.db.Where("active = ?", true).Order("sort_order ASC, id ASC").Find(&records).Error; err != nil {
-		// Fallback si la tabla no existe o está vacía
+	recs, err := s.ListPaymentMethodRecords()
+	if err != nil || len(recs) == 0 {
 		return []string{"cash", "yape", "plin", "transferencia", "tarjeta"}
 	}
-	codes := make([]string, 0, len(records))
-	for _, r := range records {
+	codes := make([]string, 0, len(recs))
+	for _, r := range recs {
 		codes = append(codes, r.Code)
 	}
 	return codes
 }
 
-// ListPaymentMethodRecords devuelve todos los métodos de pago del tenant (para gestión y ventas).
+// ListPaymentMethodRecords medios de cobro activos (solo tenant_payment_methods).
 func (s *CashBankService) ListPaymentMethodRecords() ([]database.TenantPaymentMethod, error) {
 	var list []database.TenantPaymentMethod
 	err := s.db.Where("active = ?", true).Order("sort_order ASC, id ASC").Find(&list).Error
 	return list, err
 }
 
-// ListAllPaymentMethodRecords incluye inactivos (para administración).
+// ListAllPaymentMethodRecords incluye inactivos.
 func (s *CashBankService) ListAllPaymentMethodRecords() ([]database.TenantPaymentMethod, error) {
 	var list []database.TenantPaymentMethod
 	err := s.db.Order("sort_order ASC, id ASC").Find(&list).Error
@@ -575,8 +597,14 @@ func (s *CashBankService) UpdatePaymentMethod(id uint, name, code, destinationTy
 	if err := s.db.First(&pm, id).Error; err != nil {
 		return err
 	}
-	if pm.IsSystem && code != "" && NormalizePaymentMethodCode(code) != "cash" {
-		return errors.New("no se puede cambiar el código del método efectivo (sistema)")
+	if pm.IsSystem {
+		sysCode := NormalizePaymentMethodCode(pm.Code)
+		if code != "" && NormalizePaymentMethodCode(code) != sysCode {
+			return errors.New("no se puede cambiar el código de un método de sistema")
+		}
+		if destinationType != "" && destinationType != pm.DestinationType {
+			return errors.New("no se puede cambiar el destino de un método de sistema")
+		}
 	}
 	if name != "" {
 		pm.Name = name
@@ -584,7 +612,7 @@ func (s *CashBankService) UpdatePaymentMethod(id uint, name, code, destinationTy
 	if code != "" && !pm.IsSystem {
 		pm.Code = NormalizePaymentMethodCode(code)
 	}
-	if destinationType != "" {
+	if destinationType != "" && !pm.IsSystem {
 		if destinationType != "cash" && destinationType != "bank_account" {
 			return errors.New("destination_type debe ser cash o bank_account")
 		}
@@ -594,7 +622,7 @@ func (s *CashBankService) UpdatePaymentMethod(id uint, name, code, destinationTy
 		}
 		if destinationType == "cash" {
 			pm.BankAccountID = nil
-		} else {
+		} else if destinationType == "bank_account" {
 			pm.BankAccountID = bankAccountID
 		}
 	}
@@ -609,7 +637,7 @@ func (s *CashBankService) DeletePaymentMethod(id uint) error {
 		return err
 	}
 	if pm.IsSystem {
-		return errors.New("no se puede eliminar el método efectivo (es obligatorio)")
+		return errors.New("no se puede eliminar un método de pago del sistema")
 	}
 	return s.db.Delete(&pm).Error
 }
@@ -618,6 +646,39 @@ func (s *CashBankService) DeletePaymentMethod(id uint) error {
 type PaymentLineInput struct {
 	Method string
 	Amount float64
+}
+
+// ResolveCashSessionForSale exige sesión de caja abierta del propio usuario.
+// Nadie puede registrar ventas sin caja (administrador incluido).
+func (s *CashBankService) ResolveCashSessionForSale(
+	branchID, userID uint,
+	cashSessionID *uint,
+	payments []PaymentLineInput,
+) (*uint, error) {
+	const errNoCash = "debe abrir una sesión de caja antes de registrar ventas"
+
+	resolved, err := s.ResolveCashSessionForPayments(branchID, userID, cashSessionID, payments)
+	if err != nil {
+		return nil, err
+	}
+	if resolved != nil && *resolved > 0 {
+		return resolved, nil
+	}
+	if cashSessionID != nil && *cashSessionID > 0 {
+		if _, err := s.ValidateCashSessionForUser(*cashSessionID, userID, branchID); err != nil {
+			return nil, err
+		}
+		return cashSessionID, nil
+	}
+	sess, err := s.GetOpenSession(branchID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if sess == nil {
+		return nil, errors.New(errNoCash)
+	}
+	sid := sess.ID
+	return &sid, nil
 }
 
 // ResolveCashSessionForPayments asigna la sesión de caja del usuario si hay pagos a destino efectivo.
@@ -629,6 +690,9 @@ func (s *CashBankService) ResolveCashSessionForPayments(
 	needsCash := false
 	for _, p := range payments {
 		if p.Amount <= 0 {
+			continue
+		}
+		if taxpayment.IsDetractionCode(p.Method) || paymentcondition.IsCreditCode(p.Method) {
 			continue
 		}
 		pm, err := s.GetPaymentMethodByCode(p.Method)
@@ -669,6 +733,9 @@ func (s *CashBankService) RecordPayment(tx *gorm.DB, paymentMethodCode string, a
 	if amount <= 0 {
 		return nil
 	}
+	if taxpayment.IsDetractionCode(paymentMethodCode) || paymentcondition.IsCreditCode(paymentMethodCode) {
+		return nil
+	}
 	exec := s.db
 	if tx != nil {
 		exec = tx
@@ -679,6 +746,8 @@ func (s *CashBankService) RecordPayment(tx *gorm.DB, paymentMethodCode string, a
 		return s.RecordPaymentToAccount(tx, paymentMethodCode, amount, true, saleNumber, description, userID)
 	}
 	switch pm.DestinationType {
+	case "detraction", "receivable":
+		return errors.New("tipo de destino obsoleto; use tenant_payment_methods operativos")
 	case "cash":
 		if cashSessionID == nil || *cashSessionID == 0 {
 			return errors.New("se requiere sesión de caja abierta del usuario para pagos en efectivo")

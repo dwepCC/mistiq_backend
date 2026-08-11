@@ -57,15 +57,32 @@ func RegisterRoutes(api fiber.Router) {
 	r.Post("/sessions/:id/orders", middleware.RequireRestaurantPerm(restaurantperm.TablesOpen), h.AddOrder)
 	r.Post("/table-orders/:id/printed", middleware.RequireRestaurantPerm(restaurantperm.TablesOpen), h.MarkTableOrderPrinted)
 	r.Post("/sessions/:id/bill", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.BillSession)
+	// Checkout compuesto del POS de venta rápida (Open+AddOrder+Bill en 1 request).
+	// Exige los mismos permisos que las operaciones que compone: TablesOpen + OrdersCharge.
+	r.Post("/pos/checkout",
+		middleware.RequireRestaurantPerm(restaurantperm.TablesOpen),
+		middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge),
+		h.POSCheckout)
 	r.Post("/sessions/:id/close", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.CloseSession)
-	r.Post("/sessions/:id/cancel", middleware.RequireRestaurantPerm(restaurantperm.OrdersCharge), h.CancelSession)
+	r.Post("/sessions/:id/cancel", middleware.RequireAnyRestaurantPerm(restaurantperm.OrdersCharge, restaurantperm.OrdersCancel, restaurantperm.SettingsManage), h.CancelSession)
+	r.Post("/sessions/:id/cancel-comandas", middleware.RequireAnyRestaurantPerm(restaurantperm.SettingsManage, restaurantperm.OrdersCancel), h.CancelAllComandas)
 
 	r.Patch("/comandas/:id/notes", middleware.RequireAnyRestaurantPerm(restaurantperm.TablesOpen, restaurantperm.OrdersCreate, restaurantperm.POSUse), h.UpdateComandaNotes)
 	r.Put("/comandas/:id/status", middleware.RequireRestaurantPerm(restaurantperm.KitchenUpdate), h.UpdateComandaStatus)
 	r.Post("/comandas/:id/print", middleware.RequireRestaurantPerm(restaurantperm.KitchenView), h.PrintComanda)
-	r.Delete("/comandas/:id", middleware.RequireRestaurantPerm(restaurantperm.SettingsManage), h.CancelComanda)
+	r.Delete("/comandas/:id", middleware.RequireAnyRestaurantPerm(restaurantperm.SettingsManage, restaurantperm.OrdersCancel), h.CancelComanda)
 
 	r.Get("/kitchen", middleware.RequireRestaurantPerm(restaurantperm.KitchenView), h.KitchenView)
+
+	r.Get("/dashboard",
+		middleware.RequireAnyRestaurantPerm(
+			restaurantperm.OrdersCharge,
+			restaurantperm.CashView,
+			restaurantperm.SettingsManage,
+			restaurantperm.TablesView,
+		),
+		h.Dashboard,
+	)
 }
 
 // RegisterSalePaymentRoutes registra los endpoints de pagos bajo /api/sales

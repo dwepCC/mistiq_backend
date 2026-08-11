@@ -9,7 +9,7 @@ import (
 // V037StaffSchemaRepair corrige nombre de tabla GORM y columnas staff_id faltantes.
 type V037StaffSchemaRepair struct{}
 
-func (V037StaffSchemaRepair) Version() int  { return 37 }
+func (V037StaffSchemaRepair) Version() int { return 37 }
 func (V037StaffSchemaRepair) Name() string { return "restaurant_staff_schema_repair" }
 
 type v037SessionStaff struct {

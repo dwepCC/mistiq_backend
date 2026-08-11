@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/salescope"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -37,8 +38,8 @@ func (h *DashboardHandler) StatsAPI(c fiber.Ctx) error {
 		purchasesCond = "user_id = ?"
 		purchasesArgs = append(purchasesArgs, userID)
 	}
-	tdb.Model(&database.TenantSale{}).Where(salesCond, salesArgs...).Where("issue_date >= ? AND issue_date < ?", todayStart, todayEnd).Select("COALESCE(SUM(total), 0)").Scan(&salesTodayTotal)
-	tdb.Model(&database.TenantSale{}).Where(salesCond, salesArgs...).Where("issue_date >= ? AND issue_date < ?", monthStart, monthEnd).Select("COALESCE(SUM(total), 0)").Scan(&salesMonthTotal)
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).Where(salesCond, salesArgs...).Where("issue_date >= ? AND issue_date < ?", todayStart, todayEnd).Select("COALESCE(SUM(total), 0)").Scan(&salesTodayTotal)
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).Where(salesCond, salesArgs...).Where("issue_date >= ? AND issue_date < ?", monthStart, monthEnd).Select("COALESCE(SUM(total), 0)").Scan(&salesMonthTotal)
 	tdb.Model(&database.TenantPurchase{}).Where(purchasesCond, purchasesArgs...).Where("issue_date >= ? AND issue_date < ?", todayStart, todayEnd).Select("COALESCE(SUM(total), 0)").Scan(&purchasesTodayTotal)
 	tdb.Model(&database.TenantPurchase{}).Where(purchasesCond, purchasesArgs...).Where("issue_date >= ? AND issue_date < ?", monthStart, monthEnd).Select("COALESCE(SUM(total), 0)").Scan(&purchasesMonthTotal)
 
@@ -53,15 +54,15 @@ func (h *DashboardHandler) StatsAPI(c fiber.Ctx) error {
 	var contactsCount, productsCount, salesCount, purchasesCount int64
 	tdb.Model(&database.TenantContact{}).Where("active = ?", true).Count(&contactsCount)
 	tdb.Model(&database.TenantProduct{}).Where("active = ?", true).Count(&productsCount)
-	tdb.Model(&database.TenantSale{}).Where("status != ?", "cancelled").Count(&salesCount)
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).Where("status != ?", "cancelled").Count(&salesCount)
 	tdb.Model(&database.TenantPurchase{}).Count(&purchasesCount)
 
 	var monthSalesTotal, monthPurchasesTotal float64
 	var monthSalesCount int64
-	tdb.Model(&database.TenantSale{}).
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date < ? AND status != ?", monthStart, monthEnd, "cancelled").
 		Count(&monthSalesCount)
-	tdb.Model(&database.TenantSale{}).
+	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date < ? AND status != ?", monthStart, monthEnd, "cancelled").
 		Select("COALESCE(SUM(total), 0)").Scan(&monthSalesTotal)
 	tdb.Model(&database.TenantPurchase{}).
@@ -78,7 +79,7 @@ func (h *DashboardHandler) StatsAPI(c fiber.Ctx) error {
 		s := time.Date(now.Year(), time.Month(i), 1, 0, 0, 0, 0, time.Local)
 		e := s.AddDate(0, 1, 0)
 		var sum float64
-		tdb.Model(&database.TenantSale{}).
+		salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
 			Where("issue_date >= ? AND issue_date < ? AND status != ?", s, e, "cancelled").
 			Select("COALESCE(SUM(total), 0)").Scan(&sum)
 		monthly[i-1] = MonthAmount{Month: i, Year: now.Year(), Amount: sum}

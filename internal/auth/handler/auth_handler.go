@@ -5,8 +5,9 @@ import (
 	"time"
 
 	"tukifac/config"
-	"tukifac/internal/users/service"
+	authservice "tukifac/internal/auth/service"
 	reststaff "tukifac/internal/restaurant/staff"
+	"tukifac/internal/users/service"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	"tukifac/pkg/middleware"
@@ -295,8 +296,12 @@ func (h *AuthHandler) LoginAPI(c fiber.Ctx) error {
 		restPerms, _ = reststaff.New(tenantDB).ResolvePermissionKeys(tenant.Slug, tenant.ID, user.ID, permVer)
 	}
 
+	// Refresh token (30 días): permite renovar el access token sin volver a pedir contraseña.
+	refreshToken, _ := middleware.BuildTenantRefreshToken(user.ID, tenant.Slug, tenant.DBName, tenant.ID, "pwd")
+
 	return c.JSON(fiber.Map{
-		"token": tokenString,
+		"token":         tokenString,
+		"refresh_token": refreshToken,
 		"user": fiber.Map{
 			"id":                user.ID,
 			"name":              user.Name,
@@ -307,13 +312,78 @@ func (h *AuthHandler) LoginAPI(c fiber.Ctx) error {
 			"home_branch_id":    activeBranchID,
 			"can_switch_branch": canSwitch,
 		},
-		"active_branch":         activeBrief,
-		"can_switch_branch":     canSwitch,
-		"allowed_branches":      allowedBranches,
-		"modules":               enabledModules,
+		"active_branch":          activeBrief,
+		"can_switch_branch":      canSwitch,
+		"allowed_branches":       allowedBranches,
+		"modules":                enabledModules,
 		"permissions":            permissionKeys,
 		"restaurant_permissions": restPerms,
 		"subscription":           subscriptionInfo,
 		"subscription_blocked":   subscriptionBlocked,
+	})
+}
+
+// RefreshAPI renueva el access token a partir de un refresh token válido. Reconstruye los claims
+// desde la BD (rol, permisos, módulos, sucursal), reflejando cambios y validando que el usuario
+// siga activo. No rota el refresh token: el cliente conserva el mismo.
+func (h *AuthHandler) RefreshAPI(c fiber.Ctx) error {
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
+	}
+
+	claims, err := middleware.ParseTenantRefreshToken(req.RefreshToken)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Refresh token inválido o expirado", "code": "REFRESH_INVALID"})
+	}
+
+	tenant, _ := c.Locals("tenant").(*database.Tenant)
+	tenantDB, _ := c.Locals("tenantDB").(*gorm.DB)
+	if tenant == nil || tenantDB == nil {
+		t, terr := middleware.LookupTenantBySlug(claims.TenantSlug)
+		if terr != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Empresa no encontrada", "code": "REFRESH_INVALID"})
+		}
+		tdb, derr := database.GetTenantDB(t.DBName)
+		if derr != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Servicio temporalmente no disponible"})
+		}
+		tenant = t
+		tenantDB = tdb
+	}
+
+	if tenant.ID != claims.TenantID || tenant.Slug != claims.TenantSlug {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Refresh token no corresponde a la empresa", "code": "REFRESH_INVALID"})
+	}
+
+	user, legacyBranch, err := database.LoadTenantUserForBranch(tenantDB, claims.UserID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Usuario no válido", "code": "REFRESH_INVALID"})
+		}
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Servicio temporalmente no disponible"})
+	}
+	if !user.Active {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Usuario desactivado", "code": "REFRESH_INVALID"})
+	}
+
+	// El refresh token no lleva impersonated, pero sí auth_method, y solo el acceso
+	// maestro lo emite como master_access. Derivarlo mantiene ambas señales coherentes
+	// si alguna vez se emite refresh para sesiones de soporte (hoy solo lo emite el
+	// login normal, con "pwd", así que aquí siempre resuelve a false).
+	sess, err := authservice.BuildTenantSession(tenant, tenantDB, user, legacyBranch, authservice.TenantSessionOpts{
+		AuthMethod:   claims.AuthMethod,
+		Impersonated: claims.AuthMethod == middleware.AuthMethodMasterAccess,
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo renovar la sesión"})
+	}
+
+	return c.JSON(fiber.Map{
+		"token":       sess.Token,
+		"modules":     sess.Claims.Modules,
+		"permissions": sess.Claims.Permissions,
 	})
 }

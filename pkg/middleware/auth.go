@@ -7,6 +7,8 @@ import (
 	"tukifac/config"
 	"tukifac/pkg/database"
 	"tukifac/pkg/saas"
+	"tukifac/pkg/tenantctx"
+	"tukifac/pkg/tenantstorage"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/golang-jwt/jwt/v5"
@@ -27,7 +29,13 @@ type TenantClaims struct {
 	Modules     []string `json:"modules"`      // Módulos habilitados (fuente: BD central al login)
 	Permissions []string `json:"permissions"`  // Permisos del rol en formato "module.action"
 	EmployeeType   string `json:"employee_type"` // admin, cashier, waiter, cook, driver, supervisor
-	AuthMethod     string `json:"am,omitempty"`    // pwd | pin (vacío = pwd)
+	AuthMethod     string `json:"auth_method,omitempty"` // pwd | pin | master_access
+	Impersonated   bool   `json:"impersonated,omitempty"`
+	// Identidad del superadmin que abrió el acceso maestro. UserID/Email apuntan al
+	// dueño del tenant suplantado, así que sin esto una acción de soporte quedaría
+	// registrada a nombre del cliente. Vacío en sesiones normales.
+	MasterActorID    uint   `json:"master_actor_id,omitempty"`
+	MasterActorEmail string `json:"master_actor_email,omitempty"`
 	PermVer        uint   `json:"pv,omitempty"`    // versión cache permisos restaurante
 	StaffID        uint   `json:"sid,omitempty"`   // tenant_restaurant_staff.id
 	Status         string `json:"status"`          // Estado del tenant al momento del login
@@ -126,6 +134,13 @@ func TenantAuthAPI() fiber.Handler {
 			})
 		}
 
+		if err := bindTenantFromJWTClaimsIfMissing(c, claims); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Empresa del token no encontrada",
+				"code":  "TOKEN_TENANT_INVALID",
+			})
+		}
+
 		tenant, _ := c.Locals("tenant").(*database.Tenant)
 		path := c.Path()
 		method := c.Method()
@@ -194,6 +209,29 @@ func RequireModule(moduleKey string) fiber.Handler {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"error":  fmt.Sprintf("El módulo '%s' no está habilitado en tu plan", moduleKey),
 			"module": moduleKey,
+		})
+	}
+}
+
+// RequireAnyModule permite la ruta si el tenant tiene al menos uno de los módulos indicados.
+func RequireAnyModule(moduleKeys ...string) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		claims, ok := c.Locals("tenant_claims").(*TenantClaims)
+		if !ok || claims == nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "Sin contexto de autenticación",
+			})
+		}
+		for _, want := range moduleKeys {
+			for _, m := range claims.Modules {
+				if m == want {
+					return c.Next()
+				}
+			}
+		}
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":   "Ninguno de los módulos requeridos está habilitado en tu plan",
+			"modules": moduleKeys,
 		})
 	}
 }
@@ -276,6 +314,35 @@ func RequireRestaurantAdminOrTenantAdmin() fiber.Handler {
 			"error": "Se requiere permiso de administración del restaurante",
 		})
 	}
+}
+
+// bindTenantFromJWTClaimsIfMissing resuelve tenant cuando EventSource/SSE u otros clientes
+// no envían subdominio ni X-Tenant-Slug (p. ej. localhost en dev). El JWT ya fue validado;
+// ValidateTenantBinding verifica coherencia slug/db/id.
+func bindTenantFromJWTClaimsIfMissing(c fiber.Ctx, claims *TenantClaims) error {
+	if _, ok := tenantctx.Tenant(c); ok {
+		return nil
+	}
+	if claims == nil {
+		return fmt.Errorf("claims requeridos")
+	}
+	slug := strings.TrimSpace(claims.TenantSlug)
+	if slug == "" {
+		return nil
+	}
+	tenant, err := LookupTenantBySlug(slug)
+	if err != nil {
+		return err
+	}
+	tenantDB, err := database.GetTenantDB(tenant.DBName)
+	if err != nil {
+		return err
+	}
+	tenantctx.Bind(c, tenant, tenantDB)
+	if ruc := tenantstorage.SanitizeRUC(tenant.RUC); ruc != "" {
+		c.Locals("tenant_ruc", ruc)
+	}
+	return nil
 }
 
 // RequireRole verifica que el usuario tenga uno de los roles especificados

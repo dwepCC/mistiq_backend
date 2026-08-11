@@ -11,6 +11,7 @@ import (
 	"tukifac/config"
 	"tukifac/internal/billing/service"
 	"tukifac/pkg/database"
+	"tukifac/pkg/middleware"
 	"tukifac/pkg/saas/docusage"
 
 	"github.com/gofiber/fiber/v3"
@@ -135,6 +136,78 @@ func (h *BillingHandler) ResendToSUNAT(c fiber.Ctx) error {
 		})
 	}
 	return c.JSON(result)
+}
+
+// ReissueToSUNAT POST /api/billing/reissue/:saleId
+//
+// Reenvía un comprobante con otra fecha de emisión conservando su numeración.
+// La ruta está detrás de middleware.RequireMasterAccess: el tenant no puede
+// ejecutarla, solo soporte entrando por acceso maestro desde el panel central.
+func (h *BillingHandler) ReissueToSUNAT(c fiber.Ctx) error {
+	saleID, err := strconv.ParseUint(c.Params("saleId"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+
+	var body struct {
+		IssueDate   string  `json:"issue_date"`
+		Observation *string `json:"observation"`
+		Reason      string  `json:"reason"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+
+	issueDate, err := parseReissueDate(body.IssueDate)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	claims, _ := c.Locals("tenant_claims").(*middleware.TenantClaims)
+	in := service.ReissueInput{
+		SaleID:    uint(saleID),
+		IssueDate: issueDate,
+		Reason:    body.Reason,
+		ClientIP:  c.IP(),
+	}
+	if claims != nil {
+		in.ActorID = claims.MasterActorID
+		in.ActorEmail = claims.MasterActorEmail
+	}
+	if body.Observation != nil {
+		in.SetObservation = true
+		in.Observation = *body.Observation
+	}
+
+	result, err := billingSvc(c).ReissueSale(in)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":  err.Error(),
+			"status": "error",
+		})
+	}
+	return c.JSON(result)
+}
+
+// parseReissueDate acepta la fecha en formato de día (YYYY-MM-DD) o ISO completo.
+// Se interpreta en America/Lima: el día calendario es lo que cuenta para el plazo
+// de SUNAT, y tomarlo en UTC correría la fecha en las primeras horas del día.
+func parseReissueDate(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, errors.New("la fecha de emisión es obligatoria")
+	}
+	loc, err := time.LoadLocation("America/Lima")
+	if err != nil {
+		loc = time.Local
+	}
+	if d, err := time.ParseInLocation("2006-01-02", raw, loc); err == nil {
+		return d, nil
+	}
+	if d, err := time.Parse(time.RFC3339, raw); err == nil {
+		return d.In(loc), nil
+	}
+	return time.Time{}, errors.New("formato de fecha inválido; use YYYY-MM-DD")
 }
 
 // VoidWithCreditNoteAPI anula la venta generando y enviando una nota de crédito a SUNAT; luego anula la venta original.
@@ -444,14 +517,50 @@ func (h *BillingHandler) GetDespatchStatusAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(rec)
+	// Mismo shape que el listado: si se devolviera el registro crudo, el refresco de estado
+	// borraría billing_status/guia_sunat_code en la fila del frontend (el listado no vuelve a
+	// pedirlos), y la guía se caería de su vista dedicada (remitente/transportista).
+	item, err := svc.GetDespatchListItem(*rec)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(item)
 }
 
 // --- Retención ---
 
+func parseFiscalAuxListParams(c fiber.Ctx) service.FiscalAuxListParams {
+	purchaseID, _ := strconv.ParseUint(c.Query("purchase_id"), 10, 32)
+	sourceSaleID, _ := strconv.ParseUint(c.Query("source_sale_id"), 10, 32)
+	var from, to *time.Time
+	if f := strings.TrimSpace(c.Query("from")); f != "" {
+		if t, err := time.ParseInLocation("2006-01-02", f, time.Local); err == nil {
+			start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+			from = &start
+		}
+	}
+	if t := strings.TrimSpace(c.Query("to")); t != "" {
+		if ts, err := time.ParseInLocation("2006-01-02", t, time.Local); err == nil {
+			end := time.Date(ts.Year(), ts.Month(), ts.Day(), 23, 59, 59, 999999999, time.Local)
+			to = &end
+		}
+	}
+	return service.FiscalAuxListParams{
+		Q:             c.Query("q"),
+		Status:        c.Query("status"),
+		BillingStatus: c.Query("billing_status"),
+		Serie:         c.Query("serie"),
+		Correlativo:   c.Query("correlativo"),
+		PurchaseID:    uint(purchaseID),
+		SourceSaleID:  uint(sourceSaleID),
+		From:          from,
+		To:            to,
+	}
+}
+
 func (h *BillingHandler) ListRetentionsAPI(c fiber.Ctx) error {
 	svc := billingSvc(c)
-	list, err := svc.ListRetentions()
+	list, err := svc.ListRetentionsFiltered(parseFiscalAuxListParams(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -488,7 +597,7 @@ func (h *BillingHandler) GetRetentionStatusAPI(c fiber.Ctx) error {
 
 func (h *BillingHandler) ListPerceptionsAPI(c fiber.Ctx) error {
 	svc := billingSvc(c)
-	list, err := svc.ListPerceptions()
+	list, err := svc.ListPerceptionsFiltered(parseFiscalAuxListParams(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -525,7 +634,7 @@ func (h *BillingHandler) GetPerceptionStatusAPI(c fiber.Ctx) error {
 
 func (h *BillingHandler) ListReversionsAPI(c fiber.Ctx) error {
 	svc := billingSvc(c)
-	list, err := svc.ListReversions()
+	list, err := svc.ListReversionsFiltered(parseFiscalAuxListParams(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}

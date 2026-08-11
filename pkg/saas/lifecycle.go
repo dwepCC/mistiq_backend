@@ -39,6 +39,10 @@ func RunHourlyJobs() (reminders int, notifications int) {
 			}
 		}
 		_, _ = EnsureBillingCycle(sub)
+		// Abre el período mensual de cuota al entrar el nuevo mes. La emisión también
+		// lo crea por su cuenta; esto solo adelanta el trabajo para que el panel
+		// muestre el cupo renovado aunque el tenant todavía no haya emitido nada.
+		_, _, _ = docusage.EnsureQuotaPeriod(sub.TenantID)
 	}
 	notifications = ProcessNotificationQueue(100)
 	return reminders, notifications
@@ -93,28 +97,41 @@ func RunLimaDailyEvaluation() (statusUpdates int, suspended int, overdueCycles i
 		}
 
 		daysAfter := CalendarDaysAfterEnd(sub.EndDate, now)
-		if daysAfter > 0 {
-			res := database.CentralDB.Model(&database.SaasBillingCycle{}).
-				Where("tenant_id = ? AND status = ?", sub.TenantID, database.SaasInvoicePending).
-				Where("due_date < ?", CalendarDateLima(now)).
-				Update("status", database.SaasInvoiceOverdue)
-			if res.RowsAffected > 0 {
-				overdueCycles += int(res.RowsAffected)
-			}
+
+		// Un cobro impago se da por vencido al agotarse su ventana de pago, sin esperar a que
+		// termine el período contratado. Antes esto vivía dentro de `if daysAfter > 0`, así que
+		// un plan anual daba doce meses de uso antes de que el sistema registrara el impago.
+		// Marcar el ciclo no suspende a nadie: lo hace visible en el panel central para que
+		// ventas decida (las renovaciones sí siguen suspendiéndose solas al vencer + gracia).
+		payWindow := EffectivePaymentWindowDays(cfg)
+		overdueLimit := CalendarDateLima(now).AddDate(0, 0, -payWindow)
+		res := database.CentralDB.Model(&database.SaasBillingCycle{}).
+			Where("tenant_id = ? AND status = ?", sub.TenantID, database.SaasInvoicePending).
+			Where("due_date < ?", overdueLimit).
+			Update("status", database.SaasInvoiceOverdue)
+		if res.RowsAffected > 0 {
+			overdueCycles += int(res.RowsAffected)
 		}
 
-		// Auto-suspend solo tras grace (día calendario), nunca el mismo día de vencimiento
-		if cfg.AutoSuspendEnabled && effective == database.SaasSubOverdue &&
-			daysAfter > cfg.GracePeriodDays && tenant.Status != database.TenantStatusSuspended {
-			database.CentralDB.Model(sub).Updates(map[string]interface{}{
-				"status": database.SaasSubSuspended, "provisional_until": nil,
-			})
-			database.CentralDB.Model(&tenant).Update("status", database.TenantStatusSuspended)
-			sid := sub.ID
-			LogEvent(sub.TenantID, &sid, EventSuspended, "system", nil,
-				"auto_suspend daily 00:05 Lima", MetaJSON(map[string]interface{}{"days_after_end": daysAfter}))
-			suspended++
-			InvalidateTenantCache(sub.TenantID)
+		// Auto-suspend solo tras grace (día calendario), nunca el mismo día de vencimiento.
+		// Si pasó la gracia y autoSuspend está habilitado: marcar como suspended.
+		// Si no, marcar como expired (informativo) solo si AutoSuspend deshabilitado.
+		if daysAfter > cfg.GracePeriodDays && sub.Status != database.SaasSubSuspended &&
+			sub.Status != database.SaasSubCancelled && sub.Status != database.SaasSubExpired {
+			if cfg.AutoSuspendEnabled && tenant.Status != database.TenantStatusSuspended {
+				database.CentralDB.Model(sub).Updates(map[string]interface{}{
+					"status": database.SaasSubSuspended, "provisional_until": nil,
+				})
+				database.CentralDB.Model(&tenant).Update("status", database.TenantStatusSuspended)
+				sid := sub.ID
+				LogEvent(sub.TenantID, &sid, EventSuspended, "system", nil,
+					"auto_suspend daily 00:05 Lima", MetaJSON(map[string]interface{}{"days_after_end": daysAfter}))
+				suspended++
+				InvalidateTenantCache(sub.TenantID)
+			} else {
+				database.CentralDB.Model(sub).Update("status", database.SaasSubExpired)
+			}
+			statusUpdates++
 		}
 	}
 

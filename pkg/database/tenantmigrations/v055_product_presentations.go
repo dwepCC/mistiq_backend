@@ -49,7 +49,7 @@ func (v055ProductModifierLink) TableName() string { return "tenant_product_modif
 // V055ProductPresentations: presentaciones por producto (separadas de grupos globales de extras).
 type V055ProductPresentations struct{}
 
-func (V055ProductPresentations) Version() int  { return 55 }
+func (V055ProductPresentations) Version() int { return 55 }
 func (V055ProductPresentations) Name() string { return "product_presentations" }
 
 func (V055ProductPresentations) Up(db *gorm.DB) error {

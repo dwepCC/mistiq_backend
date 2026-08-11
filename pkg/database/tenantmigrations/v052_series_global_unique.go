@@ -14,8 +14,8 @@ func (V052SeriesGlobalUnique) Version() int { return 52 }
 func (V052SeriesGlobalUnique) Name() string { return "series_global_unique" }
 
 const (
-	idxDocumentSeriesCode      = "uk_tenant_document_series_series"
-	idxSaleBranchNumberLegacy  = "uk_tenant_sales_branch_number"
+	idxDocumentSeriesCode     = "uk_tenant_document_series_series"
+	idxSaleBranchNumberLegacy = "uk_tenant_sales_branch_number"
 )
 
 func (V052SeriesGlobalUnique) Up(db *gorm.DB) error {

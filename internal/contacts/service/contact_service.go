@@ -27,8 +27,8 @@ type ContactListParams struct {
 	Status string
 }
 
-func (s *ContactService) List(params ContactListParams) ([]database.TenantContact, error) {
-	var contacts []database.TenantContact
+// buildListQuery arma el filtro común (búsqueda, tipo, documento, estado) de las listas.
+func (s *ContactService) buildListQuery(params ContactListParams) *gorm.DB {
 	q := s.db.Model(&database.TenantContact{})
 	if params.Query != "" {
 		q = q.Where("business_name LIKE ? OR doc_number LIKE ? OR trade_name LIKE ?",
@@ -48,10 +48,34 @@ func (s *ContactService) List(params ContactListParams) ([]database.TenantContac
 	default:
 		q = q.Where("active = ?", true)
 	}
-	err := q.Preload("ContactPersons").
+	return q
+}
+
+func (s *ContactService) List(params ContactListParams) ([]database.TenantContact, error) {
+	var contacts []database.TenantContact
+	err := s.buildListQuery(params).Preload("ContactPersons").
 		Order("business_name ASC").
 		Find(&contacts).Error
 	return contacts, err
+}
+
+// ListPaged devuelve una página de contactos y el total que cumple el filtro.
+// Se usa en la vista de lista; los selectores (POS/ventas) siguen usando List sin paginar.
+func (s *ContactService) ListPaged(params ContactListParams, page, perPage int) ([]database.TenantContact, int64, error) {
+	base := s.buildListQuery(params)
+
+	var total int64
+	if err := base.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var contacts []database.TenantContact
+	err := base.Preload("ContactPersons").
+		Order("business_name ASC").
+		Limit(perPage).
+		Offset((page - 1) * perPage).
+		Find(&contacts).Error
+	return contacts, total, err
 }
 
 func (s *ContactService) GetByID(id uint) (*database.TenantContact, error) {
@@ -70,19 +94,23 @@ type ContactPersonInput struct {
 }
 
 type ContactInput struct {
-	Type           string
-	DocType        string
-	DocNumber      string
-	BusinessName   string
-	TradeName      string
-	Address        string
-	Ubigeo         string
-	Phone          string
-	Email          string
-	PhotoURL       string
-	ContactPerson  string
-	Notes          string
-	ContactPersons []ContactPersonInput
+	Type                            string
+	DocType                         string
+	DocNumber                       string
+	BusinessName                    string
+	TradeName                       string
+	Address                         string
+	Ubigeo                          string
+	Phone                           string
+	Email                           string
+	PhotoURL                        string
+	ContactPerson                   string
+	Notes                           string
+	ContactPersons                  []ContactPersonInput
+	EsAgenteDeRetencion             *bool
+	EsAgenteDePercepcion            *bool
+	EsAgenteDePercepcionCombustible *bool
+	EsBuenContribuyente             *bool
 }
 
 func validateContactPersons(persons []ContactPersonInput) error {
@@ -134,19 +162,23 @@ func (s *ContactService) Create(input ContactInput) (*database.TenantContact, er
 
 	addr, ubi := database.NormalizeTenantContactAddressUbigeo(input.Address, input.Ubigeo)
 	contact := &database.TenantContact{
-		Type:          input.Type,
-		DocType:       input.DocType,
-		DocNumber:     input.DocNumber,
-		BusinessName:  input.BusinessName,
-		TradeName:     input.TradeName,
-		Address:       addr,
-		Ubigeo:        ubi,
-		Phone:         input.Phone,
-		Email:         input.Email,
-		PhotoURL:      strings.TrimSpace(input.PhotoURL),
-		ContactPerson: input.ContactPerson,
-		Notes:         input.Notes,
-		Active:        true,
+		Type:                            input.Type,
+		DocType:                         input.DocType,
+		DocNumber:                       input.DocNumber,
+		BusinessName:                    input.BusinessName,
+		TradeName:                       input.TradeName,
+		Address:                         addr,
+		Ubigeo:                          ubi,
+		Phone:                           input.Phone,
+		Email:                           input.Email,
+		PhotoURL:                        strings.TrimSpace(input.PhotoURL),
+		ContactPerson:                   input.ContactPerson,
+		Notes:                           input.Notes,
+		EsAgenteDeRetencion:             boolOrDefault(input.EsAgenteDeRetencion, false),
+		EsAgenteDePercepcion:            boolOrDefault(input.EsAgenteDePercepcion, false),
+		EsAgenteDePercepcionCombustible: boolOrDefault(input.EsAgenteDePercepcionCombustible, false),
+		EsBuenContribuyente:             boolOrDefault(input.EsBuenContribuyente, false),
+		Active:                          true,
 	}
 	if contact.Type == "" {
 		contact.Type = "customer"
@@ -169,21 +201,26 @@ func (s *ContactService) Update(id uint, input ContactInput) error {
 		return err
 	}
 	addr, ubi := database.NormalizeTenantContactAddressUbigeo(input.Address, input.Ubigeo)
+	updates := map[string]interface{}{
+		"type":                                input.Type,
+		"doc_type":                            input.DocType,
+		"doc_number":                          input.DocNumber,
+		"business_name":                       input.BusinessName,
+		"trade_name":                          input.TradeName,
+		"address":                             addr,
+		"ubigeo":                              ubi,
+		"phone":                               input.Phone,
+		"email":                               input.Email,
+		"photo_url":                           strings.TrimSpace(input.PhotoURL),
+		"contact_person":                      input.ContactPerson,
+		"notes":                               input.Notes,
+		"es_agente_de_retencion":              boolOrDefault(input.EsAgenteDeRetencion, false),
+		"es_agente_de_percepcion":             boolOrDefault(input.EsAgenteDePercepcion, false),
+		"es_agente_de_percepcion_combustible": boolOrDefault(input.EsAgenteDePercepcionCombustible, false),
+		"es_buen_contribuyente":               boolOrDefault(input.EsBuenContribuyente, false),
+	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&database.TenantContact{}).Where("id = ?", id).Updates(map[string]interface{}{
-			"type":           input.Type,
-			"doc_type":       input.DocType,
-			"doc_number":     input.DocNumber,
-			"business_name":  input.BusinessName,
-			"trade_name":     input.TradeName,
-			"address":        addr,
-			"ubigeo":         ubi,
-			"phone":          input.Phone,
-			"email":          input.Email,
-			"photo_url":      strings.TrimSpace(input.PhotoURL),
-			"contact_person": input.ContactPerson,
-			"notes":          input.Notes,
-		}).Error; err != nil {
+		if err := tx.Model(&database.TenantContact{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}
 		return s.replaceContactPersons(tx, id, input.ContactPersons)
@@ -272,4 +309,11 @@ func (s *ContactService) EnsureDefaultClient() (*database.TenantContact, error) 
 		return nil, err
 	}
 	return contact, nil
+}
+
+func boolOrDefault(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
 }

@@ -28,6 +28,8 @@ func mapUsageToHub(u docusage.DocumentUsageView) saas.DocumentUsageHubView {
 		PackageRemaining: u.PackageRemaining, TotalAvailable: u.TotalAvailable,
 		TotalConsumed: u.TotalConsumed, UsagePercent: u.UsagePercent, WarningLevel: u.WarningLevel,
 		WarningMessage: u.WarningMessage, CanEmit: u.CanEmit, BillingCycleEnd: u.BillingCycleEnd,
+		QuotaPeriodEnd: u.QuotaPeriodEnd, QuotaPeriodIndex: u.QuotaPeriodIndex,
+		QuotaPeriodTotal: u.QuotaPeriodTotal,
 	}
 }
 

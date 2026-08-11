@@ -2,12 +2,15 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
-	"tukifac/pkg/database"
-	"tukifac/pkg/tax"
 	cashbanksvc "tukifac/internal/cashbank/service"
+	invsvc "tukifac/internal/inventory/service"
+	"tukifac/pkg/database"
+	"tukifac/pkg/money"
+	"tukifac/pkg/tax"
 
 	"gorm.io/gorm"
 )
@@ -31,23 +34,89 @@ type PurchaseItemInput struct {
 	IgvAffectationType string   `json:"igv_affectation_type"` // catálogo SUNAT N°07
 	PriceIncludesIgv   bool     `json:"price_includes_igv"`
 	Serials            []string `json:"serials"`
+	// UpdateSalePrice: si true, actualiza sale_price del catálogo con NewSalePrice.
+	UpdateSalePrice bool    `json:"update_sale_price"`
+	NewSalePrice    float64 `json:"new_sale_price"`
 }
 
 type CreatePurchaseInput struct {
-	BranchID       uint
-	ContactID      *uint
-	UserID         uint
-	DocType        string
-	Series         string
-	Number         string
-	IssueDate      time.Time
-	DueDate        *time.Time
-	Currency       string
-	PaymentMethod  string
-	Status         string
-	Notes          string
-	Items          []PurchaseItemInput
-	TaxConfig      tax.Config
+	BranchID      uint
+	ContactID     *uint
+	UserID        uint
+	DocType       string
+	Series        string
+	Number        string
+	IssueDate     time.Time
+	DueDate       *time.Time
+	Currency      string
+	PaymentMethod string
+	Status        string
+	Notes         string
+	// PriceIncludesIgv: criterio global elegido en el formulario. Se guarda como referencia
+	// de cómo se registró la compra; el cálculo real usa el flag de cada ítem.
+	PriceIncludesIgv bool
+	Items            []PurchaseItemInput
+	TaxConfig        tax.Config
+}
+
+// validatePurchaseItems valida reglas de negocio de ítems antes de persistir la compra.
+func validatePurchaseItems(items []PurchaseItemInput) error {
+	for _, item := range items {
+		if item.UpdateSalePrice && item.NewSalePrice <= 0 {
+			label := strings.TrimSpace(item.Description)
+			if label == "" {
+				label = "producto"
+			}
+			return fmt.Errorf("precio de venta debe ser mayor a cero para %s", label)
+		}
+	}
+	return nil
+}
+
+// catalogPriceUpdates construye el mapa de actualización de precios de catálogo para un ítem.
+// purchase_price solo se actualiza cuando unit_cost > 0 (bonificaciones o errores no sobrescriben).
+func catalogPriceUpdates(item PurchaseItemInput) (map[string]interface{}, error) {
+	if item.UpdateSalePrice && item.NewSalePrice <= 0 {
+		label := strings.TrimSpace(item.Description)
+		if label == "" {
+			label = "producto"
+		}
+		return nil, fmt.Errorf("precio de venta debe ser mayor a cero para %s", label)
+	}
+	updates := map[string]interface{}{}
+	if item.UnitCost > 0 {
+		updates["purchase_price"] = money.RoundSunat(item.UnitCost)
+	}
+	if item.UpdateSalePrice {
+		updates["sale_price"] = money.RoundSunat(item.NewSalePrice)
+	}
+	if len(updates) == 0 {
+		return nil, nil
+	}
+	updates["updated_at"] = time.Now()
+	return updates, nil
+}
+
+const errProductNotFound = "El producto seleccionado ya no existe o fue eliminado."
+
+// validatePurchaseProducts verifica que cada product_id referenciado exista en el tenant.
+func validatePurchaseProducts(db *gorm.DB, items []PurchaseItemInput) error {
+	for _, item := range items {
+		if item.ProductID == nil {
+			continue
+		}
+		var product database.TenantProduct
+		if err := db.First(&product, *item.ProductID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				if label := strings.TrimSpace(item.Description); label != "" {
+					return fmt.Errorf("%s (%s)", errProductNotFound, label)
+				}
+				return errors.New(errProductNotFound)
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPurchase, error) {
@@ -59,6 +128,12 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 	}
 	if input.Series == "" || input.Number == "" {
 		return nil, errors.New("serie y número del documento son requeridos")
+	}
+	if err := validatePurchaseItems(input.Items); err != nil {
+		return nil, err
+	}
+	if err := validatePurchaseProducts(s.db, input.Items); err != nil {
+		return nil, err
 	}
 
 	taxCfg := input.TaxConfig
@@ -94,6 +169,7 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 			UnitCost:           item.UnitCost,
 			TaxRate:            effectiveRate,
 			IgvAffectationType: affType,
+			PriceIncludesIgv:   item.PriceIncludesIgv,
 			Subtotal:           itemSub,
 			TaxAmount:          itemTax,
 			Total:              itemTotal,
@@ -110,21 +186,22 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 		status = "received"
 	}
 	purchase := &database.TenantPurchase{
-		BranchID:      input.BranchID,
-		ContactID:     input.ContactID,
-		UserID:        input.UserID,
-		DocType:       input.DocType,
-		Series:        input.Series,
-		Number:        input.Number,
-		IssueDate:     input.IssueDate,
-		DueDate:       input.DueDate,
-		Subtotal:      subtotal,
-		TaxAmount:     taxAmount,
-		Total:         total,
-		Currency:      currency,
-		PaymentMethod: input.PaymentMethod,
-		Notes:         input.Notes,
-		Status:        status,
+		BranchID:         input.BranchID,
+		ContactID:        input.ContactID,
+		UserID:           input.UserID,
+		DocType:          input.DocType,
+		Series:           input.Series,
+		Number:           input.Number,
+		IssueDate:        input.IssueDate,
+		DueDate:          input.DueDate,
+		Subtotal:         subtotal,
+		TaxAmount:        taxAmount,
+		Total:            total,
+		Currency:         currency,
+		PaymentMethod:    input.PaymentMethod,
+		Notes:            input.Notes,
+		PriceIncludesIgv: input.PriceIncludesIgv,
+		Status:           status,
 	}
 	docNumber := input.Series + "-" + input.Number
 
@@ -138,52 +215,56 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 		if err := tx.Create(&purchaseItems).Error; err != nil {
 			return err
 		}
-		// Descontar de la cuenta asociada al método de pago (egreso)
+		// Descontar de la cuenta asociada al método de pago (egreso), dentro de la misma tx.
 		if input.PaymentMethod != "" {
-			_ = cashbanksvc.NewCashBankService(s.db).RecordPaymentToAccount(tx, input.PaymentMethod, total, false, docNumber, "Compra "+docNumber, input.UserID)
+			cbSvc := cashbanksvc.NewCashBankService(tx)
+			if err := cbSvc.RecordPaymentToAccount(tx, input.PaymentMethod, total, false, docNumber, "Compra "+docNumber, input.UserID); err != nil {
+				return err
+			}
 		}
-		// Ingresar stock y registrar seriales por cada ítem
+		// Actualizar precios de catálogo, ingresar stock y registrar seriales por cada ítem
+		inv := invsvc.NewInventoryService(tx)
 		for i, item := range input.Items {
 			if item.ProductID == nil {
 				continue
 			}
 			var product database.TenantProduct
-			if tx.First(&product, *item.ProductID).Error != nil {
-				continue
+			if err := tx.First(&product, *item.ProductID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					if label := strings.TrimSpace(item.Description); label != "" {
+						return fmt.Errorf("%s (%s)", errProductNotFound, label)
+					}
+					return errors.New(errProductNotFound)
+				}
+				return err
 			}
+
+			priceUpdates, err := catalogPriceUpdates(item)
+			if err != nil {
+				return err
+			}
+			if priceUpdates != nil {
+				if err := tx.Model(&product).Updates(priceUpdates).Error; err != nil {
+					return err
+				}
+			}
+
 			if !product.ManageStock {
 				continue
 			}
 
-			var stock database.TenantProductStock
-			tx.Where("product_id = ? AND branch_id = ?", *item.ProductID, input.BranchID).First(&stock)
-
-			newQty := stock.Quantity + item.Quantity
-			if stock.ID == 0 {
-				tx.Create(&database.TenantProductStock{
-					ProductID: *item.ProductID,
-					BranchID:  input.BranchID,
-					Quantity:  newQty,
-				})
-			} else {
-				tx.Model(&stock).Updates(map[string]interface{}{
-					"quantity":   newQty,
-					"updated_at": time.Now(),
-				})
+			if err := inv.RecordMovementTx(tx, invsvc.MovementInput{
+				ProductID:     *item.ProductID,
+				BranchID:      input.BranchID,
+				Type:          "in",
+				Quantity:      item.Quantity,
+				UnitCost:      item.UnitCost,
+				Reference:     "COMPRA/" + input.Series + "-" + input.Number,
+				UserID:        input.UserID,
+				OperationCode: "PURCHASE",
+			}); err != nil {
+				return err
 			}
-
-			// Kardex
-			tx.Create(&database.TenantStockMovement{
-				ProductID: *item.ProductID,
-				BranchID:  input.BranchID,
-				Type:      "in",
-				Quantity:  item.Quantity,
-				UnitCost:  item.UnitCost,
-				Balance:   newQty,
-				Reference: "COMPRA/" + input.Series + "-" + input.Number,
-				UserID:    input.UserID,
-				CreatedAt: time.Now(),
-			})
 
 			// Registrar números de serie individuales
 			if product.ManageSeries {
@@ -192,13 +273,15 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 					if serial == "" {
 						continue
 					}
-					tx.Create(&database.TenantProductSerial{
+					if err := tx.Create(&database.TenantProductSerial{
 						ProductID:      *item.ProductID,
 						BranchID:       input.BranchID,
 						Serial:         serial,
 						Status:         "available",
 						PurchaseItemID: &purchaseItemID,
-					})
+					}).Error; err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -290,8 +373,18 @@ func (s *PurchaseService) Void(purchaseID, userID uint) error {
 	}
 
 	ref := "ANULACION COMPRA/" + p.Series + "-" + p.Number
+	docNumber := p.Series + "-" + p.Number
 
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		if strings.TrimSpace(p.PaymentMethod) != "" && p.Total > 0 {
+			cbSvc := cashbanksvc.NewCashBankService(tx)
+			desc := "Reversión por anulación de compra"
+			if err := cbSvc.ReverseBankMovementsByReference(tx, docNumber, "debit", desc, ref, userID); err != nil {
+				return err
+			}
+		}
+
+		inv := invsvc.NewInventoryService(tx)
 		for _, item := range items {
 			if item.ProductID == nil {
 				continue
@@ -302,32 +395,16 @@ func (s *PurchaseService) Void(purchaseID, userID uint) error {
 			}
 
 			if product.ManageStock {
-				var stock database.TenantProductStock
-				tx.Where("product_id = ? AND branch_id = ?", *item.ProductID, p.BranchID).First(&stock)
-				newQty := stock.Quantity - item.Quantity
-				if newQty < 0 {
-					return errors.New("no se puede anular: stock insuficiente del producto " + item.Description)
-				}
-				if stock.ID == 0 {
-					return errors.New("no se encontró stock para anular del producto " + item.Description)
-				}
-				if err := tx.Model(&stock).Updates(map[string]interface{}{
-					"quantity":   newQty,
-					"updated_at": time.Now(),
-				}).Error; err != nil {
-					return err
-				}
-				if err := tx.Create(&database.TenantStockMovement{
-					ProductID: *item.ProductID,
-					BranchID:  p.BranchID,
-					Type:      "out",
-					Quantity:  item.Quantity,
-					UnitCost:  item.UnitCost,
-					Balance:   newQty,
-					Reference: ref,
-					UserID:    userID,
-					CreatedAt: time.Now(),
-				}).Error; err != nil {
+				if err := inv.RecordMovementTx(tx, invsvc.MovementInput{
+					ProductID:     *item.ProductID,
+					BranchID:      p.BranchID,
+					Type:          "out",
+					Quantity:      item.Quantity,
+					UnitCost:      item.UnitCost,
+					Reference:     ref,
+					UserID:        userID,
+					OperationCode: "PURCHASE",
+				}); err != nil {
 					return err
 				}
 			}

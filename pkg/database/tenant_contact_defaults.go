@@ -56,3 +56,22 @@ func EnsureDefaultSaleContact(db *gorm.DB) error {
 	}
 	return nil
 }
+
+// EnsureCompanyFiscalDomicile rellena domicilio fiscal vacío (ubigeo/dirección) para emisión SUNAT.
+func EnsureCompanyFiscalDomicile(db *gorm.DB) error {
+	var cfg TenantCompanyConfig
+	if err := db.First(&cfg).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	addr, ubi := NormalizeTenantContactAddressUbigeo(cfg.Address, cfg.Ubigeo)
+	if strings.TrimSpace(cfg.Address) == addr && strings.TrimSpace(cfg.Ubigeo) == ubi {
+		return nil
+	}
+	return db.Model(&cfg).Updates(map[string]interface{}{
+		"address": addr,
+		"ubigeo":  ubi,
+	}).Error
+}

@@ -9,7 +9,7 @@ import (
 // V042DespatchSaleLink vincula guías con venta fiscal (pipeline unificado).
 type V042DespatchSaleLink struct{}
 
-func (V042DespatchSaleLink) Version() int  { return 42 }
+func (V042DespatchSaleLink) Version() int { return 42 }
 func (V042DespatchSaleLink) Name() string { return "despatch_sale_id" }
 
 type v042DespatchSaleID struct {

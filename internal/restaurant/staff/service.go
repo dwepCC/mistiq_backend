@@ -19,6 +19,9 @@ import (
 // ErrPINDuplicate se devuelve al asignar un PIN ya usado por otro staff activo.
 var ErrPINDuplicate = errors.New("este PIN ya está asignado a otro usuario del restaurante")
 
+// ErrTenantOwnerRoleLocked el usuario maestro del tenant no puede cambiar su rol de administrador.
+var ErrTenantOwnerRoleLocked = errors.New("no se puede cambiar el rol del usuario principal del sistema")
+
 type Service struct {
 	db *gorm.DB
 }
@@ -80,7 +83,7 @@ func (s *Service) computePermissionKeys(userID uint) ([]string, error) {
 		CanOpenTable: f.CanOpenTable, KitchenAccess: f.KitchenAccess,
 		DeliveryAccess: f.DeliveryAccess,
 	}
-	return restaurantperm.EmployeeTypeToKeys(normalizeType(st.EmployeeType), flags), nil
+	return restaurantperm.EmployeeTypeToKeys(normalizeEmployeeType(st.EmployeeType), flags), nil
 }
 
 func (s *Service) HasPermission(tenantSlug string, tenantID, userID, permVer uint, perm string) (bool, error) {
@@ -128,11 +131,41 @@ func (s *Service) AuthenticatePIN(pin, station string) (userID, staffID uint, em
 	if matched == nil {
 		return 0, 0, "", errors.New("PIN incorrecto o sin acceso a esta estación")
 	}
-	return matched.UserID, matched.ID, normalizeType(matched.EmployeeType), nil
+	return matched.UserID, matched.ID, normalizeEmployeeType(matched.EmployeeType), nil
+}
+
+func (s *Service) RestaurantRoleEditLocked(userID uint, currentEmployeeType string) (bool, error) {
+	isOwner, err := database.IsTenantOwnerUser(s.db, userID)
+	if err != nil || !isOwner {
+		return false, err
+	}
+	return normalizeEmployeeType(currentEmployeeType) == "admin", nil
+}
+
+func (s *Service) guardTenantOwnerRestaurantRoleChange(userID uint, newEmployeeType string) error {
+	var current database.TenantRestaurantStaff
+	err := s.db.Where("user_id = ?", userID).First(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	locked, err := s.RestaurantRoleEditLocked(userID, current.EmployeeType)
+	if err != nil || !locked {
+		return err
+	}
+	if normalizeEmployeeType(newEmployeeType) != "admin" {
+		return ErrTenantOwnerRoleLocked
+	}
+	return nil
 }
 
 func (s *Service) UpsertStaffForUser(userID uint, employeeType string, pin string, flags UpsertFlags) error {
 	employeeType = normalizeEmployeeType(employeeType)
+	if err := s.guardTenantOwnerRestaurantRoleChange(userID, employeeType); err != nil {
+		return err
+	}
 	if employeeType == "" {
 		if err := s.db.Where("user_id = ?", userID).Delete(&database.TenantRestaurantStaff{}).Error; err != nil {
 			return err
@@ -249,10 +282,8 @@ func (s *Service) CreateStaffUser(in CreateStaffUserInput) (*StaffManagementItem
 		}
 		branchIDs = []uint{mainID}
 	}
-	if branch.UserBranchesReady(s.db) {
-		if err := branch.ValidateBranchIDsExist(s.db, branchIDs); err != nil {
-			return nil, err
-		}
+	if err := branch.ValidateBranchIDsExist(s.db, branchIDs); err != nil {
+		return nil, err
 	}
 	homeBranchID := branchIDs[0]
 
@@ -276,10 +307,8 @@ func (s *Service) CreateStaffUser(in CreateStaffUserInput) (*StaffManagementItem
 			return fmt.Errorf("creando usuario: %w", err)
 		}
 		createdUserID = user.ID
-		if branch.UserBranchesReady(tx) {
-			if err := branch.SetUserAssignedBranches(tx, user.ID, branchIDs, false); err != nil {
-				return err
-			}
+		if err := branch.SetUserAssignedBranches(tx, user.ID, branchIDs, false); err != nil {
+			return err
 		}
 		flags := UpsertFlags{
 			DisplayName: strings.TrimSpace(in.DisplayName),
@@ -353,7 +382,7 @@ func randomOperativePassword() string {
 func normalizeEmployeeType(et string) string {
 	et = strings.TrimSpace(strings.ToLower(et))
 	switch et {
-	case "vendedor":
+	case "vendedor", "cajero":
 		return "cashier"
 	case "mozo":
 		return "waiter"
@@ -390,6 +419,7 @@ type StaffManagementItem struct {
 	ProfileComplete   bool     `json:"profile_complete"`
 	BranchIDs         []uint   `json:"branch_ids,omitempty"`
 	BranchNames       []string `json:"branch_names,omitempty"`
+	RoleEditLocked    bool     `json:"role_edit_locked"`
 }
 
 func (s *Service) ListStaffManagement() ([]StaffManagementItem, error) {
@@ -421,14 +451,15 @@ func (s *Service) ListStaffManagement() ([]StaffManagementItem, error) {
 			item.HasPin = strings.TrimSpace(st.PinHash) != ""
 			item.StaffActive = st.IsActive
 			item.ProfileComplete = st.IsActive && strings.TrimSpace(st.EmployeeType) != ""
+			if locked, err := s.RestaurantRoleEditLocked(u.ID, st.EmployeeType); err == nil {
+				item.RoleEditLocked = locked
+			}
 		}
-		if branch.UserBranchesReady(s.db) {
-			ids, _ := branch.GetUserAssignedBranchIDs(s.db, u.ID)
-			item.BranchIDs = ids
-			for _, bid := range ids {
-				if b, err := branch.GetBranchBrief(s.db, bid); err == nil {
-					item.BranchNames = append(item.BranchNames, b.Name)
-				}
+		ids, _ := branch.ResolveDisplayBranchIDs(s.db, u.ID, u.HomeBranchID, u.BranchID)
+		item.BranchIDs = ids
+		for _, bid := range ids {
+			if b, err := branch.GetBranchBrief(s.db, bid); err == nil {
+				item.BranchNames = append(item.BranchNames, b.Name)
 			}
 		}
 		out = append(out, item)
@@ -440,9 +471,6 @@ func (s *Service) ListStaffManagement() ([]StaffManagementItem, error) {
 func (s *Service) AssignUserBranches(userID uint, branchIDs []uint) error {
 	if userID == 0 {
 		return errors.New("usuario inválido")
-	}
-	if !branch.UserBranchesReady(s.db) {
-		return errors.New("migración de sucursales por usuario pendiente")
 	}
 	return branch.SetUserAssignedBranches(s.db, userID, branchIDs, true)
 }

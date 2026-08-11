@@ -18,7 +18,7 @@ func (v033DeliveryDriver) TableName() string { return "tenant_delivery_drivers" 
 // V033DeliveryDriversTimestamps alinea tenant_delivery_drivers con TenantDeliveryDriver (timestamps + soft delete).
 type V033DeliveryDriversTimestamps struct{}
 
-func (V033DeliveryDriversTimestamps) Version() int  { return 33 }
+func (V033DeliveryDriversTimestamps) Version() int { return 33 }
 func (V033DeliveryDriversTimestamps) Name() string { return "delivery_drivers_timestamps" }
 
 func (V033DeliveryDriversTimestamps) Up(db *gorm.DB) error {

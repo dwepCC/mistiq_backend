@@ -44,8 +44,9 @@ func runServer(cfg *config.Config) {
 	}
 
 	// Cron de vencimientos espera esquema central (deploy migrate-central o AutoMigrateDev en dev).
-	cron.StartExpirationChecker()
+	// Evaluación diaria respeta gracia y marca expired dentro de RunLimaDailyEvaluation.
 	cron.StartSaasScheduler()
+	cron.StartExchangeRateScheduler()
 	cron.StartFiscalReconcileWorker()
 
 	app := fiber.New(fiber.Config{

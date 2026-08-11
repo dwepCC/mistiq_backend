@@ -44,6 +44,14 @@ func Execute(args []string) int {
 		return RunMigrateTenant(args[1])
 	case "migrate-backfill-branch":
 		return RunMigrateBackfillBranch()
+	case "repair-tenant-migrations":
+		return RunRepairTenantMigrations(args[1:])
+	case "backfill-product-codes":
+		return RunBackfillProductCodes(args[1:])
+	case "payment":
+		return RunPayment(args[1:])
+	case "validate-prepayment-phase0":
+		return RunValidatePrepaymentPhase0(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return 0
@@ -69,6 +77,10 @@ func printUsage() {
   migrate-tenant <slug>      Bootstrap AutoMigrate un tenant (emergencia)
   migrate-tenants            LEGACY migrate-all bootstrap (no producción)
   migrate-backfill-branch    Alias backfill V31 fleet
+  repair-tenant-migrations   Reconciliar drift [--slug=] [--limit=50] [--dry-run] [--reconcile-only]
+  backfill-product-codes     Código a productos sin él + snapshot de ventas [--tenant=slug] [--dry-run] [--active-only]
+  payment audit|repair|verify [--slug=tenant]  Dominio financiero (métodos/condiciones/tributario)
+  validate-prepayment-phase0 [--slug=demo]   E2E Fase 0: boleta+factura anticipo SUNAT Beta
 
 Deploy producción:
   ./tukifac-api migrate

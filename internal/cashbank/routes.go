@@ -24,6 +24,10 @@ func RegisterRoutes(api fiber.Router) {
 		mod, loadRest, middleware.RequireCashbankAccess("open"), h.OpenSessionAPI)
 	api.Post("/cashbank/sessions/:id/close",
 		mod, loadRest, middleware.RequireCashbankAccess("close"), h.CloseSessionAPI)
+	api.Patch("/cashbank/sessions/:id/opening-balance",
+		mod, loadRest, middleware.RequireCashbankAccess("adjust_opening"), h.UpdateOpeningBalanceAPI)
+	api.Delete("/cashbank/sessions/:id",
+		mod, loadRest, middleware.RequireCashbankAccess("delete_session"), h.DeleteSessionAPI)
 	api.Post("/cashbank/sessions/:id/arqueo",
 		mod, loadRest, middleware.RequireCashbankAccess("view"), h.SaveArqueoAPI)
 	api.Get("/cashbank/sessions/:id/movements",

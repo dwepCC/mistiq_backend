@@ -6,12 +6,18 @@ import (
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/database/tenantmigrations"
 	"tukifac/pkg/logger"
 )
 
+// SyncSchemaTargetVersion alinea el objetivo en BD central con el registry del binario.
+func SyncSchemaTargetVersion() {
+	database.SetTenantSchemaTargetVersion(tenantmigrations.MaxVersion())
+}
+
 // CodeTargetVersion versión objetivo del binario (tenantmigrations registry).
 func CodeTargetVersion() int {
-	return database.TenantSchemaTargetVersion()
+	return tenantmigrations.MaxVersion()
 }
 
 // InitTenantSchemaVersions delega a database (bootstrap V30).
@@ -24,7 +30,7 @@ func BumpFleetTargetVersion(target int) (int64, error) {
 	return database.BumpFleetTargetVersion(target)
 }
 
-// MigrateSingleTenant migraciones incrementales V(current+1)..V(target).
+// MigrateSingleTenant migraciones incrementales desde historial probado hasta target.
 func MigrateSingleTenant(slug, dbName string, tenantID uint, current, target int) error {
 	db, err := database.OpenTenantDBForMigration(dbName)
 	if err != nil {
@@ -32,10 +38,21 @@ func MigrateSingleTenant(slug, dbName string, tenantID uint, current, target int
 	}
 	defer database.CloseTenantDB(db)
 
-	if err := RunTenantSchemaMigrations(db, slug, current, target); err != nil {
+	res, err := ReconcileTenantSchemaDrift(tenantID, slug, dbName, current, ReconcileOpts{})
+	if err != nil {
 		return err
 	}
-	return database.MarkTenantSchemaCompleted(tenantID, target)
+	fromV := res.MigrationFrom
+	if !res.NeedsMigration(target) {
+		if res.ProvenVersion >= target {
+			return MarkTenantSchemaCompletedFromHistory(tenantID, dbName, target)
+		}
+		return nil
+	}
+	if err := RunTenantSchemaMigrations(db, slug, fromV, target); err != nil {
+		return err
+	}
+	return MarkTenantSchemaCompletedFromHistory(tenantID, dbName, target)
 }
 
 // PendingTenantRow alias.
@@ -77,18 +94,30 @@ func MigrateFleetOne(row PendingTenantRow, workerID string, lease time.Duration)
 	}
 	defer func() { _ = ReleaseMigrationLock(row.TenantID) }()
 
+	res, err := ReconcileTenantSchemaDrift(row.TenantID, row.Slug, row.DBName, row.CurrentVersion, ReconcileOpts{})
+	if err != nil {
+		return err
+	}
+	fromV := res.MigrationFrom
+	if fromV != row.CurrentVersion {
+		row.CurrentVersion = fromV
+	}
+
 	logger.L.Info("fleet_tenant_start",
 		slog.String("tenant", row.Slug),
-		slog.Int("from", row.CurrentVersion),
+		slog.Uint64("tenant_id", uint64(row.TenantID)),
+		slog.Int("from", fromV),
+		slog.Int("proven", res.ProvenVersion),
 		slog.Int("to", row.TargetVersion),
 	)
 	start := time.Now()
-	err = MigrateSingleTenant(row.Slug, row.DBName, row.TenantID, row.CurrentVersion, row.TargetVersion)
+	err = MigrateSingleTenant(row.Slug, row.DBName, row.TenantID, fromV, row.TargetVersion)
 	if err != nil {
 		return err
 	}
 	logger.L.Info("fleet_tenant_success",
 		slog.String("tenant", row.Slug),
+		slog.Uint64("tenant_id", uint64(row.TenantID)),
 		slog.Duration("duration", time.Since(start)),
 	)
 	return nil

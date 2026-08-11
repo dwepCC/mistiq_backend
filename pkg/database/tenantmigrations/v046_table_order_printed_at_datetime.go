@@ -9,7 +9,7 @@ import (
 // V046TableOrderPrintedAtDatetime corrige printed_at en tenant_table_orders (v045 lo creó como texto).
 type V046TableOrderPrintedAtDatetime struct{}
 
-func (V046TableOrderPrintedAtDatetime) Version() int  { return 46 }
+func (V046TableOrderPrintedAtDatetime) Version() int { return 46 }
 func (V046TableOrderPrintedAtDatetime) Name() string { return "table_order_printed_at_datetime" }
 
 func (V046TableOrderPrintedAtDatetime) Up(db *gorm.DB) error {

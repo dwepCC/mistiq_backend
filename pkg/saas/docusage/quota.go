@@ -13,20 +13,42 @@ import (
 
 // GetUsageView calcula disponibilidad sin reservar (lectura).
 func GetUsageView(tenantID uint) (DocumentUsageView, error) {
-	cycle, _, err := CurrentBillingCycle(tenantID)
+	cycle, sub, err := CurrentBillingCycle(tenantID)
 	if err != nil {
 		return DocumentUsageView{CanEmit: false, WarningLevel: "exhausted"}, err
 	}
-	return buildView(cycle, tenantID), nil
+	var period *database.SaasDocumentQuotaPeriod
+	err = database.CentralDB.Transaction(func(tx *gorm.DB) error {
+		p, e := ensureQuotaPeriodTx(tx, sub, cycle, nowLima())
+		period = p
+		return e
+	})
+	if err != nil {
+		return DocumentUsageView{CanEmit: false, WarningLevel: "exhausted"}, err
+	}
+	return buildView(cycle, period, sub, tenantID), nil
 }
 
-func buildView(cycle *database.SaasBillingCycle, tenantID uint) DocumentUsageView {
+// buildView: el cupo del plan sale del período MENSUAL; los paquetes siguen atados al
+// ciclo de cobro, porque se compran aparte y valen hasta el fin de la suscripción.
+func buildView(
+	cycle *database.SaasBillingCycle,
+	period *database.SaasDocumentQuotaPeriod,
+	sub *database.SaasSubscription,
+	tenantID uint,
+) DocumentUsageView {
 	v := DocumentUsageView{
-		IsUnlimited:     cycle.IsUnlimitedDocuments,
-		PlanLimit:       cycle.DocumentsLimit,
-		PlanUsed:        cycle.DocumentsUsed,
+		IsUnlimited:     period.IsUnlimitedDocuments,
+		PlanLimit:       period.DocumentsLimit,
+		PlanUsed:        period.DocumentsUsed,
 		BillingCycleID:  cycle.ID,
 		BillingCycleEnd: cycle.PeriodEnd.In(lima()).Format("2006-01-02"),
+		QuotaPeriodID:   period.ID,
+		QuotaPeriodEnd:  period.PeriodEnd.In(lima()).Format("2006-01-02"),
+	}
+	if sub != nil {
+		v.QuotaPeriodIndex = period.PeriodIndex
+		v.QuotaPeriodTotal = TotalQuotaPeriods(sub)
 	}
 	if v.IsUnlimited {
 		v.CanEmit = true
@@ -64,10 +86,15 @@ func warningFromView(v DocumentUsageView) (string, string) {
 		return "none", ""
 	}
 	if !v.CanEmit {
+		if v.QuotaPeriodEnd != "" {
+			return "exhausted", fmt.Sprintf(
+				"Has agotado tus documentos electrónicos de este mes. Tu cupo se renueva el %s; también puedes comprar un paquete adicional o mejorar tu plan.",
+				formatDayMonth(v.QuotaPeriodEnd))
+		}
 		return "exhausted", "Has agotado tus documentos electrónicos. Compra un paquete adicional o mejora tu plan."
 	}
 	if v.TotalAvailable <= 10 {
-		return "low", fmt.Sprintf("Te quedan %d documentos electrónicos en este ciclo.", v.TotalAvailable)
+		return "low", fmt.Sprintf("Te quedan %d documentos electrónicos este mes.", v.TotalAvailable)
 	}
 	if v.UsagePercent >= 90 {
 		return "high", fmt.Sprintf("Has usado el %d%% de tus documentos. Te quedan %d.", v.UsagePercent, v.TotalAvailable)
@@ -85,6 +112,14 @@ func CanEmitElectronicDocument(tenantID uint) error {
 		return nil
 	}
 	return ErrQuotaExceeded
+}
+
+// GuardCountableSunatQuota bloquea crear comprobantes que consumen cupo (01, 03, 07, …) sin documentos disponibles.
+func GuardCountableSunatQuota(tenantID uint, sunatCode string) error {
+	if tenantID == 0 || !IsCountableSunatCode(sunatCode) {
+		return nil
+	}
+	return CanEmitElectronicDocument(tenantID)
 }
 
 // ReserveElectronicDocument consume cupo de forma transaccional e idempotente.
@@ -110,20 +145,26 @@ func ReserveElectronicDocument(in ReserveInput) error {
 		if err != nil {
 			return err
 		}
-		if cycle.IsUnlimitedDocuments {
-			return recordUsageTx(tx, in, cycle, sub, "plan_base", nil)
+		period, err := ensureQuotaPeriodTx(tx, sub, cycle, nowLima())
+		if err != nil {
+			return err
+		}
+		if period.IsUnlimitedDocuments {
+			return recordUsageTx(tx, in, cycle, period, sub, "plan_base", nil)
 		}
 
-		cycle, err = lockCycle(tx, cycle.ID)
+		// El lock va sobre el período (es de donde se descuenta el cupo del plan), no
+		// sobre el ciclo de cobro.
+		period, err = lockQuotaPeriod(tx, period.ID)
 		if err != nil {
 			return err
 		}
 
-		from, pkgID, consumeErr := consumeSlotTx(tx, cycle, in.TenantID)
+		from, pkgID, consumeErr := consumeSlotTx(tx, period, cycle, in.TenantID)
 		if consumeErr != nil {
 			return consumeErr
 		}
-		return recordUsageTx(tx, in, cycle, sub, from, pkgID)
+		return recordUsageTx(tx, in, cycle, period, sub, from, pkgID)
 	})
 }
 
@@ -142,9 +183,16 @@ func currentBillingCycleTx(tx *gorm.DB, tenantID uint) (*database.SaasBillingCyc
 	return &cycle, &sub, nil
 }
 
-func consumeSlotTx(tx *gorm.DB, cycle *database.SaasBillingCycle, tenantID uint) (from string, pkgID *uint, err error) {
-	if cycle.DocumentsUsed < cycle.DocumentsLimit {
-		if err := tx.Model(cycle).Update("documents_used", gorm.Expr("documents_used + 1")).Error; err != nil {
+// consumeSlotTx descuenta primero del cupo mensual del plan y, si está agotado, de los
+// paquetes comprados (que viven en el ciclo de cobro, no en el mes).
+func consumeSlotTx(
+	tx *gorm.DB,
+	period *database.SaasDocumentQuotaPeriod,
+	cycle *database.SaasBillingCycle,
+	tenantID uint,
+) (from string, pkgID *uint, err error) {
+	if period.DocumentsUsed < period.DocumentsLimit {
+		if err := tx.Model(period).Update("documents_used", gorm.Expr("documents_used + 1")).Error; err != nil {
 			return "", nil, err
 		}
 		return "plan_base", nil, nil
@@ -173,7 +221,15 @@ func consumeSlotTx(tx *gorm.DB, cycle *database.SaasBillingCycle, tenantID uint)
 	return "package", &id, nil
 }
 
-func recordUsageTx(tx *gorm.DB, in ReserveInput, cycle *database.SaasBillingCycle, sub *database.SaasSubscription, from string, pkgID *uint) error {
+func recordUsageTx(
+	tx *gorm.DB,
+	in ReserveInput,
+	cycle *database.SaasBillingCycle,
+	period *database.SaasDocumentQuotaPeriod,
+	sub *database.SaasSubscription,
+	from string,
+	pkgID *uint,
+) error {
 	meta := in.MetadataJSON
 	if meta == "" {
 		b, _ := json.Marshal(map[string]interface{}{"source": in.Source})
@@ -183,6 +239,7 @@ func recordUsageTx(tx *gorm.DB, in ReserveInput, cycle *database.SaasBillingCycl
 		TenantID:       in.TenantID,
 		SubscriptionID: sub.ID,
 		BillingCycleID: cycle.ID,
+		QuotaPeriodID:  period.ID,
 		DocumentType:   in.DocumentType,
 		DocumentID:     in.DocumentID,
 		DocumentNumber: in.DocumentNumber,

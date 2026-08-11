@@ -4,6 +4,8 @@
 package tax
 
 import (
+	"strings"
+
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
 
@@ -82,6 +84,40 @@ func IsGravado(igvAffectationType string) bool {
 	}
 }
 
+// IsBonificacionGravada — Catálogo N°07 código 15: bonificación gravada en la misma factura.
+// El cliente no paga el ítem; la base/IGV se informan a SUNAT con valor referencial.
+func IsBonificacionGravada(igvAffectationType string) bool {
+	return strings.TrimSpace(igvAffectationType) == "15"
+}
+
+// IsGravadoOperacionNoOnerosa identifica gravados en operaciones no onerosas (cat. N°07: 11–16).
+// Equivale al bloque calculateTotal() del sistema legacy para retiros/bonificaciones gravadas:
+// el IGV es referencial (TaxSubtotal) y el impuesto cobrable de línea (total_taxes) queda en 0.
+func IsGravadoOperacionNoOnerosa(igvAffectationType string) bool {
+	switch strings.TrimSpace(igvAffectationType) {
+	case "11", "12", "13", "14", "15", "16":
+		return true
+	default:
+		return false
+	}
+}
+
+// LineChargeableTotalImpuestos es el impuesto cobrable de línea → Greenter detail.TotalImpuestos
+// (legacy document_items.total_taxes → InvoiceLine/TaxTotal/cbc:TaxAmount).
+//
+// Legacy calculateTotal para 11–16:
+//
+//	total_taxes = total_value - total_value_partial + ICBPER
+//
+// con total_value_partial = (total_value/qty)*qty → cobrable 0 (+ bolsa plástica si aplica).
+// total_igv referencial no se incluye en total_taxes.
+func LineChargeableTotalImpuestos(igvAffectationType string, referentialIGV, plasticBagTax float64) float64 {
+	if IsGravadoOperacionNoOnerosa(igvAffectationType) {
+		return money.RoundSunat(plasticBagTax)
+	}
+	return money.RoundSunat(referentialIGV + plasticBagTax)
+}
+
 // SunatIgvTypeLabel retorna la descripción del tipo de afectación SUNAT.
 func SunatIgvTypeLabel(code string) string {
 	labels := map[string]string{
@@ -137,4 +173,13 @@ func CalcItem(price, quantity, discount float64, igvAffectationType string, pric
 	taxAmount = money.RoundSunat(taxAmount)
 	total = money.RoundSunat(total)
 	return
+}
+
+// CalcItemPayableTotal importe cobrable al cliente (bonificación gravada 15 → 0).
+func CalcItemPayableTotal(price, quantity, discount float64, igvAffectationType string, priceIncludesIgv bool, taxCfg Config) float64 {
+	if IsBonificacionGravada(igvAffectationType) {
+		return 0
+	}
+	_, _, total := CalcItem(price, quantity, discount, igvAffectationType, priceIncludesIgv, taxCfg)
+	return total
 }

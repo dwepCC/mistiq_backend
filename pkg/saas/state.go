@@ -5,39 +5,53 @@ import (
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/saas/pricing"
 	"tukifac/pkg/tenantcache"
 )
 
 // TenantSubscriptionView estado resumido para tenant UI y middleware.
 type TenantSubscriptionView struct {
-	HasSubscription     bool   `json:"has_subscription"`
-	SubscriptionID      uint   `json:"subscription_id,omitempty"`
-	PlanID              uint   `json:"plan_id,omitempty"`
-	PlanName            string `json:"plan_name"`
-	BillingCycle        string `json:"billing_cycle"`
-	Status              string `json:"status"`
-	TenantStatus        string `json:"tenant_status"`
-	StartDate           string `json:"start_date,omitempty"`
-	EndDate             string `json:"end_date,omitempty"`
-	DaysUntilExpiry     int    `json:"days_until_expiry"`
-	InGracePeriod       bool   `json:"in_grace_period"`
-	IsOverdue           bool   `json:"is_overdue"`
-	IsSuspended         bool   `json:"is_suspended"`
-	IsBlocked           bool   `json:"is_blocked"`
-	StrikeCount         int    `json:"strike_count"`
-	CanSubmitPayment    bool   `json:"can_submit_payment"`
-	ProvisionalUntil    string `json:"provisional_until,omitempty"`
-	PendingAmount       float64 `json:"pending_amount"`
-	ReconnectionFee     float64 `json:"reconnection_fee"`
-	ShowRenewalBanner   bool   `json:"show_renewal_banner"`
-	ShowSuspendedBanner bool   `json:"show_suspended_banner"`
-	CanOperate               bool   `json:"can_operate"`
-	PortalURL                string `json:"portal_url"` // override opcional; vacío = usar /subscription
-	NextBillingDate          string `json:"next_billing_date,omitempty"`
-	PendingInvoiceID         uint   `json:"pending_invoice_id,omitempty"`
-	SupportMessage           string `json:"support_message,omitempty"`
-	HasPendingPaymentReview  bool   `json:"has_pending_payment_review"`
-	ProvisionalHoursLeft     int    `json:"provisional_hours_left"`
+	HasSubscription         bool    `json:"has_subscription"`
+	SubscriptionID          uint    `json:"subscription_id,omitempty"`
+	PlanID                  uint    `json:"plan_id,omitempty"`
+	PlanName                string  `json:"plan_name"`
+	BillingCycle            string  `json:"billing_cycle"`
+	Status                  string  `json:"status"`
+	TenantStatus            string  `json:"tenant_status"`
+	StartDate               string  `json:"start_date,omitempty"`
+	EndDate                 string  `json:"end_date,omitempty"`
+	DaysUntilExpiry         int     `json:"days_until_expiry"`
+	InGracePeriod           bool    `json:"in_grace_period"`
+	IsOverdue               bool    `json:"is_overdue"`
+	IsSuspended             bool    `json:"is_suspended"`
+	IsBlocked               bool    `json:"is_blocked"`
+	StrikeCount             int     `json:"strike_count"`
+	CanSubmitPayment        bool    `json:"can_submit_payment"`
+	ProvisionalUntil        string  `json:"provisional_until,omitempty"`
+	PendingAmount           float64 `json:"pending_amount"`
+	ReconnectionFee         float64 `json:"reconnection_fee"`
+	ShowRenewalBanner       bool    `json:"show_renewal_banner"`
+	ShowSuspendedBanner     bool    `json:"show_suspended_banner"`
+	CanOperate              bool    `json:"can_operate"`
+	PortalURL               string  `json:"portal_url"` // override opcional; vacío = usar /subscription
+	NextBillingDate         string  `json:"next_billing_date,omitempty"`
+	PendingInvoiceID        uint    `json:"pending_invoice_id,omitempty"`
+	SupportMessage          string  `json:"support_message,omitempty"`
+	HasPendingPaymentReview bool    `json:"has_pending_payment_review"`
+	ProvisionalHoursLeft    int     `json:"provisional_hours_left"`
+	// ContractedMonths meses realmente contratados (start_date → end_date). billing_cycle
+	// viene del plan, así que un plan mensual contratado por 3 meses seguía diciendo
+	// «Mensual»; este campo permite mostrar el período que de verdad se pagó.
+	ContractedMonths int `json:"contracted_months"`
+}
+
+// ContractedMonths meses completos entre inicio y fin de la suscripción.
+//
+// Se cuenta por calendario, no por días: de 13/07 a 13/09 son 2 meses aunque sumen 62
+// días. Un resto de días cuenta como mes empezado (13/07 → 15/09 = 3), porque para el
+// usuario ese tramo también está cubierto.
+func ContractedMonths(start, end time.Time) int {
+	return pricing.MonthsBetween(start, end, lima())
 }
 
 // CycleMonthsFromBilling devuelve meses por ciclo.
@@ -54,8 +68,22 @@ func CycleMonthsFromBilling(cycle string) int {
 	}
 }
 
-// GetTenantView calcula estado efectivo desde BD central (fechas en America/Lima).
+// GetTenantView estado efectivo del tenant. Cachea el resultado una ventana breve
+// (tenantViewCacheTTL) para no repetir ~8 consultas a la BD central por cada request ERP.
+// La caché se invalida al instante en cambios vía InvalidateTenantCache.
 func GetTenantView(tenantID uint) (TenantSubscriptionView, error) {
+	if v, ok := getCachedTenantView(tenantID); ok {
+		return v, nil
+	}
+	v, err := computeTenantView(tenantID)
+	if err == nil {
+		setCachedTenantView(tenantID, v)
+	}
+	return v, err
+}
+
+// computeTenantView calcula estado efectivo desde BD central (fechas en America/Lima).
+func computeTenantView(tenantID uint) (TenantSubscriptionView, error) {
 	cfg, _ := LoadSettings()
 	strikeMax := EffectiveStrikeMax(cfg)
 	v := TenantSubscriptionView{
@@ -91,6 +119,7 @@ func GetTenantView(tenantID uint) (TenantSubscriptionView, error) {
 	v.BillingCycle = sub.BillingCycle
 	v.StartDate = sub.StartDate.In(lima()).Format(timeRFC3339Lima)
 	v.EndDate = sub.EndDate.In(lima()).Format(timeRFC3339Lima)
+	v.ContractedMonths = ContractedMonths(sub.StartDate, sub.EndDate)
 
 	now := NowLima()
 	if sub.ProvisionalUntil != nil {
@@ -209,6 +238,7 @@ func ResolveEffectiveStatus(sub *database.SaasSubscription, tenant *database.Ten
 
 // InvalidateTenantCache tras cambios de suscripción/pago.
 func InvalidateTenantCache(tenantID uint) {
+	clearCachedTenantView(tenantID)
 	var t database.Tenant
 	if database.CentralDB.First(&t, tenantID).Error == nil {
 		tenantcache.Invalidate(t.Slug)

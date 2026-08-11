@@ -1,8 +1,6 @@
 package database
 
 import (
-	"fmt"
-
 	"gorm.io/gorm"
 )
 
@@ -45,30 +43,5 @@ func SeedDefaultTenantModules(central *gorm.DB, tenantID uint) error {
 			}).Error
 		}
 	}
-	return nil
-}
-
-// ProvisionTenantDB crea esquema y datos iniciales en la BD del tenant (pasos 2–4).
-func ProvisionTenantDB(dbName string, seed TenantSeedInput) error {
-	if err := CreateTenantDB(dbName); err != nil {
-		return fmt.Errorf("crear BD: %w", err)
-	}
-	RemoveTenantFromPool(dbName)
-	// BD vacía: el backfill multi-sucursal corre después del seed (fleet/legacy), no aquí.
-	if err := provisionMigrateTenantSchema(dbName); err != nil {
-		_ = DropTenantDB(dbName)
-		return fmt.Errorf("migrar esquema: %w", err)
-	}
-	db, err := openTenantDB(dbName)
-	if err != nil {
-		_ = DropTenantDB(dbName)
-		return fmt.Errorf("conectar BD tenant: %w", err)
-	}
-	defer closeDB(db)
-	if err := ProvisionTenantSeed(db, seed); err != nil {
-		_ = DropTenantDB(dbName)
-		return fmt.Errorf("seed tenant: %w", err)
-	}
-	RemoveTenantFromPool(dbName)
 	return nil
 }

@@ -9,7 +9,7 @@ import (
 // V041AutomaticSend añade automatic_send en tenant_company_configs (default true).
 type V041AutomaticSend struct{}
 
-func (V041AutomaticSend) Version() int  { return 41 }
+func (V041AutomaticSend) Version() int { return 41 }
 func (V041AutomaticSend) Name() string { return "automatic_send_column" }
 
 type v041CompanyConfigAutoSend struct {

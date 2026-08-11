@@ -57,12 +57,14 @@ func (s *BillingService) processSendToSUNAT(saleID uint, tenantID uint, tenantSl
 	if err := s.reserveSaleDocument(tenantID, saleID); err != nil {
 		return nil, err
 	}
-	return s.executeFiscalSend(saleID)
+	return s.executeFiscalSend(saleID, source)
 }
 
-func (s *BillingService) executeFiscalSend(saleID uint) (*database.TenantInvoice, error) {
+func (s *BillingService) executeFiscalSend(saleID uint, source FiscalOpSource) (*database.TenantInvoice, error) {
 	var existing database.TenantInvoice
-	if err := s.db.Where("sale_id = ?", saleID).First(&existing).Error; err == nil {
+	// En una reemisión la evidencia de aceptación proviene del envío anterior
+	// (típicamente contra beta) y no debe cortar el reenvío.
+	if err := s.db.Where("sale_id = ?", saleID).First(&existing).Error; err == nil && source != FiscalSourceReissue {
 		if billingstate.HasFinalSunatOutcome(&existing) {
 			if billingstate.HasAcceptanceEvidence(&existing) {
 				return &existing, nil
@@ -210,7 +212,7 @@ func (s *BillingService) EnqueueSendToSUNAT(saleID uint, tenantID uint, tenantSl
 	}
 
 	if !billingqueue.Enabled() {
-		return s.executeFiscalSend(saleID)
+		return s.executeFiscalSend(saleID, source)
 	}
 
 	claimed, err := billingqueue.TryClaimEnqueue(idemKey)
@@ -254,6 +256,10 @@ func (s *BillingService) EnqueueSendToSUNAT(saleID uint, tenantID uint, tenantSl
 		}
 		switch inv.JobStatus {
 		case billingqueue.StatusPending, billingqueue.StatusProcessing, billingqueue.StatusRetrying:
+			// Borrador con payload (NC/ND recién creadas): aún no hay job en Redis.
+			if billingstate.NormalizePipeline(inv.PipelineStatus) == billingstate.DRAFT {
+				break
+			}
 			return nil
 		case billingqueue.StatusSent:
 			if billingstate.HasAcceptanceEvidence(&inv) {
