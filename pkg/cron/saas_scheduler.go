@@ -11,24 +11,7 @@ import (
 	"tukifac/pkg/saas"
 )
 
-const schemaPollInterval = 10 * time.Second
-
-func waitForCentralSchema() {
-	if database.IsCentralSchemaReady() {
-		return
-	}
-	logger.L.Warn("cron_waiting_for_central_schema",
-		slog.Duration("poll", schemaPollInterval),
-	)
-	ticker := time.NewTicker(schemaPollInterval)
-	defer ticker.Stop()
-	for range ticker.C {
-		if database.IsCentralSchemaReady() {
-			logger.L.Info("cron_central_schema_ready")
-			return
-		}
-	}
-}
+// waitForCentralSchema y schemaPollInterval están definidos en expiration.go (mismo paquete).
 
 // StartSaasScheduler: evaluación diaria 00:05 America/Lima + jobs horarios auxiliares.
 func StartSaasScheduler() {

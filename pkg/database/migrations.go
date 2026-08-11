@@ -650,7 +650,7 @@ type TenantCompanyConfig struct {
 	FiscalLastSyncAt       *time.Time `json:"fiscal_last_sync_at"`
 	SunatConnected         bool       `gorm:"default:false" json:"sunat_connected"`
 	AutomaticSend          bool       `gorm:"default:true" json:"automatic_send"`
-	ColorTheme             string     `gorm:"size:30;default:'green'" json:"color_theme"`
+	ColorTheme             string     `gorm:"size:30;default:'blue'" json:"color_theme"`
 	AdditionalNotes        string     `gorm:"type:text" json:"additional_notes"`
 	TermsAndConditions     string     `gorm:"type:text" json:"terms_and_conditions"`
 	// Preferencia global: incluir términos en comprobantes/NV/cotizaciones nuevas.

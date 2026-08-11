@@ -22,6 +22,15 @@ type ThemeData struct {
 }
 
 var themes = map[string]ThemeData{
+	// Paleta corporativa Mistiq original (navy/teal). Tema por defecto.
+	"blue": {
+		Key: "blue", Label: "Azul corporativo (Mistiq)", Preview: "#023047",
+		SidebarBg: "#023047", NavActive: "#219ebc",
+		C50: "#edf8fc", C100: "#e0f3fa", C200: "#c6e9f6",
+		C300: "#8ecae6", C400: "#58b9d2", C500: "#219ebc",
+		C600: "#1b829a", C700: "#105f76", C800: "#064460",
+		C900: "#023047", C950: "#011a28",
+	},
 	"green": {
 		Key: "green", Label: "Verde corporativo", Preview: "#16a34a",
 		SidebarBg: "#14532d", NavActive: "#16a34a",
@@ -29,14 +38,6 @@ var themes = map[string]ThemeData{
 		C300: "#86efac", C400: "#4ade80", C500: "#22c55e",
 		C600: "#16a34a", C700: "#15803d", C800: "#166534",
 		C900: "#14532d", C950: "#052e16",
-	},
-	"blue": {
-		Key: "blue", Label: "Azul corporativo", Preview: "#2563eb",
-		SidebarBg: "#172554", NavActive: "#2563eb",
-		C50: "#eff6ff", C100: "#dbeafe", C200: "#bfdbfe",
-		C300: "#93c5fd", C400: "#60a5fa", C500: "#3b82f6",
-		C600: "#2563eb", C700: "#1d4ed8", C800: "#1e40af",
-		C900: "#1e3a8a", C950: "#172554",
 	},
 	"violet": {
 		Key: "violet", Label: "Violeta", Preview: "#7c3aed",
@@ -96,17 +97,17 @@ var themes = map[string]ThemeData{
 	},
 }
 
-// GetTheme retorna el tema por clave; si no existe, retorna verde corporativo por defecto.
+// GetTheme retorna el tema por clave; si no existe, retorna el azul corporativo Mistiq por defecto.
 func GetTheme(key string) ThemeData {
 	if t, ok := themes[key]; ok {
 		return t
 	}
-	return themes["green"]
+	return themes["blue"]
 }
 
 // AllThemes retorna todos los temas disponibles en orden para la UI.
 func AllThemes() []ThemeData {
-	keys := []string{"green", "blue", "violet", "emerald", "rose", "orange", "teal", "sky", "slate"}
+	keys := []string{"blue", "green", "violet", "emerald", "rose", "orange", "teal", "sky", "slate"}
 	result := make([]ThemeData, 0, len(keys))
 	for _, k := range keys {
 		result = append(result, themes[k])
