@@ -2,14 +2,14 @@
 # Deploy completo en VPS: pull → migrate-central → restart → health
 # Uso:
 #   ./deploy/scripts/deploy.sh
-#   TUKIFAC_IMAGE=ghcr.io/org/repo:abc123 ./deploy/scripts/deploy.sh
+#   MISTIQ_IMAGE=ghcr.io/org/repo:abc123 ./deploy/scripts/deploy.sh
 #   SKIP_MIGRATE=1 ./deploy/scripts/deploy.sh
 set -euo pipefail
 
-BASE_DIR="${TUKIFAC_BASE:-/opt/tukifac}"
+BASE_DIR="${TUKIFAC_BASE:-/opt/mistiq}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
 ENV_FILE="${ENV_FILE:-.env}"
-CONTAINER="${TUKIFAC_CONTAINER:-tukifac-backend-go}"
+CONTAINER="${TUKIFAC_CONTAINER:-mistiq-backend-go}"
 SKIP_MIGRATE="${SKIP_MIGRATE:-0}"
 SKIP_PULL="${SKIP_PULL:-0}"
 
@@ -30,17 +30,17 @@ if [[ ! -f "${COMPOSE_FILE}" ]]; then
 fi
 
 # Imagen explícita (CI) o la definida en .env
-if [[ -n "${TUKIFAC_IMAGE:-}" ]]; then
-  if grep -q '^TUKIFAC_IMAGE=' "${ENV_FILE}"; then
-    sed -i "s|^TUKIFAC_IMAGE=.*|TUKIFAC_IMAGE=${TUKIFAC_IMAGE}|" "${ENV_FILE}"
+if [[ -n "${MISTIQ_IMAGE:-}" ]]; then
+  if grep -q '^MISTIQ_IMAGE=' "${ENV_FILE}"; then
+    sed -i "s|^MISTIQ_IMAGE=.*|MISTIQ_IMAGE=${MISTIQ_IMAGE}|" "${ENV_FILE}"
   else
-    echo "TUKIFAC_IMAGE=${TUKIFAC_IMAGE}" >> "${ENV_FILE}"
+    echo "MISTIQ_IMAGE=${MISTIQ_IMAGE}" >> "${ENV_FILE}"
   fi
 fi
 
-CURRENT_IMAGE="$(grep -E '^TUKIFAC_IMAGE=' "${ENV_FILE}" | cut -d= -f2- | tr -d '\r\n')"
+CURRENT_IMAGE="$(grep -E '^MISTIQ_IMAGE=' "${ENV_FILE}" | cut -d= -f2- | tr -d '\r\n')"
 if [[ -z "${CURRENT_IMAGE}" ]]; then
-  echo "ERROR: TUKIFAC_IMAGE no definido en ${ENV_FILE}"
+  echo "ERROR: MISTIQ_IMAGE no definido en ${ENV_FILE}"
   exit 1
 fi
 

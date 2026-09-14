@@ -2,9 +2,9 @@
 # Migración BD central solamente (post-deploy). Fleet de tenants: migrate-fleet.sh
 set -euo pipefail
 
-BASE_DIR="${TUKIFAC_BASE:-/opt/tukifac}"
+BASE_DIR="${TUKIFAC_BASE:-/opt/mistiq}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
-CONTAINER="${TUKIFAC_CONTAINER:-tukifac-backend-go}"
+CONTAINER="${TUKIFAC_CONTAINER:-mistiq-backend-go}"
 CMD="${MIGRATE_CMD:-migrate-central}"
 
 cd "${BASE_DIR}"

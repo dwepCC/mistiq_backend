@@ -2,9 +2,9 @@
 # Bootstrap tenant_schema_versions V30 (ejecutar UNA vez por entorno).
 set -euo pipefail
 
-BASE_DIR="${TUKIFAC_BASE:-/opt/tukifac}"
+BASE_DIR="${TUKIFAC_BASE:-/opt/mistiq}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
-CONTAINER="${TUKIFAC_CONTAINER:-tukifac-backend-go}"
+CONTAINER="${TUKIFAC_CONTAINER:-mistiq-backend-go}"
 
 cd "${BASE_DIR}"
 
