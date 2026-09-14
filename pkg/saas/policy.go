@@ -67,7 +67,24 @@ func ApplyStrikeOnReject(tx *gorm.DB, tenantID uint, subID *uint, reviewerID *ui
 	updates := map[string]interface{}{"strike_count": strikeCount}
 	blocked = false
 
+	// Si la suscripción sigue dentro de su ventana natural por calendario (grace_period_days
+	// configurado en la central), un comprobante rechazado no debe tumbarla — para eso existe
+	// la tolerancia. El strike se cuenta igual (control de abuso: acumular varios rechazos
+	// eventualmente bloquea, ver abajo), solo no se fuerza `suspended` mientras el calendario
+	// todavía la sostenga. Fuera de gracia, el comportamiento es el de siempre: suspende.
+	forceSuspend := true
+	if subID != nil {
+		var sub database.SaasSubscription
+		if err := tx.First(&sub, *subID).Error; err == nil {
+			daysAfter := CalendarDaysAfterEnd(sub.EndDate, NowLima())
+			withinGrace := daysAfter <= 0 || (cfg.GracePeriodDays > 0 && daysAfter <= cfg.GracePeriodDays)
+			forceSuspend = !withinGrace
+		}
+	}
+
 	if strikeCount >= maxStrike {
+		// Reincidencia (varios comprobantes inválidos): señal de abuso, no de mora. Bloquea
+		// igual aunque el calendario todavía ayude — es una medida distinta a "está vencido".
 		updates["status"] = database.TenantStatusBlocked
 		updates["payment_blocked"] = true
 		blocked = true
@@ -78,7 +95,7 @@ func ApplyStrikeOnReject(tx *gorm.DB, tenantID uint, subID *uint, reviewerID *ui
 		}
 		LogEventTx(tx, tenantID, subID, EventTenantBlocked, "admin", reviewerID, reason,
 			fmt.Sprintf(`{"strike_count":%d}`, strikeCount))
-	} else {
+	} else if forceSuspend {
 		updates["status"] = database.TenantStatusSuspended
 		if subID != nil {
 			_ = tx.Model(&database.SaasSubscription{}).Where("id = ?", *subID).Updates(map[string]interface{}{
@@ -86,6 +103,17 @@ func ApplyStrikeOnReject(tx *gorm.DB, tenantID uint, subID *uint, reviewerID *ui
 			}).Error
 		}
 		LogEventTx(tx, tenantID, subID, EventPaymentRejected, "admin", reviewerID, reason,
+			fmt.Sprintf(`{"strike_count":%d}`, strikeCount))
+	} else {
+		// Dentro de gracia: no se toca tenant.status ni sub.status (el cálculo en vivo de
+		// ResolveEffectiveStatus ya los resuelve como active/grace_period desde EndDate). Solo
+		// se retira el provisional que este pago pudo haber otorgado — no aplica más, ya se
+		// rechazó — para no dejarlo con una fecha de "provisional hasta" fantasma.
+		if subID != nil {
+			_ = tx.Model(&database.SaasSubscription{}).Where("id = ?", *subID).Update("provisional_until", nil).Error
+		}
+		LogEventTx(tx, tenantID, subID, EventPaymentRejected, "admin", reviewerID,
+			reason+" (dentro de gracia: suscripción se mantiene activa)",
 			fmt.Sprintf(`{"strike_count":%d}`, strikeCount))
 	}
 	if err := tx.Model(&tenant).Updates(updates).Error; err != nil {

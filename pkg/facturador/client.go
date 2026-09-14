@@ -268,6 +268,7 @@ type InvoicePayload struct {
 	MtoOperGravadas float64            `json:"mtoOperGravadas"`
 	MtoOperExoneradas float64         `json:"mtoOperExoneradas,omitempty"` // Total operaciones exoneradas (Cat.07 = 20). Obligatorio si hay líneas exoneradas.
 	MtoOperInafectas float64           `json:"mtoOperInafectas,omitempty"`  // Total operaciones inafectas (Cat.07 = 30). Obligatorio si hay líneas inafectas.
+	MtoOperExportacion float64        `json:"mtoOperExportacion,omitempty"` // Total operaciones de exportación (Cat.07 = 40). Sin IGV; Greenter emite TaxSubtotal tributo 9995/EXP.
 	MtoOperGratuitas float64           `json:"mtoOperGratuitas,omitempty"`  // Operaciones gratuitas (bonificación 15, etc.).
 	MtoIGVGratuitas  float64           `json:"mtoIGVGratuitas,omitempty"`
 	MtoIGV          float64            `json:"mtoIGV"`
@@ -370,6 +371,21 @@ type InvoiceDetail struct {
 	MtoPrecioUnitario float64 `json:"mtoPrecioUnitario"`
 	MtoValorGratuito  float64 `json:"mtoValorGratuito,omitempty"`
 	Descuentos      []InvoiceCharge `json:"descuentos,omitempty"`
+	// Atributos → cac:Item/cac:AdditionalItemProperty (Catálogo N° 55 SUNAT). Único uso hoy:
+	// detracción por transporte de carga (1004), ver internal/detraccion.ApplyToInvoicePayload.
+	Atributos []DetailAttribute `json:"atributos,omitempty"`
+}
+
+// DetailAttribute → Greenter\Model\Sale\DetailAttribute (cac:AdditionalItemProperty). Value es
+// texto simple (cbc:Value); FecInicio/FecFin/Duracion son para los códigos de catálogo 55 que se
+// declaran como fecha/duración en vez de valor (no usados por 1004, que siempre va por Value).
+type DetailAttribute struct {
+	Code       string     `json:"code"`
+	Name       string     `json:"name"`
+	Value      string     `json:"value,omitempty"`
+	FecInicio  *time.Time `json:"fecInicio,omitempty"`
+	FecFin     *time.Time `json:"fecFin,omitempty"`
+	Duracion   int        `json:"duracion,omitempty"`
 }
 
 type InvoiceLegend struct {
@@ -405,6 +421,7 @@ type NotePayload struct {
 	MtoOperGravadas float64            `json:"mtoOperGravadas"`
 	MtoOperExoneradas float64          `json:"mtoOperExoneradas,omitempty"`
 	MtoOperInafectas float64           `json:"mtoOperInafectas,omitempty"`
+	MtoOperExportacion float64        `json:"mtoOperExportacion,omitempty"`
 	MtoOperGratuitas float64           `json:"mtoOperGratuitas,omitempty"`
 	MtoIGVGratuitas  float64           `json:"mtoIGVGratuitas,omitempty"`
 	MtoIGV          float64            `json:"mtoIGV"`

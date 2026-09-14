@@ -4,6 +4,7 @@ import (
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
 	"tukifac/pkg/paymentcondition"
+	"tukifac/pkg/salescope"
 	"tukifac/pkg/taxpayment"
 )
 
@@ -52,8 +53,21 @@ func SaleBalance(sale database.TenantSale, det *database.TenantSaleDetraccion, p
 }
 
 // HasOpenReceivable indica si la venta tiene saldo directo o SPOT BN pendiente.
+//
+// Una nota de crédito/débito (tenant_sales.doc_type IN NOTA_CREDITO/NOTA_DEBITO) NUNCA es una
+// cuenta por cobrar: se crea con Status="paid" y Total>0 (ver CreateCreditNoteAndVoidSale), pero
+// ese "Total" es el monto que la nota ANULA/AJUSTA de otra venta — no dinero que el cliente le
+// deba al negocio. Sin esta exclusión, una NC recién creada (paid, sin TenantSalePayment) calcula
+// directDue == su Total completo y queda como cobrable, permitiendo cobrarla por
+// ReceivableService.Collect() como si fuera una venta real — el bug reportado: "Cobro
+// FC01-00000001" apareciendo como ingreso en Cuentas Bancarias por el total de una nota de
+// crédito. Mismo criterio que ya usa el arqueo de Caja (ver listOrphanSalesForSession,
+// pkg/salescope/notes.go) — antes solo aplicado ahí, nunca a Cuentas por Cobrar.
 func HasOpenReceivable(sale database.TenantSale, det *database.TenantSaleDetraccion, payments []database.TenantSalePayment) bool {
 	if sale.Status == "cancelled" {
+		return false
+	}
+	if salescope.IsNoteDocType(sale.DocType) {
 		return false
 	}
 	_, _, directDue, _, spotPending, bnStatus := SaleBalance(sale, det, payments)

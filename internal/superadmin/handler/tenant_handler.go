@@ -34,7 +34,7 @@ func NewTenantHandler() *TenantHandler {
 	return &TenantHandler{svc: service.NewTenantService()}
 }
 
-// GET /api/superadmin/tenants?q=&status=&region_id=&provincia_id=&page=&per_page=
+// GET /api/superadmin/tenants?q=&status=&region_id=&provincia_id=&created_from=&created_to=&page=&per_page=
 func (h *TenantHandler) ListAPI(c fiber.Ctx) error {
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	perPage, _ := strconv.Atoi(c.Query("per_page", "25"))
@@ -45,6 +45,9 @@ func (h *TenantHandler) ListAPI(c fiber.Ctx) error {
 		Status:      c.Query("status"),
 		RegionID:    c.Query("region_id"),
 		ProvinciaID: c.Query("provincia_id"),
+		// Fecha de activación (= created_at, ver TenantListParams).
+		CreatedFrom: c.Query("created_from"),
+		CreatedTo:   c.Query("created_to"),
 		Page:        page,
 		PerPage:     perPage,
 	})
@@ -117,7 +120,13 @@ func (h *TenantHandler) CreateAPI(c fiber.Ctx) error {
 	})
 }
 
-// POST /api/superadmin/tenants/:id/destroy-complete — elimina tenant, BD y archivos (requiere clave de operaciones).
+// POST /api/superadmin/tenants/:id/destroy-complete — elimina tenant, BD y archivos (requiere
+// clave de operaciones).
+//
+// Protección en 3 capas, tal como se aprobó: (1) autenticación — middleware.SuperAdminAuthAPI();
+// (2) Role=="superadmin" exacto — middleware.RequireSuperAdminOnly() en la ruta, NUNCA un permiso
+// otorgable (empresas.destroy no existe en el catálogo); (3) operations_key válida — dentro de
+// DestroyTenantComplete. Las tres capas son necesarias; ninguna reemplaza a las otras.
 func (h *TenantHandler) DestroyCompleteAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
@@ -135,6 +144,25 @@ func (h *TenantHandler) DestroyCompleteAPI(c fiber.Ctx) error {
 		}
 		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	// Auditoría de la operación más destructiva del sistema — nunca se registra operations_key.
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	database.WriteAuditLog(&database.AuditLog{
+		TenantID: res.TenantID,
+		UserID:   saUserID,
+		Action:   "tenant_destroy_complete",
+		Entity:   "tenant",
+		EntityID: res.TenantID,
+		Payload: saas.MetaJSON(fiber.Map{
+			"slug":           res.Slug,
+			"db_dropped":     res.DBDropped,
+			"central_purged": res.CentralPurged,
+			"paths_removed":  len(res.PathsRemoved),
+			"file_errors":    len(res.FileErrors),
+		}),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "Tenant eliminado por completo (facturador SUNAT/Lycet no modificado)",
@@ -159,10 +187,14 @@ func (h *TenantHandler) UpdateAPI(c fiber.Ctx) error {
 }
 
 // POST /api/superadmin/tenants/:id/master-access — acceso maestro al ERP web del tenant.
+//
+// Autorización: middleware.RequireSAPermission("empresas.master_access") en la ruta — ya NO es
+// superadmin-only hardcodeado (antes de la Fase 5 lo era). empresas.master_access es un permiso
+// real y otorgable del catálogo (Fase 1): un rol como Admin puede tenerlo asignado. superadmin
+// real sigue teniendo bypass total vía el propio RequireSAPermission. Ningún otro permiso
+// (empresas.update, ni ningún ".manage") implica este — no hay expansión automática posible
+// porque el módulo "empresas" no tiene ".manage" en el catálogo.
 func (h *TenantHandler) MasterAccessAPI(c fiber.Ctx) error {
-	if err := saRequireSuperAdminRole(c); err != nil {
-		return err
-	}
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
@@ -192,9 +224,26 @@ func (h *TenantHandler) ToggleStatusAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
 
+	previous, _ := h.svc.GetByID(uint(id))
 	if err := h.svc.SetStatus(uint(id), body.Status); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	oldStatus := ""
+	if previous != nil {
+		oldStatus = previous.Status
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		TenantID:  uint(id),
+		UserID:    saUserID,
+		Action:    "tenant_status_changed",
+		Entity:    "tenant",
+		EntityID:  uint(id),
+		Payload:   saas.MetaJSON(fiber.Map{"from": oldStatus, "to": body.Status}),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -1255,9 +1304,22 @@ func (h *TenantHandler) RunBackfillAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	if err := h.svc.RunBackfill(uint(id), backfillVersionFromQuery(c)); err != nil {
+	version := backfillVersionFromQuery(c)
+	if err := h.svc.RunBackfill(uint(id), version); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	database.WriteAuditLog(&database.AuditLog{
+		TenantID:  uint(id),
+		UserID:    saUserID,
+		Action:    "migration.backfill",
+		Entity:    "tenant",
+		EntityID:  uint(id),
+		Payload:   fmt.Sprintf(`{"version":%d}`, version),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true, "message": "Backfill ejecutado"})
 }
 

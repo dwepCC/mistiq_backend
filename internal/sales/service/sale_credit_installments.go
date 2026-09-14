@@ -68,7 +68,12 @@ func parseInstallmentDueDate(raw string, loc *time.Location) (time.Time, error) 
 	return time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, loc), nil
 }
 
-func validateCreditInstallments(installments []CreditInstallmentInput, creditTarget float64, currency string, loc *time.Location) ([]database.TenantSaleCreditInstallment, *time.Time, error) {
+// issueDate se usa para exigir que cada cuota venza estrictamente después de la fecha de
+// emisión — SUNAT rechaza el comprobante (código 3267 "Fecha del pago único o de las cuotas
+// no puede ser anterior o igual a la fecha de emisión") si alguna cuota queda igual o antes.
+// Bug reportado: se pudo emitir F001-75 con la única cuota en la misma fecha que la emisión
+// (ambas 2026-08-31) porque nada validaba esta relación — ni el frontend ni el backend.
+func validateCreditInstallments(installments []CreditInstallmentInput, creditTarget float64, currency string, loc *time.Location, issueDate time.Time) ([]database.TenantSaleCreditInstallment, *time.Time, error) {
 	if creditTarget <= 0.009 {
 		return nil, nil, errors.New("el monto a crédito debe ser mayor a cero")
 	}
@@ -85,6 +90,12 @@ func validateCreditInstallments(installments []CreditInstallmentInput, creditTar
 		due, err := parseInstallmentDueDate(inst.DueDate, loc)
 		if err != nil {
 			return nil, nil, fmt.Errorf("cuota %d: %w", i+1, err)
+		}
+		if !issueDate.IsZero() && !due.After(issueDate) {
+			return nil, nil, fmt.Errorf(
+				"cuota %d: la fecha de pago (%s) debe ser posterior a la fecha de emisión (%s)",
+				i+1, due.Format("02/01/2006"), issueDate.Format("02/01/2006"),
+			)
 		}
 		amt := money.RoundDisplay(inst.Amount)
 		if amt <= 0 {

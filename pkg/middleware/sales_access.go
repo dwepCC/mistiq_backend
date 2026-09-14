@@ -10,13 +10,19 @@ func salesTenantPerm(action string) string {
 	switch action {
 	case "create":
 		return "sales.create"
+	case "cancel":
+		// Anular venta y aplicar devoluciones pendientes de esa anulación: mismo permiso,
+		// nunca se validaba en el backend (ver POST /sales/:id/cancel y
+		// /sales/pending-refunds[/apply-note] en internal/sales/routes.go) pese a que el
+		// catálogo ya lo define y el frontend ya lo usaba para esconder el botón.
+		return "sales.cancel"
 	default:
 		return "sales.view"
 	}
 }
 
-// RequireSalesAccess permite ventas vía permisos tenant (sales.view / sales.create)
-// o staff restaurante (cobro o.c, ver caja c.v para consulta).
+// RequireSalesAccess permite ventas vía permisos tenant (sales.view / sales.create / sales.cancel)
+// o staff restaurante (cobro o.ch, anular o.cx, ver caja c.v para consulta).
 // Usar después de RequireModule("sales") y LoadRestaurantPermissions().
 func RequireSalesAccess(action string) fiber.Handler {
 	tenantPerm := salesTenantPerm(action)
@@ -29,12 +35,19 @@ func RequireSalesAccess(action string) fiber.Handler {
 			return c.Next()
 		}
 		if claims.AuthMethod == "pin" || claims.EmployeeType != "" {
-			if action == "view" {
+			switch action {
+			case "view":
 				if HasRestaurantPerm(c, restaurantperm.OrdersCharge) || HasRestaurantPerm(c, restaurantperm.CashView) {
 					return c.Next()
 				}
-			} else if HasRestaurantPerm(c, restaurantperm.OrdersCharge) {
-				return c.Next()
+			case "cancel":
+				if HasRestaurantPerm(c, restaurantperm.OrdersCancel) {
+					return c.Next()
+				}
+			default:
+				if HasRestaurantPerm(c, restaurantperm.OrdersCharge) {
+					return c.Next()
+				}
 			}
 			if claims.RoleName == "Administrador" {
 				return c.Next()

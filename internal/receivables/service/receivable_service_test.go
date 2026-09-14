@@ -89,6 +89,90 @@ func TestReceivableService_ConfirmBN(t *testing.T) {
 	}
 }
 
+// Bug reportado: una nota de crédito ("FC01-00000001") aparecía como "Cobro FC01-00000001" en
+// Cuentas Bancarias, sumando al saldo como si fuera un ingreso real. Causa raíz: una nota de
+// crédito nace con Status="paid" y Total>0 (ver billing/service CreateCreditNoteAndVoidSale) pero
+// sin ningún TenantSalePayment — antes de este fix, HasOpenReceivable la veía como "cobrable" por
+// el total completo, exactamente igual que una venta real.
+func TestHasOpenReceivable_ExcludesCreditAndDebitNotes(t *testing.T) {
+	creditNote := database.TenantSale{DocType: "NOTA_CREDITO", Status: "paid", Total: 65}
+	if HasOpenReceivable(creditNote, nil, nil) {
+		t.Fatal("una nota de crédito nunca debe ser una cuenta por cobrar, sin importar su Status/Total")
+	}
+	debitNote := database.TenantSale{DocType: "NOTA_DEBITO", Status: "paid", Total: 30}
+	if HasOpenReceivable(debitNote, nil, nil) {
+		t.Fatal("una nota de débito nunca debe ser una cuenta por cobrar")
+	}
+	// Control: una FACTURA real con las mismas condiciones (paid, sin pagos registrados) sigue
+	// evaluándose igual que antes — este fix no debe tocar el caso normal.
+	realSale := database.TenantSale{DocType: "FACTURA", Status: "credit", Total: 1090}
+	if !HasOpenReceivable(realSale, nil, nil) {
+		t.Fatal("una factura real con saldo pendiente debe seguir siendo una cuenta por cobrar")
+	}
+}
+
+func TestReceivableService_List_ExcludesCreditNotes(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:recv_notes?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&database.TenantSale{}, &database.TenantSaleDetraccion{},
+		&database.TenantSalePayment{}, &database.TenantSaleCreditInstallment{}, &database.TenantContact{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	realSale := database.TenantSale{Number: "F001-00000001", DocType: "FACTURA", Status: "credit", Total: 1090}
+	if err := db.Create(&realSale).Error; err != nil {
+		t.Fatal(err)
+	}
+	creditNote := database.TenantSale{Number: "FC01-00000001", DocType: "NOTA_CREDITO", Status: "paid", Total: 65}
+	if err := db.Create(&creditNote).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewReceivableService(db)
+	rows, total, err := svc.List(ListFilter{Status: "all", Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1 (solo la factura real; la nota de crédito no es cobrable)", total)
+	}
+	for _, r := range rows {
+		if r.SaleID == creditNote.ID {
+			t.Fatalf("la nota de crédito no debió aparecer en la lista de cuentas por cobrar: %+v", r)
+		}
+	}
+}
+
+func TestReceivableService_Collect_RejectsCreditNote(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:recv_collect_note?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&database.TenantSale{}, &database.TenantSaleDetraccion{}, &database.TenantSalePayment{}); err != nil {
+		t.Fatal(err)
+	}
+	creditNote := database.TenantSale{Number: "FC01-00000001", DocType: "NOTA_CREDITO", Status: "paid", Total: 65}
+	if err := db.Create(&creditNote).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewReceivableService(db)
+	err = svc.Collect(creditNote.ID, CollectPaymentInput{
+		Payments: []salessvc.PaymentInput{{Method: "transferencia", Amount: 65}},
+	})
+	if err == nil {
+		t.Fatal("cobrar una nota de crédito debería rechazarse")
+	}
+	var count int64
+	db.Model(&database.TenantSalePayment{}).Where("sale_id = ?", creditNote.ID).Count(&count)
+	if count != 0 {
+		t.Fatal("no debió crearse ningún pago para la nota de crédito")
+	}
+}
+
 func detractionEval1180(t *testing.T) sunatdet.CalcResult {
 	t.Helper()
 	cat, err := sunatdet.DefaultCatalog()

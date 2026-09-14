@@ -64,6 +64,7 @@ type UpdateSettingsInput struct {
 	FontFamily     *string
 	CardStyle      *string
 	CategoryStyle  *string
+	ShowStock      *bool
 }
 
 func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.TenantEcommerceSettings, error) {
@@ -107,6 +108,9 @@ func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.
 	}
 	if input.CategoryStyle != nil {
 		upd["category_style"] = strings.TrimSpace(*input.CategoryStyle)
+	}
+	if input.ShowStock != nil {
+		upd["show_stock"] = *input.ShowStock
 	}
 	if len(upd) > 0 {
 		if err := s.db.Model(&database.TenantEcommerceSettings{}).Where("id = ?", 1).Updates(upd).Error; err != nil {
@@ -246,8 +250,10 @@ func (s *EcommerceService) PublicCategories() ([]PublicCategory, error) {
 }
 
 // PublicProducts reusa ProductService.ListReport (ya trae stock_total/stock_by_branch) filtrando
-// solo lo publicado en el Catálogo Digital.
-func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPrice, maxPrice *float64, page, perPage int) ([]productservice.ProductReportItem, int64, error) {
+// solo lo publicado en el Catálogo Digital. Cuando showStock=false (Módulos → Tienda Virtual →
+// General → "Mostrar stock") el stock/disponibilidad se despoja de la respuesta pública: no basta
+// con ocultarlo solo en el frontend, esto viaja sin autenticación.
+func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPrice, maxPrice *float64, page, perPage int, showStock bool) ([]productservice.ProductReportItem, int64, error) {
 	psvc := productservice.NewProductService(s.db)
 	params := productservice.ProductListParams{
 		Query:                    query,
@@ -265,7 +271,22 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 		params.Limit = perPage
 		params.Offset = (page - 1) * perPage
 	}
-	return psvc.ListReport(params)
+	items, total, err := psvc.ListReport(params)
+	if err != nil {
+		return items, total, err
+	}
+	for i := range items {
+		// PurchasePrice (costo/precio de compra) es dato interno del tenant: nunca debe viajar en
+		// esta respuesta pública sin autenticación, sin importar la config de "Mostrar stock".
+		items[i].PurchasePrice = 0
+		if !showStock {
+			items[i].StockTotal = 0
+			items[i].StockByBranch = nil
+			items[i].Serials = nil
+			items[i].SerialCount = 0
+		}
+	}
+	return items, total, nil
 }
 
 // ── Pedidos ──────────────────────────────────────────────────────────
@@ -295,6 +316,15 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 	}
 	total := 0.0
 	for _, it := range input.Items {
+		// Precio real obligatorio: si no se corrige aquí, el pedido se guarda igual y el error
+		// solo aparece tarde, al convertirlo a venta (SaleService.Create lo rechaza).
+		if !(it.UnitPrice > 0) {
+			label := strings.TrimSpace(it.Name)
+			if label == "" {
+				label = "un producto del pedido"
+			}
+			return nil, fmt.Errorf("'%s' no tiene un precio de venta válido (S/ 0.00)", label)
+		}
 		total += it.Quantity * it.UnitPrice
 	}
 	itemsJSON, err := json.Marshal(input.Items)

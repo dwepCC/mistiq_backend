@@ -162,6 +162,44 @@ func (s *SeriesUsageService) countModel(model interface{}, where string, args []
 	return 0, table, "", nil
 }
 
+// HasRealFiscalUsage es como IsSeriesInUse pero, para categorías venta/nota_credito/
+// nota_debito, EXCLUYE ventas cuyo billing_status es 'rejected'. Un documento rechazado por
+// SUNAT nunca llegó a existir para SUNAT (p. ej. el PSE rechaza el nombre del ZIP antes de
+// siquiera validar el comprobante) — no hay continuidad fiscal real que proteger, así que no
+// debe bloquear corregir el código de una serie mal configurada. Se usa para permitir editar
+// (UpdateSeries), no para borrar (DeleteSeries sigue usando IsSeriesInUse sin este matiz: un
+// series_id huérfano en tenant_sales es un riesgo aparte, aunque la fila sea rechazada).
+func (s *SeriesUsageService) HasRealFiscalUsage(seriesID uint) (bool, SeriesUsageInfo, error) {
+	var row database.TenantDocumentSeries
+	if err := s.db.First(&row, seriesID).Error; err != nil {
+		return false, SeriesUsageInfo{}, err
+	}
+	cat := normalizeSeriesCategory(row.Category)
+	if cat != "venta" && cat != "nota_credito" && cat != "nota_debito" {
+		return s.IsSeriesInUse(seriesID)
+	}
+
+	where := "series_id = ? AND (billing_status IS NULL OR billing_status != ?)"
+	args := []interface{}{row.ID, "rejected"}
+	if cat != "venta" {
+		docType := "NOTA_CREDITO"
+		if cat == "nota_debito" {
+			docType = "NOTA_DEBITO"
+		}
+		where += " AND UPPER(TRIM(doc_type)) = ?"
+		args = append(args, docType)
+	}
+	var n int64
+	if err := s.db.Model(&database.TenantSale{}).Where(where, args...).Count(&n).Error; err != nil {
+		return false, SeriesUsageInfo{}, err
+	}
+	if n == 0 {
+		return false, SeriesUsageInfo{}, nil
+	}
+	info, err := s.usageForSeries(&row)
+	return true, info, err
+}
+
 // LockMessageWhenInUse devuelve el mensaje de error para operaciones bloqueadas.
 func LockMessageWhenInUse(info SeriesUsageInfo) string {
 	if strings.TrimSpace(info.Reason) != "" {

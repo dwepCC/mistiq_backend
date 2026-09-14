@@ -94,7 +94,7 @@ func ApplyToInvoicePayload(payload *facturador.InvoicePayload, e *InvoiceEnrichm
 	if code := strings.TrimSpace(e.TipoOperacion); code != "" {
 		payload.TipoOperacion = code
 	}
-	if obs := strings.TrimSpace(e.Observacion); obs != "" {
+	if obs := facturador.SanitizeFreeText(e.Observacion); obs != "" {
 		payload.Observacion = obs
 	}
 	if compra := strings.TrimSpace(e.Compra); compra != "" {

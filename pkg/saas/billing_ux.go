@@ -92,6 +92,13 @@ func BuildBillingContext(sub TenantSubscriptionView, cfg PlatformSettings, tenan
 	return out
 }
 
+// billingDebtApplies decide si hay deuda real que mostrar como urgente. El estado real del
+// ciclo manda, NUNCA la cercanía del vencimiento: un ciclo 'pending' es deuda por cobrar exista
+// hoy o dentro de 140 días — antes esto se ocultaba si faltaban más días que el mayor
+// reminder_days configurado, y el panel del tenant mostraba "al día" con una deuda real detrás
+// (el caso que lo motivó: un tenant recién dado de alta, sin pagar, con vencimiento a 4+ meses).
+// 'pending_review' NO cuenta como deuda urgente: ya hay un comprobante esperando aprobación
+// (ver resolvePaymentUX, rama "review", que toma precedencia sobre esto de todos modos).
 func billingDebtApplies(cycle *database.SaasBillingCycle, sub TenantSubscriptionView, cfg PlatformSettings) bool {
 	if sub.IsBlocked {
 		return sub.PendingAmount > 0
@@ -102,23 +109,7 @@ func billingDebtApplies(cycle *database.SaasBillingCycle, sub TenantSubscription
 	if cycle == nil {
 		return false
 	}
-	if cycle.Status == database.SaasInvoiceOverdue {
-		return true
-	}
-	if cycle.Status != database.SaasInvoicePending {
-		return false
-	}
-	now := NowLima()
-	due := cycle.DueDate.In(lima())
-	daysUntilDue := calendarDaysBetween(now, due)
-	if daysUntilDue <= 0 {
-		return true
-	}
-	maxRem := MaxReminderDay(cfg.ReminderDays)
-	if maxRem > 0 && daysUntilDue <= maxRem {
-		return true
-	}
-	return false
+	return cycle.Status == database.SaasInvoicePending || cycle.Status == database.SaasInvoiceOverdue
 }
 
 func calendarDaysBetween(from, to time.Time) int {

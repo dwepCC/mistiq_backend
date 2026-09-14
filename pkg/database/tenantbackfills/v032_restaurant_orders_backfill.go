@@ -13,6 +13,14 @@ type V032RestaurantOrdersBackfill struct{}
 func (V032RestaurantOrdersBackfill) Version() int { return 32 }
 func (V032RestaurantOrdersBackfill) Name() string { return "restaurant_orders_backfill" }
 
+// Repeatable: ver tenantbackfills.Repeatable. Igual que V031/V036, depende de schema (columna
+// tenant_table_sessions.order_type) desplegado de forma incremental/asíncrona — una corrida
+// puede fallar con "columnas no listas" mientras ese schema aún se despliega para ese tenant, y
+// sin esto quedaría trabada para siempre por el candado run-once. Todos sus UPDATE llevan
+// guarda propia (IS NULL OR = ''), y la asignación de order_code solo toca sesiones que
+// todavía no tienen uno, así que repetirla no duplica ni corrompe nada ya resuelto.
+func (V032RestaurantOrdersBackfill) Repeatable() bool { return true }
+
 func (V032RestaurantOrdersBackfill) Run(db *gorm.DB) error {
 	if !hasColumn(db, "tenant_table_sessions", "order_type") {
 		return fmt.Errorf("backfill: columnas de pedido restaurante no listas")

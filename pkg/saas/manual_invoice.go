@@ -7,7 +7,11 @@ import (
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/pagination"
 	"tukifac/pkg/saas/docusage"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // RenewalInvoiceInput cobro de renovación emitido por el superadmin.
@@ -247,32 +251,65 @@ func ToInvoiceRow(c *database.SaasBillingCycle) InvoiceRow {
 type InvoiceListRow struct {
 	InvoiceRow
 	TenantName string
+	TenantRUC  string
 	// CoversActivePeriod el período ya empezó y todavía no termina: anular este cobro deja al
 	// cliente con el servicio corriendo y sin deuda. La UI lo advierte antes de confirmar.
 	CoversActivePeriod bool
 }
 
+// ListInvoicesParams filtros de /superadmin/billing-cycles — mismo patrón que
+// PaymentListParams: búsqueda por empresa/RUC (join a tenants), rango de fechas sobre due_date
+// (cuándo vence el cobro, la fecha que ya se muestra en la tabla) y paginación.
+type ListInvoicesParams struct {
+	Status   string
+	Query    string
+	DateFrom string // AAAA-MM-DD, inclusive
+	DateTo   string // AAAA-MM-DD, inclusive
+	Page     int
+	PerPage  int
+}
+
 // ListInvoices cobros de todas las empresas, del vencimiento más próximo al más lejano.
 //
-// status vacío = solo los que siguen por cobrar (pendientes y vencidos), que es lo que el
-// administrador necesita revisar; "all" trae todo el historial.
-func ListInvoices(status string, limit int) ([]InvoiceListRow, error) {
-	if limit <= 0 {
-		limit = 100
-	}
+// status vacío = solo los que siguen por cobrar (pendientes, vencidos y en revisión), que es
+// lo que el administrador necesita revisar; "all" trae todo el historial.
+func ListInvoices(params ListInvoicesParams) ([]InvoiceListRow, int64, error) {
+	page, perPage := pagination.Normalize(params.Page, params.PerPage)
 	q := database.CentralDB.Model(&database.SaasBillingCycle{})
-	switch strings.TrimSpace(status) {
+	switch strings.TrimSpace(params.Status) {
 	case "", "open":
-		q = q.Where("status IN ?", []string{database.SaasInvoicePending, database.SaasInvoiceOverdue})
+		// Columna calificada: al unirse con tenants (búsqueda por empresa/RUC) "status" queda
+		// ambiguo, porque tenants también tiene su propia columna status.
+		q = q.Where("saas_billing_cycles.status IN ?", []string{
+			database.SaasInvoicePending, database.SaasInvoiceOverdue, database.SaasInvoicePendingReview,
+		})
 	case "all":
 		// sin filtro
 	default:
-		q = q.Where("status = ?", status)
+		q = q.Where("saas_billing_cycles.status = ?", params.Status)
+	}
+	if strings.TrimSpace(params.Query) != "" {
+		like := "%" + strings.TrimSpace(params.Query) + "%"
+		q = q.Joins("JOIN tenants ON tenants.id = saas_billing_cycles.tenant_id").
+			Where("tenants.name LIKE ? OR tenants.ruc LIKE ? OR tenants.slug LIKE ?", like, like, like)
+	}
+	if from, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(params.DateFrom), LimaLocation()); err == nil {
+		q = q.Where("saas_billing_cycles.due_date >= ?", from)
+	}
+	if to, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(params.DateTo), LimaLocation()); err == nil {
+		q = q.Where("saas_billing_cycles.due_date <= ?", EndOfDayLima(to))
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
 	}
 
 	var rows []database.SaasBillingCycle
-	if err := q.Order("due_date asc").Limit(limit).Find(&rows).Error; err != nil {
-		return nil, err
+	if err := q.Order("saas_billing_cycles.due_date asc").
+		Limit(perPage).Offset(pagination.Offset(page, perPage)).
+		Find(&rows).Error; err != nil {
+		return nil, 0, err
 	}
 
 	// Nombres en una sola consulta: el listado puede traer muchas empresas distintas.
@@ -280,12 +317,12 @@ func ListInvoices(status string, limit int) ([]InvoiceListRow, error) {
 	for i := range rows {
 		ids = append(ids, rows[i].TenantID)
 	}
-	names := make(map[uint]string, len(ids))
+	tenantsByID := make(map[uint]database.Tenant, len(ids))
 	if len(ids) > 0 {
 		var tenants []database.Tenant
-		database.CentralDB.Select("id", "name").Where("id IN ?", ids).Find(&tenants)
+		database.CentralDB.Select("id", "name", "ruc").Where("id IN ?", ids).Find(&tenants)
 		for _, t := range tenants {
-			names[t.ID] = t.Name
+			tenantsByID[t.ID] = t
 		}
 	}
 
@@ -293,14 +330,16 @@ func ListInvoices(status string, limit int) ([]InvoiceListRow, error) {
 	out := make([]InvoiceListRow, 0, len(rows))
 	for i := range rows {
 		c := &rows[i]
+		t := tenantsByID[c.TenantID]
 		out = append(out, InvoiceListRow{
 			InvoiceRow: ToInvoiceRow(c),
-			TenantName: names[c.TenantID],
+			TenantName: t.Name,
+			TenantRUC:  t.RUC,
 			CoversActivePeriod: !CalendarDateLima(c.PeriodEnd).Before(now) &&
 				!CalendarDateLima(c.PeriodStart).After(now),
 		})
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // ListTenantInvoices cobros del tenant, del más reciente al más antiguo.
@@ -314,31 +353,53 @@ func ListTenantInvoices(tenantID uint, limit int) ([]database.SaasBillingCycle, 
 	return rows, err
 }
 
-// CancelInvoice anula un cobro pendiente. Un cobro ya pagado no se toca.
-func CancelInvoice(cycleID uint) error {
-	var cycle database.SaasBillingCycle
-	if err := database.CentralDB.First(&cycle, cycleID).Error; err != nil {
-		return errors.New("cobro no encontrado")
-	}
-	if cycle.Status == database.SaasInvoicePaid {
-		return errors.New("el cobro ya fue pagado y no puede anularse")
-	}
-	if cycle.Status == database.SaasInvoiceRejected {
-		return errors.New("el cobro ya está anulado")
-	}
+// CancelInvoice anula un cobro no pagado. Un cobro ya pagado no se toca.
+//
+// Si tenía un comprobante esperando revisión (pending/pending_review), se rechaza en cascada
+// como parte de la misma anulación — no tiene sentido dejar al pago "en revisión" para siempre
+// sobre un cobro que el admin decidió anular. Un pago YA aprobado sí bloquea: eso significaría
+// que el ciclo debería estar 'paid', no anulable por esta vía (revisar la inconsistencia a mano).
+func CancelInvoice(cycleID uint, reason string, actorID uint) error {
+	return database.CentralDB.Transaction(func(tx *gorm.DB) error {
+		var cycle database.SaasBillingCycle
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&cycle, cycleID).Error; err != nil {
+			return errors.New("cobro no encontrado")
+		}
+		if cycle.Status == database.SaasInvoicePaid {
+			return errors.New("el cobro ya fue pagado y no puede anularse")
+		}
+		if cycle.Status == database.SaasInvoiceRejected {
+			return errors.New("el cobro ya está anulado")
+		}
 
-	// Un pago vivo apunta a este cobro: anularlo dejaría el comprobante del cliente sin
-	// deuda a la que aplicarse. Primero hay que resolver el pago (aprobarlo o rechazarlo).
-	var attached int64
-	database.CentralDB.Model(&database.SaasPayment{}).
-		Where("billing_cycle_id = ? AND status IN ?", cycleID,
-			[]string{database.SaasPayPending, database.SaasPayPendingReview, database.SaasPayApproved}).
-		Count(&attached)
-	if attached > 0 {
-		return errors.New("este cobro tiene un pago asociado; revísalo o recházalo antes de anular el cobro")
-	}
+		var approvedCount int64
+		tx.Model(&database.SaasPayment{}).
+			Where("billing_cycle_id = ? AND status = ?", cycleID, database.SaasPayApproved).
+			Count(&approvedCount)
+		if approvedCount > 0 {
+			return errors.New("este cobro tiene un pago aprobado asociado; revísalo antes de anular el cobro")
+		}
 
-	return database.CentralDB.Model(&cycle).Update("status", database.SaasInvoiceRejected).Error
+		note := "Rechazado automáticamente: el cobro fue anulado por un administrador"
+		if strings.TrimSpace(reason) != "" {
+			note = fmt.Sprintf("%s (%s)", note, strings.TrimSpace(reason))
+		}
+		aid := actorID
+		if err := CascadeRejectPendingPaymentsForCycleTx(tx, cycleID, "admin", &aid, note); err != nil {
+			return err
+		}
+
+		if err := tx.Model(&cycle).Update("status", database.SaasInvoiceRejected).Error; err != nil {
+			return err
+		}
+		sid := cycle.SubscriptionID
+		invoiceNote := "cobro anulado manualmente"
+		if strings.TrimSpace(reason) != "" {
+			invoiceNote = fmt.Sprintf("%s: %s", invoiceNote, strings.TrimSpace(reason))
+		}
+		LogEventTx(tx, cycle.TenantID, &sid, EventInvoiceSuperseded, "admin", &aid, invoiceNote, "")
+		return nil
+	})
 }
 
 // InvoiceCancelWarning advertencia previa a anular (no impide hacerlo, lo explica).
@@ -366,7 +427,7 @@ func InvoiceCancelInfo(cycle *database.SaasBillingCycle) InvoiceCancelWarning {
 	var open int64
 	database.CentralDB.Model(&database.SaasBillingCycle{}).
 		Where("tenant_id = ? AND status IN ?", cycle.TenantID,
-			[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue}).
+			[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue, database.SaasInvoicePendingReview}).
 		Count(&open)
 	out.IsOnlyOpenInvoice = open <= 1
 	return out

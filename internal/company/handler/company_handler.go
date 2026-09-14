@@ -227,6 +227,7 @@ func (h *CompanyHandler) CreateSeriesForm(c fiber.Ctx) error {
 		c.FormValue("doc_type"),
 		c.FormValue("series"),
 		corr,
+		false,
 	); err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
@@ -239,7 +240,7 @@ func (h *CompanyHandler) UpdateSeriesForm(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("ID inválido")
 	}
 	active := c.FormValue("is_active") == "true" || c.FormValue("is_active") == "on"
-	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), c.FormValue("series"), active, "", nil); err != nil {
+	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), c.FormValue("series"), active, "", nil, nil); err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 	return c.Redirect().To("/company/series?success=updated")

@@ -89,7 +89,11 @@ func (s *ContactService) BulkImportContacts(items []BulkImportContactItem) (*Bul
 	}
 
 	result := &BulkImportContactResult{Failed: make([]BulkImportContactFail, 0)}
-	docsInFile := make(map[string]int, len(items))
+	// Un mismo documento puede aparecer dos veces en el archivo si es un cliente Y un proveedor
+	// (roles distintos, filas distintas) — lo que no puede repetirse es el mismo documento con el
+	// mismo rol. "both" ocupa los dos roles a la vez, igual que contactTypesThatCollideWith.
+	seenCustomerRole := make(map[string]int, len(items))
+	seenSupplierRole := make(map[string]int, len(items))
 
 	for _, item := range items {
 		name := strings.TrimSpace(item.BusinessName)
@@ -129,11 +133,27 @@ func (s *ContactService) BulkImportContacts(items []BulkImportContactItem) (*Bul
 			fail("tipo inválido (use cliente, proveedor o ambos)")
 			continue
 		}
-		if prevRow, dup := docsInFile[docNumber]; dup {
-			fail(fmt.Sprintf("documento repetido en el archivo (fila %d)", prevRow))
-			continue
+		fileKey := docType + "|" + docNumber
+		checkRole := contactType != "supplier" // customer y both ocupan el rol de cliente
+		if checkRole {
+			if prevRow, dup := seenCustomerRole[fileKey]; dup {
+				fail(fmt.Sprintf("documento repetido en el archivo como cliente (fila %d)", prevRow))
+				continue
+			}
 		}
-		docsInFile[docNumber] = item.RowNumber
+		checkSupplierRole := contactType != "customer" // supplier y both ocupan el rol de proveedor
+		if checkSupplierRole {
+			if prevRow, dup := seenSupplierRole[fileKey]; dup {
+				fail(fmt.Sprintf("documento repetido en el archivo como proveedor (fila %d)", prevRow))
+				continue
+			}
+		}
+		if checkRole {
+			seenCustomerRole[fileKey] = item.RowNumber
+		}
+		if checkSupplierRole {
+			seenSupplierRole[fileKey] = item.RowNumber
+		}
 
 		ubigeo := strings.TrimSpace(item.Ubigeo)
 		if ubigeo != "" && len(ubigeo) != 6 {
@@ -142,7 +162,10 @@ func (s *ContactService) BulkImportContacts(items []BulkImportContactItem) (*Bul
 		}
 
 		var existing database.TenantContact
-		err := s.db.Where("doc_number = ?", docNumber).First(&existing).Error
+		// Busca por documento + tipo_documento + rol que colisiona (no solo por doc_number): así
+		// un proveedor y un cliente con el mismo documento se importan como dos filas separadas
+		// en vez de que la segunda pise a la primera (ver contactTypesThatCollideWith).
+		err := s.db.Where("doc_type = ? AND doc_number = ? AND type IN ?", docType, docNumber, contactTypesThatCollideWith(contactType)).First(&existing).Error
 		if err == nil {
 			// El cliente por defecto del tenant no se toca desde una importación.
 			if existing.IsDefaultWalkIn {

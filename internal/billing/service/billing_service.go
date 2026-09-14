@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"tukifac/config"
-	salesvc "tukifac/internal/sales/service"
 	detraccionsvc "tukifac/internal/detraccion"
-	prepaymentsvc "tukifac/internal/prepayment"
 	"tukifac/internal/fiscal/salecontext"
+	prepaymentsvc "tukifac/internal/prepayment"
+	salesvc "tukifac/internal/sales/service"
 	"tukifac/pkg/billingstate"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
@@ -24,6 +24,7 @@ import (
 	"tukifac/pkg/saas/docusage"
 	"tukifac/pkg/salecurrency"
 	"tukifac/pkg/sunat"
+	"tukifac/pkg/sunatnote"
 	"tukifac/pkg/tax"
 	"tukifac/pkg/tenantstorage"
 
@@ -68,6 +69,22 @@ func NewBillingService(db *gorm.DB) *BillingService {
 
 // round2 redondea a 2 decimales para montos SUNAT (evita discrepancias 4310/4312).
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// round10 redondea a 10 decimales — para el PRECIO UNITARIO (cac:Price/cbc:PriceAmount), que
+// SUNAT declara como n(12,10) y Greenter formatea con n_format_limit(10) (ver
+// invoice2.1.xml.twig:577,447,442). No es el mismo caso que los montos de línea (round2): SUNAT
+// recalcula internamente cantidad × precioUnitario y lo compara contra LineExtensionAmount/
+// MtoBaseIgv; si el unitario se redondea a solo 2 decimales, ese recálculo puede desviarse del
+// monto real más de lo que tolera (error 3271, "el valor de venta por ítem difiere de los
+// importes consignados"). Con cantidades grandes el error se amplifica: una venta real de 400
+// unidades a S/1.15 (con IGV) dio unitario 389.83/400=0.9746→round2=0.97, y 400×0.97=388.00
+// frente a un LineExtensionAmount de 389.83 — descuadre de S/1.83, muy por encima de cualquier
+// tolerancia de redondeo. Con round10 el unitario conserva la precisión suficiente para que el
+// recálculo cuadre.
+func round10(v float64) float64 {
+	const f = 1e10
+	return math.Round(v*f) / f
+}
 
 // resolveUbigeoToAddress obtiene los nombres de departamento, provincia y distrito desde las tablas de ubigeo.
 // SUNAT no acepta "-" en estos campos; se debe enviar el nombre real.
@@ -299,31 +316,32 @@ func (s *BillingService) emitInvoiceDocument(saleID uint, companyCfg *database.T
 		}
 	}
 	payload := &facturador.InvoicePayload{
-		UBLVersion:        "2.1",
-		TipoOperacion:     tipoOperacion,
-		TipoDoc:           tipoDoc,
-		Serie:             serie,
-		Correlativo:       correlativo,
-		FechaEmision:      fechaEmision,
-		FecVencimiento:    fecVencimiento,
-		FormaPago:         &facturador.InvoiceFormaPago{Tipo: "Contado"},
-		Company:           facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
-		Client:            facturador.InvoiceClient{TipoDoc: clientTipoDoc, NumDoc: clientNumDoc, RznSocial: clientRzn, Address: clientAddr},
-		TipoMoneda:        tipoMoneda,
-		MtoOperGravadas:   sunatTotals.MtoOperGravadas,
-		MtoOperExoneradas: sunatTotals.MtoOperExoneradas,
-		MtoOperInafectas:  sunatTotals.MtoOperInafectas,
-		MtoOperGratuitas:  sunatTotals.MtoOperGratuitas,
-		MtoIGVGratuitas:   sunatTotals.MtoIGVGratuitas,
-		MtoIGV:            sunatTotals.MtoIGV,
-		TotalImpuestos:    sunatTotals.TotalImpuestos,
-		ValorVenta:        sunatTotals.ValorVenta,
-		SubTotal:          sunatTotals.MtoImpVenta,
-		MtoImpVenta:       sunatTotals.MtoImpVenta,
-		Descuentos:        docDescuentos,
+		UBLVersion:         "2.1",
+		TipoOperacion:      tipoOperacion,
+		TipoDoc:            tipoDoc,
+		Serie:              serie,
+		Correlativo:        correlativo,
+		FechaEmision:       fechaEmision,
+		FecVencimiento:     fecVencimiento,
+		FormaPago:          &facturador.InvoiceFormaPago{Tipo: "Contado"},
+		Company:            facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
+		Client:             facturador.InvoiceClient{TipoDoc: clientTipoDoc, NumDoc: clientNumDoc, RznSocial: clientRzn, Address: clientAddr},
+		TipoMoneda:         tipoMoneda,
+		MtoOperGravadas:    sunatTotals.MtoOperGravadas,
+		MtoOperExoneradas:  sunatTotals.MtoOperExoneradas,
+		MtoOperInafectas:   sunatTotals.MtoOperInafectas,
+		MtoOperExportacion: sunatTotals.MtoOperExportacion,
+		MtoOperGratuitas:   sunatTotals.MtoOperGratuitas,
+		MtoIGVGratuitas:    sunatTotals.MtoIGVGratuitas,
+		MtoIGV:             sunatTotals.MtoIGV,
+		TotalImpuestos:     sunatTotals.TotalImpuestos,
+		ValorVenta:         sunatTotals.ValorVenta,
+		SubTotal:           sunatTotals.MtoImpVenta,
+		MtoImpVenta:        sunatTotals.MtoImpVenta,
+		Descuentos:         docDescuentos,
 		SumOtrosDescuentos: sumOtrosDescuentos,
-		Details:           details,
-		Legends:           legends,
+		Details:            details,
+		Legends:            legends,
 	}
 	if fiscalEnrich, err := salecontext.LoadInvoiceEnrichment(s.db, saleID, sale.Total); err == nil && fiscalEnrich != nil {
 		salecontext.ApplyToInvoicePayload(payload, fiscalEnrich)
@@ -343,6 +361,13 @@ func (s *BillingService) emitInvoiceDocument(saleID uint, companyCfg *database.T
 		facturador.SetSUNATLegend1000(&payload.Legends, payload.MtoImpVenta, tipoMoneda)
 	}
 	applyCreditTermsToInvoicePayload(s.db, &sale, payload)
+	// Defensa adicional: SUNAT rechaza (código 3251) cualquier comprobante Credito sin el Monto
+	// Neto Pendiente de Pago. applyCreditTermsToInvoicePayload ya lo garantiza hoy, pero esto
+	// falla rápido y con un error claro en vez de dejar pasar un comprobante que SUNAT va a
+	// rechazar de todas formas — más barato detectarlo acá que como un rechazo real en producción.
+	if payload.FormaPago != nil && payload.FormaPago.Tipo == "Credito" && payload.FormaPago.Monto <= 0 {
+		return nil, errors.New("venta a crédito sin monto neto pendiente de pago; revisa las cuotas antes de emitir")
+	}
 	payloadBytes, _ := json.Marshal(payload)
 	payloadJSON := string(payloadBytes)
 
@@ -369,9 +394,18 @@ func (s *BillingService) ResendToSUNAT(saleID uint) (*database.TenantInvoice, er
 	return s.SendToSUNAT(saleID)
 }
 
-// CreateCreditNoteAndVoidSale genera una nota de crédito para anular la venta y la envía a SUNAT; luego anula la venta original.
-// La venta debe ser factura o boleta ya aceptada por SUNAT.
-func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason string) (*database.TenantSale, *database.TenantInvoice, error) {
+// CreateCreditNoteAndVoidSale genera una nota de crédito y la envía a SUNAT. La venta debe
+// ser factura o boleta ya aceptada por SUNAT. reasonCode es el código del catálogo SUNAT 09
+// (pkg/sunatnote); vacío se interpreta como "01" (anulación de la operación), único motivo
+// que el sistema podía emitir antes de este campo — por eso solo ese código dispara la
+// anulación de la venta original al aceptarse (ver PostFiscalAcceptSideEffects).
+//
+// selections: ítems y cantidades elegidos por el usuario (Fase 2 — notas parciales). Solo se
+// usan cuando reasonCode es uno de los que mueven bienes (IsPartialCreditNoteReason) y viene
+// no vacío; en ese caso la nota se arma SOLO con esas líneas, con sus propios totales
+// proporcionales — no se copia el 100% de la venta. Vacío o motivo no-parcial: comportamiento
+// de siempre (copia completa, mismos totales que la venta original).
+func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason string, reasonCode string, selections []NoteItemSelection) (*database.TenantSale, *database.TenantInvoice, error) {
 	if !s.facturadorConfigured() {
 		return nil, nil, errors.New("la anulación con nota de crédito requiere facturador configurado")
 	}
@@ -392,9 +426,16 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 	if orig.BillingStatus != "accepted" {
 		return nil, nil, errors.New("el comprobante debe estar aceptado por SUNAT antes de anularlo con nota de crédito")
 	}
+	reasonCode = strings.TrimSpace(reasonCode)
+	if reasonCode == "" {
+		reasonCode = "01"
+	}
+	if sunatnote.ReasonLabel("07", reasonCode) == "" {
+		return nil, nil, fmt.Errorf("motivo de nota de crédito inválido: %q no existe en el catálogo SUNAT 09", reasonCode)
+	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
-		return nil, nil, errors.New("indique el motivo de anulación")
+		reason = sunatnote.ReasonLabel("07", reasonCode)
 	}
 	if orig.ContactID == nil {
 		return nil, nil, errors.New("para nota de crédito electrónica debe asignar un cliente con dirección y ubigeo en la venta original")
@@ -411,6 +452,23 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 	numberStr := fmt.Sprintf("%s-%08d", ncSeries.Series, nextCorr)
 	now := time.Now()
 	origIDRef := originalSaleID
+
+	var origItems []database.TenantSaleItem
+	s.db.Where("sale_id = ?", originalSaleID).Find(&origItems)
+
+	// Nota parcial (Fase 2): el usuario eligió ítems/cantidades y el motivo mueve bienes —
+	// la nota se arma solo con esas líneas y sus propios totales, no con el 100% de la venta.
+	partial := IsPartialCreditNoteReason(reasonCode) && len(selections) > 0
+	var partialItems []database.TenantSaleItem
+	subtotal, taxAmount, total := orig.Subtotal, orig.TaxAmount, orig.Total
+	if partial {
+		var err error
+		partialItems, subtotal, taxAmount, total, err = buildPartialNoteItems(originalSaleID, origItems, selections)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	ncSale := database.TenantSale{
 		BranchID:       orig.BranchID,
 		ContactID:      orig.ContactID,
@@ -422,12 +480,13 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 		Correlative:    nextCorr,
 		Number:         numberStr,
 		IssueDate:      now,
-		Subtotal:       orig.Subtotal,
-		TaxAmount:      orig.TaxAmount,
-		Total:          orig.Total,
+		Subtotal:       subtotal,
+		TaxAmount:      taxAmount,
+		Total:          total,
 		Currency:       orig.Currency,
 		PaymentMethod:  orig.PaymentMethod,
 		Notes:          reason,
+		NoteReasonCode: reasonCode,
 		Status:         "paid",
 		BillingStatus:  "pending",
 		OriginalSaleID: &origIDRef,
@@ -438,25 +497,30 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 	if err := s.reserveGenericDocument("credit_note", ncSale.ID, ncSale.Number); err != nil {
 		return nil, nil, err
 	}
-	var origItems []database.TenantSaleItem
-	s.db.Where("sale_id = ?", originalSaleID).Find(&origItems)
-	for _, it := range origItems {
-		ncItem := database.TenantSaleItem{
-			SaleID:             ncSale.ID,
-			ProductID:          it.ProductID,
-			Code:               it.Code,
-			Description:        it.Description,
-			Unit:               it.Unit,
-			Quantity:           it.Quantity,
-			UnitPrice:          it.UnitPrice,
-			Discount:           it.Discount,
-			TaxRate:            it.TaxRate,
-			IgvAffectationType: it.IgvAffectationType,
-			Subtotal:           it.Subtotal,
-			TaxAmount:          it.TaxAmount,
-			Total:              it.Total,
+	if partial {
+		for i := range partialItems {
+			partialItems[i].SaleID = ncSale.ID
+			s.db.Create(&partialItems[i])
 		}
-		s.db.Create(&ncItem)
+	} else {
+		for _, it := range origItems {
+			ncItem := database.TenantSaleItem{
+				SaleID:             ncSale.ID,
+				ProductID:          it.ProductID,
+				Code:               it.Code,
+				Description:        it.Description,
+				Unit:               it.Unit,
+				Quantity:           it.Quantity,
+				UnitPrice:          it.UnitPrice,
+				Discount:           it.Discount,
+				TaxRate:            it.TaxRate,
+				IgvAffectationType: it.IgvAffectationType,
+				Subtotal:           it.Subtotal,
+				TaxAmount:          it.TaxAmount,
+				Total:              it.Total,
+			}
+			s.db.Create(&ncItem)
+		}
 	}
 	notePayload, err := s.buildCreditNotePayload(ncSale.ID)
 	if err != nil {
@@ -485,8 +549,11 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 	return &ncSale, &inv, nil
 }
 
-// CreateDebitNoteForSale genera una nota de débito (08) vinculada a una venta aceptada y la encola a SUNAT.
-func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint) (*database.TenantSale, *database.TenantInvoice, error) {
+// CreateDebitNoteForSale genera una nota de débito (08) vinculada a una venta aceptada y la
+// encola a SUNAT. reasonCode es el código del catálogo SUNAT 10 (pkg/sunatnote); vacío se
+// interpreta como "02" (aumento en el valor), el único motivo que el sistema emitía antes de
+// este campo.
+func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint, reason string, reasonCode string) (*database.TenantSale, *database.TenantInvoice, error) {
 	if !s.facturadorConfigured() {
 		return nil, nil, errors.New("la nota de débito requiere facturador configurado")
 	}
@@ -507,9 +574,20 @@ func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint) (*database.
 	if orig.ContactID == nil {
 		return nil, nil, errors.New("debe asignar un cliente con dirección y ubigeo en la venta original")
 	}
-	var ndSeries database.TenantDocumentSeries
-	if err := s.db.Where("branch_id = ? AND category = ? AND active = ?", orig.BranchID, "nota_debito", true).First(&ndSeries).Error; err != nil {
-		return nil, nil, errors.New("no hay serie de nota de débito configurada para esta sucursal")
+	reasonCode = strings.TrimSpace(reasonCode)
+	if reasonCode == "" {
+		reasonCode = "02"
+	}
+	if sunatnote.ReasonLabel("08", reasonCode) == "" {
+		return nil, nil, fmt.Errorf("motivo de nota de débito inválido: %q no existe en el catálogo SUNAT 10", reasonCode)
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = sunatnote.ReasonLabel("08", reasonCode)
+	}
+	ndSeries, err := s.resolveDebitNoteSeries(orig.BranchID, &orig)
+	if err != nil {
+		return nil, nil, err
 	}
 	saleSvc := salesvc.NewSaleService(s.db)
 	nextCorr, err := saleSvc.NextCorrelative(ndSeries.ID)
@@ -534,7 +612,8 @@ func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint) (*database.
 		Total:          orig.Total,
 		Currency:       orig.Currency,
 		PaymentMethod:  orig.PaymentMethod,
-		Notes:          "Aumento en el valor",
+		Notes:          reason,
+		NoteReasonCode: reasonCode,
 		Status:         "paid",
 		BillingStatus:  "pending",
 		OriginalSaleID: &origIDRef,
@@ -625,6 +704,39 @@ func (s *BillingService) resolveCreditNoteSeries(branchID uint, orig *database.T
 	return database.TenantDocumentSeries{}, fmt.Errorf(
 		"ninguna serie de nota de crédito coincide con %s: configure serie %s## (ej. %s01) para anular %ss; las series FC## son solo para facturas y BC## solo para boletas",
 		docLabel, prefix, prefix, docLabel,
+	)
+}
+
+// resolveDebitNoteSeries elige la serie ND (SUNAT 08) según el comprobante afectado: FD##
+// factura, BD## boleta — mismo criterio que resolveCreditNoteSeries. Antes CreateDebitNoteForSale
+// tomaba cualquier serie activa de categoría nota_debito sin verificar el prefijo, así que en
+// teoría una serie FD01 podía "aumentar" tanto facturas como boletas sin control.
+func (s *BillingService) resolveDebitNoteSeries(branchID uint, orig *database.TenantSale) (database.TenantDocumentSeries, error) {
+	if orig == nil {
+		return database.TenantDocumentSeries{}, errors.New("venta original no indicada")
+	}
+	prefix := docseries.DebitNoteSeriesPrefixForAffected(orig.DocType, getSeriesSunatCode(s.db, orig.SeriesID))
+	var rows []database.TenantDocumentSeries
+	err := s.db.Where("branch_id = ? AND category = ? AND active = ? AND TRIM(sunat_code) = ?",
+		branchID, "nota_debito", true, "08").Order("id ASC").Find(&rows).Error
+	if err != nil {
+		return database.TenantDocumentSeries{}, err
+	}
+	for _, row := range rows {
+		if docseries.SeriesMatchesDebitNotePrefix(row.Series, prefix) {
+			return row, nil
+		}
+	}
+	docLabel := docseries.AffectedDocLabel(orig.DocType, getSeriesSunatCode(s.db, orig.SeriesID))
+	if len(rows) == 0 {
+		return database.TenantDocumentSeries{}, fmt.Errorf(
+			"no hay serie de nota de débito en esta sucursal — cree una serie %s## activa (categoría Nota de débito, SUNAT 08) para %ss",
+			prefix, docLabel,
+		)
+	}
+	return database.TenantDocumentSeries{}, fmt.Errorf(
+		"ninguna serie de nota de débito coincide con %s: configure serie %s## (ej. %s01); las series FD## son solo para facturas y BD## solo para boletas",
+		docLabel, prefix, prefix,
 	)
 }
 
@@ -1157,7 +1269,13 @@ func (s *BillingService) GetSummaryStatus(id uint) (*database.TenantSunatSummary
 }
 
 // CreateVoidedInput es un comprobante a dar de baja para una comunicación de baja.
+// También lo reutiliza CreateReversion (retención/percepción, 20/40) — por eso TipoDoc/Serie/
+// Correlativo se mantienen como campos de texto en vez de reemplazarlos por SaleID.
 type CreateVoidedInput struct {
+	// SaleID: forma preferida para comunicación de baja — resuelve tipo/serie/correlativo
+	// desde la venta real en vez de confiar en lo que el cliente tipeó. Vacío (0) mantiene el
+	// camino viejo por texto libre, que sigue usando CreateReversion.
+	SaleID        uint   `json:"sale_id,omitempty"`
 	TipoDoc       string `json:"tipo_doc"` // 01, 03, 07, 08
 	Serie         string `json:"serie"`
 	Correlativo   string `json:"correlativo"`
@@ -1171,6 +1289,104 @@ func (s *BillingService) ListVoided() ([]database.TenantSunatVoided, error) {
 	return list, err
 }
 
+// voidedCommunicationWindowDays plazo que da SUNAT para comunicar la baja de un comprobante
+// enviado individualmente: hasta 7 días calendario contados desde el día calendario siguiente
+// a la aceptación. Pasado ese plazo, corresponde nota de crédito, no comunicación de baja.
+const voidedCommunicationWindowDays = 8 // día siguiente (+1) + 7 días de plazo
+
+// voidedDetailKey normaliza tipo+serie+correlativo para comparar duplicados sin que un "05"
+// vs "5" o mayúscula/minúscula en la serie hagan pasar dos veces el mismo comprobante.
+func voidedDetailKey(tipoDoc, serie, correlativo string) string {
+	c := strings.TrimLeft(strings.TrimSpace(correlativo), "0")
+	if c == "" {
+		c = "0"
+	}
+	return strings.TrimSpace(tipoDoc) + "|" + strings.ToUpper(strings.TrimSpace(serie)) + "|" + c
+}
+
+// loadAlreadyVoidedKeys comprobantes que ya están en una comunicación de baja pendiente o
+// aceptada — evita reenviar el mismo comprobante dos veces. No hay tabla normalizada de
+// detalles: se parsea el payload guardado de cada comunicación.
+func (s *BillingService) loadAlreadyVoidedKeys() (map[string]bool, error) {
+	var records []database.TenantSunatVoided
+	if err := s.db.Where("status IN ?", []string{"accepted", "pending"}).Find(&records).Error; err != nil {
+		return nil, err
+	}
+	keys := make(map[string]bool)
+	for _, r := range records {
+		var payload facturador.VoidedPayload
+		if json.Unmarshal([]byte(r.PayloadJSON), &payload) != nil {
+			continue
+		}
+		for _, d := range payload.Details {
+			keys[voidedDetailKey(d.TipoDoc, d.Serie, d.Correlativo)] = true
+		}
+	}
+	return keys, nil
+}
+
+// resolveAndValidateVoidedDetail valida una línea de comunicación de baja contra el
+// comprobante real del tenant: solo boletas (03) — SUNAT no admite comunicación de baja para
+// facturas ni notas, esas se anulan con una nota de crédito —, que exista, que ya esté
+// aceptada por SUNAT, dentro del plazo de 7 días calendario, y que no haya sido dada de baja
+// antes. Con SaleID, tipo/serie/correlativo se resuelven desde la venta real y se ignora lo
+// que haya llegado por texto — así el usuario no puede tipear un comprobante que no existe.
+func (s *BillingService) resolveAndValidateVoidedDetail(d CreateVoidedInput, alreadyVoided map[string]bool) (CreateVoidedInput, error) {
+	motivo := facturador.SanitizeFreeText(d.DesMotivoBaja)
+	if motivo == "" {
+		return d, errors.New("el motivo de la baja es obligatorio")
+	}
+	if len(motivo) > 100 {
+		return d, errors.New("el motivo no puede superar 100 caracteres")
+	}
+
+	var sale database.TenantSale
+	if d.SaleID > 0 {
+		if err := s.db.First(&sale, d.SaleID).Error; err != nil {
+			return d, errors.New("comprobante no encontrado")
+		}
+	} else {
+		serie := strings.ToUpper(strings.TrimSpace(d.Serie))
+		correlativo := strings.TrimSpace(d.Correlativo)
+		if serie == "" || correlativo == "" {
+			return d, errors.New("serie y correlativo son obligatorios")
+		}
+		if err := s.db.Where("series = ? AND correlative = ?", serie, correlativo).First(&sale).Error; err != nil {
+			return d, fmt.Errorf("no se encontró el comprobante %s-%s en este tenant", serie, correlativo)
+		}
+	}
+
+	sunatCode := strings.TrimSpace(getSeriesSunatCode(s.db, sale.SeriesID))
+	label := fmt.Sprintf("%s-%d", sale.Series, sale.Correlative)
+	if sunatCode != "03" {
+		return d, fmt.Errorf(
+			"%s no es una boleta (tipo %s): la comunicación de baja solo aplica a boletas — para anular una factura o una nota, emita una nota de crédito",
+			label, sunatCode,
+		)
+	}
+	if sale.BillingStatus != "accepted" {
+		return d, fmt.Errorf("%s todavía no está aceptado por SUNAT", label)
+	}
+	deadline := time.Date(sale.IssueDate.Year(), sale.IssueDate.Month(), sale.IssueDate.Day(), 23, 59, 59, 0, sale.IssueDate.Location()).
+		AddDate(0, 0, voidedCommunicationWindowDays)
+	if time.Now().After(deadline) {
+		return d, fmt.Errorf(
+			"%s ya superó el plazo de 7 días calendario para comunicar la baja (vencía el %s) — emita una nota de crédito en su lugar",
+			label, deadline.Format("02/01/2006"),
+		)
+	}
+	if alreadyVoided[voidedDetailKey("03", sale.Series, strconv.FormatUint(uint64(sale.Correlative), 10))] {
+		return d, fmt.Errorf("%s ya fue dado de baja antes", label)
+	}
+
+	return CreateVoidedInput{
+		TipoDoc:       "03",
+		Serie:         sale.Series,
+		Correlativo:   strconv.FormatUint(uint64(sale.Correlative), 10),
+		DesMotivoBaja: motivo,
+	}, nil
+}
+
 // CreateVoided envía una comunicación de baja a SUNAT. Si la respuesta trae ticket, guarda pendiente; si trae CDR directo, guarda estado y CDR.
 func (s *BillingService) CreateVoided(details []CreateVoidedInput) (*database.TenantSunatVoided, error) {
 	if !s.facturadorConfigured() {
@@ -1179,6 +1395,25 @@ func (s *BillingService) CreateVoided(details []CreateVoidedInput) (*database.Te
 	if len(details) == 0 {
 		return nil, errors.New("se requiere al menos un comprobante para dar de baja")
 	}
+	alreadyVoided, err := s.loadAlreadyVoidedKeys()
+	if err != nil {
+		return nil, err
+	}
+	resolved := make([]CreateVoidedInput, len(details))
+	seen := make(map[string]bool, len(details))
+	for i, d := range details {
+		rd, err := s.resolveAndValidateVoidedDetail(d, alreadyVoided)
+		if err != nil {
+			return nil, fmt.Errorf("línea %d: %w", i+1, err)
+		}
+		key := voidedDetailKey(rd.TipoDoc, rd.Serie, rd.Correlativo)
+		if seen[key] {
+			return nil, fmt.Errorf("línea %d: %s-%s está repetido en esta misma comunicación", i+1, rd.Serie, rd.Correlativo)
+		}
+		seen[key] = true
+		resolved[i] = rd
+	}
+	details = resolved
 	companyCfg, companyAddr, err := s.getCompanyConfigAndAddress()
 	if err != nil {
 		return nil, fmt.Errorf("configuración de empresa: %w", err)
@@ -1357,29 +1592,29 @@ type DespatchDestinatarioInput struct {
 }
 
 type DespatchEnvioInput struct {
-	CodTraslado              string  `json:"cod_traslado"`
-	DesTraslado              string  `json:"des_traslado"`
-	ModTraslado              string  `json:"mod_traslado"`
-	FecTraslado              string  `json:"fec_traslado"`
-	FecEntregaTransportista  string  `json:"fec_entrega_transportista,omitempty"`
-	PartidaUbigueo           string  `json:"partida_ubigueo"`
-	PartidaDireccion         string  `json:"partida_direccion"`
-	LlegadaUbigueo           string  `json:"llegada_ubigueo"`
-	LlegadaDireccion         string  `json:"llegada_direccion"`
-	PesoTotal                float64 `json:"peso_total"`
-	UndPesoTotal             string  `json:"und_peso_total"`
-	NumBultos                int     `json:"num_bultos"`
-	TransportistaRUC         string  `json:"transportista_ruc,omitempty"`
-	TransportistaRazon       string  `json:"transportista_razon,omitempty"`
-	TransportistaPlaca       string  `json:"transportista_placa,omitempty"`
-	TransportistaMTC         string  `json:"transportista_mtc,omitempty"`
-	VehiculoHabCert          string  `json:"vehiculo_hab_cert,omitempty"`
-	VehiculoCodEmisor        string  `json:"vehiculo_cod_emisor,omitempty"`
-	ChoferTipoDoc            string  `json:"chofer_tipo_doc,omitempty"`
-	ChoferDoc                string  `json:"chofer_doc,omitempty"`
-	ChoferLicencia           string  `json:"chofer_licencia,omitempty"`
-	ChoferNombres            string  `json:"chofer_nombres,omitempty"`
-	ChoferApellidos          string  `json:"chofer_apellidos,omitempty"`
+	CodTraslado             string  `json:"cod_traslado"`
+	DesTraslado             string  `json:"des_traslado"`
+	ModTraslado             string  `json:"mod_traslado"`
+	FecTraslado             string  `json:"fec_traslado"`
+	FecEntregaTransportista string  `json:"fec_entrega_transportista,omitempty"`
+	PartidaUbigueo          string  `json:"partida_ubigueo"`
+	PartidaDireccion        string  `json:"partida_direccion"`
+	LlegadaUbigueo          string  `json:"llegada_ubigueo"`
+	LlegadaDireccion        string  `json:"llegada_direccion"`
+	PesoTotal               float64 `json:"peso_total"`
+	UndPesoTotal            string  `json:"und_peso_total"`
+	NumBultos               int     `json:"num_bultos"`
+	TransportistaRUC        string  `json:"transportista_ruc,omitempty"`
+	TransportistaRazon      string  `json:"transportista_razon,omitempty"`
+	TransportistaPlaca      string  `json:"transportista_placa,omitempty"`
+	TransportistaMTC        string  `json:"transportista_mtc,omitempty"`
+	VehiculoHabCert         string  `json:"vehiculo_hab_cert,omitempty"`
+	VehiculoCodEmisor       string  `json:"vehiculo_cod_emisor,omitempty"`
+	ChoferTipoDoc           string  `json:"chofer_tipo_doc,omitempty"`
+	ChoferDoc               string  `json:"chofer_doc,omitempty"`
+	ChoferLicencia          string  `json:"chofer_licencia,omitempty"`
+	ChoferNombres           string  `json:"chofer_nombres,omitempty"`
+	ChoferApellidos         string  `json:"chofer_apellidos,omitempty"`
 }
 
 type DespatchDetailInput struct {
@@ -1557,7 +1792,11 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 	}
 	correlativoStr := strconv.FormatUint(uint64(nextCorr), 10)
 	now := time.Now()
-	fechaEmision := facturador.FormatFiscalDateTime(now)
+	// FormatFiscalDateTimeExact (no FormatFiscalDateTime): la GRE valida fechaEmision con
+	// precisión de hora contra la recepción real en SUNAT, a diferencia de facturas/boletas
+	// donde solo importa la fecha calendario. Con la hora fija a mediodía, una guía emitida en
+	// la mañana llegaba "fechada en el futuro" y SUNAT la rechazaba (código 2108).
+	fechaEmision := facturador.FormatFiscalDateTimeExact(now)
 	fecTraslado := strings.TrimSpace(input.Envio.FecTraslado)
 	if fecTraslado == "" {
 		fecTraslado = fechaEmision
@@ -1617,6 +1856,14 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 	docNum := fmt.Sprintf("%s-%s", series.Series, correlativoStr)
 	numberStr := fmt.Sprintf("%s-%08d", series.Series, nextCorr)
 
+	// Destinatario → TenantContact real, tanto si la guía nace de una venta como si se emite de
+	// forma independiente: sin esto sale.ContactID quedaba siempre NULL y el PDF del panel caía
+	// al "Cliente genérico" (ver resolveOrCreateDespatchContact).
+	contactID, err := s.resolveOrCreateDespatchContact(input.Destinatario)
+	if err != nil {
+		return nil, fmt.Errorf("resolver contacto destinatario: %w", err)
+	}
+
 	guiaSale := database.TenantSale{
 		BranchID:      input.BranchID,
 		SeriesID:      input.SeriesID,
@@ -1628,6 +1875,7 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 		Currency:      "PEN",
 		Status:        "paid",
 		BillingStatus: "pending",
+		ContactID:     contactID,
 	}
 	if err := s.db.Create(&guiaSale).Error; err != nil {
 		return nil, fmt.Errorf("crear venta guía: %w", err)
@@ -1813,16 +2061,16 @@ type RetentionProveedorInput struct {
 }
 
 type RetentionDetailInput struct {
-	TipoDoc        string                    `json:"tipo_doc"`
-	NumDoc         string                    `json:"num_doc"`
-	FechaEmision   string                    `json:"fecha_emision"`
-	ImpTotal       float64                   `json:"imp_total"`
-	Moneda         string                    `json:"moneda"`
-	Pagos          []retentionPaymentInput   `json:"pagos"`
-	FechaRetencion string                    `json:"fecha_retencion"`
-	ImpRetenido    float64                   `json:"imp_retenido"`
-	ImpPagar       float64                   `json:"imp_pagar"`
-	TipoCambio     *retentionExchangeInput   `json:"tipo_cambio,omitempty"`
+	TipoDoc        string                  `json:"tipo_doc"`
+	NumDoc         string                  `json:"num_doc"`
+	FechaEmision   string                  `json:"fecha_emision"`
+	ImpTotal       float64                 `json:"imp_total"`
+	Moneda         string                  `json:"moneda"`
+	Pagos          []retentionPaymentInput `json:"pagos"`
+	FechaRetencion string                  `json:"fecha_retencion"`
+	ImpRetenido    float64                 `json:"imp_retenido"`
+	ImpPagar       float64                 `json:"imp_pagar"`
+	TipoCambio     *retentionExchangeInput `json:"tipo_cambio,omitempty"`
 }
 
 func (s *BillingService) CreateAndSendRetention(input CreateRetentionInput) (*database.TenantRetention, error) {
@@ -1895,7 +2143,7 @@ func (s *BillingService) CreateAndSendRetention(input CreateRetentionInput) (*da
 		Tasa:         input.Tasa,
 		ImpRetenido:  roundMoney(input.ImpRetenido),
 		ImpPagado:    roundMoney(input.ImpPagado),
-		Observacion:  strings.TrimSpace(input.Observacion),
+		Observacion:  facturador.SanitizeFreeText(input.Observacion),
 		Details:      details,
 	}
 	issueDate := time.Now()
@@ -2139,7 +2387,7 @@ func (s *BillingService) CreateAndSendPerception(input CreatePerceptionInput) (*
 		Tasa:         input.Tasa,
 		ImpPercibido: roundMoney(input.ImpPercibido),
 		ImpCobrado:   roundMoney(input.ImpCobrado),
-		Observacion:  strings.TrimSpace(input.Observacion),
+		Observacion:  facturador.SanitizeFreeText(input.Observacion),
 		Details:      details,
 	}
 	issueDate := time.Now()
@@ -2292,7 +2540,7 @@ func (s *BillingService) CreateReversion(details []CreateVoidedInput) (*database
 		if err := validateReversionDetail(d.TipoDoc, d.Serie, d.Correlativo, d.DesMotivoBaja); err != nil {
 			return nil, fmt.Errorf("línea %d: %w", i+1, err)
 		}
-		voidedDetails[i] = facturador.VoidedDetail{TipoDoc: d.TipoDoc, Serie: strings.ToUpper(strings.TrimSpace(d.Serie)), Correlativo: strings.TrimSpace(d.Correlativo), DesMotivoBaja: strings.TrimSpace(d.DesMotivoBaja)}
+		voidedDetails[i] = facturador.VoidedDetail{TipoDoc: d.TipoDoc, Serie: strings.ToUpper(strings.TrimSpace(d.Serie)), Correlativo: strings.TrimSpace(d.Correlativo), DesMotivoBaja: facturador.SanitizeFreeText(d.DesMotivoBaja)}
 	}
 	payload := &facturador.VoidedPayload{
 		Company:         facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},

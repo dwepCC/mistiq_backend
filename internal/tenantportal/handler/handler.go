@@ -151,6 +151,87 @@ func (h *Handler) SubmitPayment(c fiber.Ctx) error {
 	})
 }
 
+// SubmitRenewalRequest POST /api/subscription/renewal-request (multipart) — el tenant elige un
+// plan y opcionalmente adjunta comprobante en el mismo paso. A diferencia de SubmitPayment
+// (POST /payments), acá el comprobante NO es obligatorio: sin él queda pending_review sin acceso
+// provisional, esperando que el admin la procese manualmente; con él se comporta como un pago
+// normal (provisional si corresponde, ver saas.SubmitPayment).
+func (h *Handler) SubmitRenewalRequest(c fiber.Ctx) error {
+	tid := tenantID(c)
+	planID, _ := strconv.ParseUint(c.FormValue("plan_id"), 10, 32)
+	periodMonths, _ := strconv.Atoi(c.FormValue("period_months"))
+	amount, _ := strconv.ParseFloat(c.FormValue("amount"), 64)
+	method := strings.TrimSpace(c.FormValue("payment_method"))
+	reference := strings.TrimSpace(c.FormValue("reference"))
+	notes := c.FormValue("notes")
+
+	var paymentDate *time.Time
+	if pd := strings.TrimSpace(c.FormValue("payment_date")); pd != "" {
+		if t, err := time.ParseInLocation("2006-01-02", pd, saas.LimaLocation()); err == nil {
+			paymentDate = &t
+		}
+	}
+
+	receiptURL := ""
+	if file, err := c.FormFile("receipt"); err == nil && file != nil {
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		allowed := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".pdf": true, ".webp": true}
+		if !allowed[ext] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "formato no permitido"})
+		}
+		if file.Size > uploadlimits.MaxFileBytes {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "archivo máximo 10 MB"})
+		}
+		dir := filepath.Join("storage", "saas", "receipts", fmt.Sprintf("tenant_%d", tid))
+		_ = os.MkdirAll(dir, 0755)
+		filename := fmt.Sprintf("%s_%d%s", uuid.New().String(), time.Now().Unix(), ext)
+		savePath := filepath.Join(dir, filename)
+		if err := c.SaveFile(file, savePath); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "error guardando comprobante"})
+		}
+		receiptURL = "/" + strings.ReplaceAll(savePath, "\\", "/")
+	}
+
+	payment, err := saas.SubmitRenewalRequest(saas.SubmitRenewalRequestInput{
+		TenantID:      tid,
+		PlanID:        uint(planID),
+		PeriodMonths:  periodMonths,
+		Amount:        amount,
+		PaymentMethod: method,
+		PaymentDate:   paymentDate,
+		Reference:     reference,
+		ReceiptURL:    receiptURL,
+		Notes:         notes,
+		SubmittedBy:   userID(c),
+	})
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	hub, _ := saas.GetBillingHub(tid)
+	msg := "Solicitud enviada; pendiente de validación"
+	if receiptURL == "" {
+		msg = "Solicitud de plan enviada; un asesor la revisará y te contactará para el pago"
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"success": true,
+		"message": msg,
+		"payment": payment,
+		"hub":     hub,
+	})
+}
+
+// ListPlans GET /api/subscription/plans — planes activos para elegir/renovar. Exento del
+// SubscriptionGate (prefijo /api/subscription completo, ver subscription_paths.go): el tenant
+// debe poder ver esto incluso con la suscripción vencida/suspendida/bloqueada, es justo la
+// salida que necesita en ese estado.
+func (h *Handler) ListPlans(c fiber.Ctx) error {
+	plans, err := saas.ListActivePlansView()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"plans": plans})
+}
+
 // ListDocumentPackages GET catálogo activo.
 func (h *Handler) ListDocumentPackages(c fiber.Ctx) error {
 	rows, err := docusage.ListActiveCatalog()

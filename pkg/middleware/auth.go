@@ -45,12 +45,30 @@ type TenantClaims struct {
 	jwt.RegisteredClaims
 }
 
-// Claims para super admin
+// Claims para super admin.
+//
+// TokenVersion y SAJWTVersion son de la Fase 4 (RBAC central) — ver jwt_superadmin.go para su
+// validación completa. Role=="superadmin" sigue siendo bypass de PERMISOS únicamente; nunca de
+// autenticación (Active/DeletedAt/TokenVersion se validan igual para cualquier valor de Role).
 type SuperAdminClaims struct {
 	UserID uint   `json:"user_id"`
 	Email  string `json:"email"`
 	Role   string `json:"role"`
 	Type   string `json:"type"` // "superadmin"
+	// TokenVersion debe igualar SuperAdminUser.TokenVersion vigente en BD — si no coincide, la
+	// sesión fue revocada (ver database.SuperAdminUser.IncrementTokenVersion) y el token se
+	// rechaza aunque la firma y la expiración sean válidas.
+	TokenVersion uint `json:"token_version"`
+	// Permissions: ["*"] para superadmin real; permisos efectivos del rol asignado (RoleID) para
+	// el resto, resueltos al momento del login (ver auth_sa_handler.go LoginAPI). Un cambio de
+	// rol o de los permisos de un rol invalida estos valores cacheados en el JWT — por eso ese
+	// mismo cambio debe incrementar TokenVersion (ver database.SuperAdminUser.IncrementTokenVersion),
+	// para que el token con los permisos viejos deje de pasar la verificación de sesión antes de
+	// que nadie llegue a leer este campo desde un token desactualizado.
+	Permissions []string `json:"permissions"`
+	// SAJWTVersion — piso de versión de JWT para invalidar tokens legacy sin migración de datos.
+	// Ver MinSuperAdminJWTVersion en jwt_superadmin.go.
+	SAJWTVersion uint `json:"sa_jwt_version"`
 	jwt.RegisteredClaims
 }
 
@@ -252,15 +270,30 @@ func SuperAdminAuthWeb() fiber.Handler {
 			c.ClearCookie("sa_token")
 			return c.Redirect().To("/superadmin/login")
 		}
+		if err := validateSuperAdminJWTVersion(claims); err != nil {
+			c.ClearCookie("sa_token")
+			return c.Redirect().To("/superadmin/login")
+		}
+		if _, err := verifySuperAdminSession(claims); err != nil {
+			c.ClearCookie("sa_token")
+			return c.Redirect().To("/superadmin/login")
+		}
 
 		c.Locals("sa_user_id", claims.UserID)
 		c.Locals("sa_user_email", claims.Email)
 		c.Locals("sa_user_role", claims.Role)
+		c.Locals("sa_claims", claims)
 		return c.Next()
 	}
 }
 
-// SuperAdminAuthAPI protege rutas API del super admin (Bearer token)
+// SuperAdminAuthAPI protege rutas API del super admin (Bearer token).
+//
+// Fase 4: además de firma/expiración, valida en BD en cada request que el usuario siga
+// existiendo, activo, y que TokenVersion no haya sido revocada (verifySuperAdminSession) — el
+// JWT deja de ser la única fuente de verdad de la sesión. Ver nota de rendimiento: esto agrega
+// una consulta a BD por request autenticado, deliberadamente (mismo trade-off que
+// BranchContextMiddleware ya hace para tenants); no se cachea en esta fase — ver jwt_superadmin.go.
 func SuperAdminAuthAPI() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		// El login del superadmin es público — no requiere token
@@ -285,10 +318,17 @@ func SuperAdminAuthAPI() fiber.Handler {
 		if err != nil || !t.Valid || claims.Type != "superadmin" {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Token inválido o expirado"})
 		}
+		if err := validateSuperAdminJWTVersion(claims); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+		}
+		if _, err := verifySuperAdminSession(claims); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+		}
 
 		c.Locals("sa_user_id", claims.UserID)
 		c.Locals("sa_user_email", claims.Email)
 		c.Locals("sa_user_role", claims.Role)
+		c.Locals("sa_claims", claims)
 		return c.Next()
 	}
 }

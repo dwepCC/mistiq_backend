@@ -16,7 +16,9 @@ const (
 )
 
 var (
-	ComputeCycleAmounts = pricing.ComputeCycleAmounts
-	NormalizeDiscount   = pricing.NormalizeDiscount
-	ErrInvalidDiscount  = pricing.ErrInvalidDiscount
+	ComputeCycleAmounts    = pricing.ComputeCycleAmounts
+	NormalizeDiscount      = pricing.NormalizeDiscount
+	ErrInvalidDiscount     = pricing.ErrInvalidDiscount
+	FixedPlanCycleMonths   = pricing.FixedPlanCycleMonths
+	IsFixedPlanCycleMonths = pricing.IsFixedPlanCycleMonths
 )

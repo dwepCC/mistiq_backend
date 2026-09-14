@@ -105,6 +105,10 @@ func RunLimaDailyEvaluation() (statusUpdates int, suspended int, overdueCycles i
 		// ventas decida (las renovaciones sí siguen suspendiéndose solas al vencer + gracia).
 		payWindow := EffectivePaymentWindowDays(cfg)
 		overdueLimit := CalendarDateLima(now).AddDate(0, 0, -payWindow)
+		// A propósito: status = pending, NUNCA "!= paid" ni algo que también matche
+		// pending_review. Un ciclo con un comprobante ya subido y esperando revisión no debe
+		// darse por vencido solo porque el admin tarda en aprobarlo/rechazarlo — ver
+		// SaasInvoicePendingReview en saas_models.go y SubmitPayment/RejectPayment.
 		res := database.CentralDB.Model(&database.SaasBillingCycle{}).
 			Where("tenant_id = ? AND status = ?", sub.TenantID, database.SaasInvoicePending).
 			Where("due_date < ?", overdueLimit).

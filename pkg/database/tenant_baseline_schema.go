@@ -19,6 +19,8 @@ func ApplyBaselineSchema(db *gorm.DB) error {
 		&TenantContact{},
 		&TenantContactPerson{},
 		&TenantCategory{},
+		&TenantBrand{},
+		&TenantUnit{},
 		&TenantPreparationArea{},
 		&TenantProduct{},
 		&TenantProductStock{},

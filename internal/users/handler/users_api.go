@@ -5,6 +5,7 @@ import (
 
 	"tukifac/internal/users/service"
 	"tukifac/pkg/branch"
+	"tukifac/pkg/database"
 	"tukifac/pkg/middleware"
 	"tukifac/pkg/saas"
 
@@ -46,6 +47,10 @@ func (h *UserHandler) ListAPI(c fiber.Ctx) error {
 		BranchNames    []string `json:"branch_names,omitempty"`
 		Active         bool     `json:"active"`
 		RoleEditLocked bool     `json:"role_edit_locked"`
+		// IsOwner: el primer usuario creado al aprovisionar el tenant. El frontend lo usa para
+		// bloquear también el control de "Activo" — ver UserService.Update/ToggleActive, que
+		// rechazan desactivarlo (sin él, MasterAccess de soporte queda sin destinatario).
+		IsOwner bool `json:"is_owner"`
 	}
 	out := make([]UserOut, 0, len(users))
 	for _, u := range users {
@@ -53,6 +58,9 @@ func (h *UserHandler) ListAPI(c fiber.Ctx) error {
 		ro.RoleName = roleNames[u.RoleID]
 		if locked, err := svc.TenantRoleEditLocked(u.ID, u.RoleID); err == nil {
 			ro.RoleEditLocked = locked
+		}
+		if isOwner, err := database.IsTenantOwnerUser(db, u.ID); err == nil {
+			ro.IsOwner = isOwner
 		}
 		if u.BranchID != nil {
 			ro.BranchName = branchNames[*u.BranchID]
@@ -88,6 +96,9 @@ func (h *UserHandler) GetAPI(c fiber.Ctx) error {
 	}
 	if locked, err := service.NewUserService(tenantDB(c)).TenantRoleEditLocked(u.ID, u.RoleID); err == nil {
 		data["role_edit_locked"] = locked
+	}
+	if isOwner, err := database.IsTenantOwnerUser(tenantDB(c), u.ID); err == nil {
+		data["is_owner"] = isOwner
 	}
 	if ids, err := branch.ResolveDisplayBranchIDs(tenantDB(c), u.ID, u.HomeBranchID, u.BranchID); err == nil && len(ids) > 0 {
 		data["branch_ids"] = ids

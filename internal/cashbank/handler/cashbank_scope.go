@@ -3,7 +3,6 @@ package handler
 import (
 	"strings"
 
-	"tukifac/internal/cashbank/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/middleware"
 	"tukifac/pkg/restaurantperm"
@@ -34,23 +33,6 @@ func canAccessCashSession(c fiber.Ctx, sess *database.TenantCashSession) bool {
 		return true
 	}
 	return sess.OpenedBy == userID(c)
-}
-
-func filterSessionsForCaller(c fiber.Ctx, items []service.CashSessionListItem) []service.CashSessionListItem {
-	if canManageAnyCashSession(c) {
-		return items
-	}
-	uid := userID(c)
-	if uid == 0 {
-		return nil
-	}
-	out := make([]service.CashSessionListItem, 0, len(items))
-	for _, it := range items {
-		if it.OpenedBy == uid {
-			out = append(out, it)
-		}
-	}
-	return out
 }
 
 func callerUserIDOrZero(c fiber.Ctx) uint {

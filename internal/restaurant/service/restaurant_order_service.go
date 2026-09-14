@@ -53,16 +53,24 @@ type OpenSessionInput struct {
 }
 
 // UpdateSessionInput actualiza metadatos del pedido sin tocar ítems.
+//
+// IMPORTANTE: el handler (UpdateSession) hace c.Bind().JSON(&body) directo sobre este struct — a
+// diferencia de OpenSession, que bindea a un struct local con tags y recién ahí arma
+// OpenSessionInput a mano. Sin json tags acá, encoding/json no mapea el "customer_name" (snake_case)
+// del frontend a CustomerName y el campo queda en "" — UpdateSession() abajo lo escribe tal cual
+// con un Updates() incondicional, así que CADA PATCH borraba nombre/teléfono/notas/dirección aunque
+// el request sí trajera el dato correcto (bug real: se perdían al enviar a cocina, guardar
+// borrador, etc. — cualquier PATCH a una sesión ya creada).
 type UpdateSessionInput struct {
-	ContactID         *uint
-	CustomerName      string
-	CustomerPhone     string
-	DeliveryDriverID  *uint
-	DeliveryAddress   string
-	DeliveryReference string
-	EstimatedMinutes  int
-	Notes             string
-	OrderStatus       string
+	ContactID         *uint  `json:"contact_id"`
+	CustomerName      string `json:"customer_name"`
+	CustomerPhone     string `json:"customer_phone"`
+	DeliveryDriverID  *uint  `json:"delivery_driver_id"`
+	DeliveryAddress   string `json:"delivery_address"`
+	DeliveryReference string `json:"delivery_reference"`
+	EstimatedMinutes  int    `json:"estimated_minutes"`
+	Notes             string `json:"notes"`
+	OrderStatus       string `json:"order_status"`
 }
 
 // OrderSummary vista agrupada para comandas / POS.
@@ -360,6 +368,59 @@ func (s *RestaurantService) UpdateSession(sessionID uint, in UpdateSessionInput)
 		updates["order_status"] = in.OrderStatus
 	}
 	return s.db.Model(&sess).Updates(updates).Error
+}
+
+// MoveSessionTable reasigna una sesión abierta a otra mesa (el cliente se cambia de mesa). No
+// toca ítems/comandas, solo table_id — la mesa origen queda libre y la destino ocupada. Requiere
+// que la destino no tenga ya otra sesión open (índice ux_open_session_per_table lo garantiza a
+// nivel de BD; aquí se valida antes para dar un error legible).
+func (s *RestaurantService) MoveSessionTable(sessionID, newTableID, branchID uint) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var sess database.TenantTableSession
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&sess, sessionID).Error; err != nil {
+			return errors.New("pedido no encontrado")
+		}
+		if sess.Status != sessionStatusOpen {
+			return errors.New("el pedido ya está cerrado")
+		}
+		if sess.TableID == nil {
+			return errors.New("este pedido no está asignado a una mesa")
+		}
+		oldTableID := *sess.TableID
+		if oldTableID == newTableID {
+			return errors.New("la sesión ya está en esa mesa")
+		}
+
+		var newTable database.TenantRestaurantTable
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&newTable, newTableID).Error; err != nil {
+			return errors.New("mesa destino no encontrada")
+		}
+		if !newTable.Active {
+			return errors.New("la mesa destino está inactiva")
+		}
+		if newTable.BranchID != branchID || sess.BranchID != branchID {
+			return errors.New("la mesa destino no pertenece a esta sucursal")
+		}
+
+		existing, err := s.findOpenSessionForTableLocked(tx, newTableID)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			return errors.New("la mesa destino ya está ocupada")
+		}
+
+		if err := tx.Model(&sess).Update("table_id", newTableID).Error; err != nil {
+			if isDuplicateOpenSessionError(err) {
+				return errors.New("la mesa destino ya está ocupada")
+			}
+			return err
+		}
+		if err := s.syncTableStatusFromOpenSession(tx, oldTableID); err != nil {
+			return err
+		}
+		return s.syncTableStatusFromOpenSession(tx, newTableID)
+	})
 }
 
 func (s *RestaurantService) UpdateOrderStatus(sessionID uint, orderStatus string) error {

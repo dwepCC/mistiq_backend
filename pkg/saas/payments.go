@@ -1,6 +1,7 @@
 package saas
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -58,6 +59,16 @@ func SubmitPayment(in SubmitPaymentInput) (*database.SaasPayment, error) {
 			if c.TenantID != in.TenantID {
 				return errors.New("ciclo no pertenece al tenant")
 			}
+			// Estado del ciclo como fuente de verdad (ver saas_models.go: SaasInvoicePendingReview):
+			// no se puede subir un comprobante para un ciclo ya pagado, ni para uno anulado
+			// administrativamente. Un ciclo ya en pending_review SÍ se acepta (reenvío): el
+			// comprobante anterior queda superado más abajo (supersedePriorPendingPayments).
+			switch c.Status {
+			case database.SaasInvoicePaid:
+				return errors.New("este período ya fue pagado")
+			case database.SaasInvoiceRejected:
+				return errors.New("esta factura fue anulada; contacta a soporte")
+			}
 			cycle = &c
 		}
 
@@ -79,6 +90,16 @@ func SubmitPayment(in SubmitPaymentInput) (*database.SaasPayment, error) {
 			if err := supersedePriorPendingPayments(tx, cycle.ID, NowLima()); err != nil {
 				return err
 			}
+		} else {
+			// Mismo problema, camino sin ciclo: una solicitud de renovación (SubmitRenewalRequest
+			// — "elegir plan"/renovar sin factura previa) no tiene billing_cycle_id con el que
+			// agrupar, así que supersedePriorPendingPayments no la alcanza. Sin esto, cada
+			// solicitud nueva se apilaba sin cerrar la anterior y has_pending_payment_review
+			// (state.go, cuenta TODO saas_payments.status=pending_review del tenant) se quedaba
+			// pegado en true para siempre, aunque el tenant ya hubiera vuelto a enviar otra.
+			if err := supersedePriorPendingRenewalRequestsTx(tx, in.TenantID, NowLima()); err != nil {
+				return err
+			}
 		}
 
 		status := database.SaasPayPendingReview
@@ -86,11 +107,21 @@ func SubmitPayment(in SubmitPaymentInput) (*database.SaasPayment, error) {
 			status = database.SaasPayPending
 		}
 
+		// Snapshot de método/QR/cuentas vigentes en este instante — ver payment_method_snapshot.go.
+		// Mismo punto de escritura para SubmitPayment (deuda pendiente) y SubmitRenewalRequest
+		// (renovación), que delega acá — ambos flujos quedan con la misma trazabilidad.
+		methodLabel, methodKind, methodDetails := paymentMethodSnapshot(cfg, in.PaymentMethod)
+
 		p := &database.SaasPayment{
 			TenantID: in.TenantID, Amount: in.Amount, Currency: "PEN",
 			PeriodMonths: in.PeriodMonths, PaymentMethod: in.PaymentMethod,
+			PaymentMethodLabel: methodLabel, PaymentMethodKind: methodKind, PaymentDetailsJSON: methodDetails,
 			PaymentDate: in.PaymentDate, Reference: in.Reference,
 			ReceiptURL: in.ReceiptURL, Notes: in.Notes, Status: status, SubmittedBy: in.SubmittedBy,
+		}
+		if in.PlanID > 0 {
+			planID := in.PlanID
+			p.RequestedPlanID = &planID
 		}
 		if cycle != nil {
 			p.BillingCycleID = &cycle.ID
@@ -112,7 +143,28 @@ func SubmitPayment(in SubmitPaymentInput) (*database.SaasPayment, error) {
 		}
 		payment = p
 
-		if !in.FromAdmin && cfg.ProvisionalReactivationEnabled && cycle != nil && !cycle.ProvisionalUsed {
+		// El ciclo pasa a pending_review en cuanto hay un comprobante esperando aprobación: es lo
+		// que hace que /subscription/summary deje de mostrar "Pagar ahora" mientras se revisa (ver
+		// RejectPayment para el camino de vuelta) y que el cron de vencidos (que solo barre
+		// 'pending') deje de tocarlo. Idempotente si ya estaba en pending_review (reenvío).
+		if cycle != nil && cycle.Status != database.SaasInvoicePendingReview {
+			if err := tx.Model(&database.SaasBillingCycle{}).Where("id = ?", cycle.ID).
+				Update("status", database.SaasInvoicePendingReview).Error; err != nil {
+				return err
+			}
+		}
+
+		// Cupo para otorgar provisional: por ciclo (provisional_used, 1 vez por ciclo) o, sin
+		// ciclo (solicitud de plan nueva, ver renewal_request.go: SubmitRenewalRequest), por que
+		// la suscripción no tenga ya un provisional vigente (evita extenderlo indefinido a punta
+		// de solicitudes repetidas sin que nunca se apruebe nada).
+		provisionalSlotFree := false
+		if cycle != nil {
+			provisionalSlotFree = !cycle.ProvisionalUsed
+		} else if hasSub {
+			provisionalSlotFree = sub.ProvisionalUntil == nil || sub.ProvisionalUntil.Before(NowLima())
+		}
+		if !in.FromAdmin && cfg.ProvisionalReactivationEnabled && hasSub && provisionalSlotFree && in.ReceiptURL != "" {
 			needsProvisional := sub.Status == database.SaasSubSuspended ||
 				sub.Status == database.SaasSubOverdue ||
 				tenant.Status == database.TenantStatusSuspended
@@ -124,8 +176,10 @@ func SubmitPayment(in SubmitPaymentInput) (*database.SaasPayment, error) {
 				}).Error; err != nil {
 					return err
 				}
-				if err := tx.Model(cycle).Update("provisional_used", true).Error; err != nil {
-					return err
+				if cycle != nil {
+					if err := tx.Model(cycle).Update("provisional_used", true).Error; err != nil {
+						return err
+					}
 				}
 				if err := tx.Model(&tenant).Update("status", database.TenantStatusActive).Error; err != nil {
 					return err
@@ -134,10 +188,12 @@ func SubmitPayment(in SubmitPaymentInput) (*database.SaasPayment, error) {
 					return err
 				}
 				sid := sub.ID
+				meta := map[string]interface{}{"payment_id": p.ID, "until": until.Format(time.RFC3339)}
+				if cycle != nil {
+					meta["billing_cycle_id"] = cycle.ID
+				}
 				LogEventTx(tx, in.TenantID, &sid, EventProvisionalGranted, "tenant", in.SubmittedBy,
-					"reactivación provisional", MetaJSON(map[string]interface{}{
-						"payment_id": p.ID, "until": until.Format(time.RFC3339), "billing_cycle_id": cycle.ID,
-					}))
+					"reactivación provisional", MetaJSON(meta))
 			}
 		}
 		return nil
@@ -160,7 +216,8 @@ func SubmitPayment(in SubmitPaymentInput) (*database.SaasPayment, error) {
 // suscripción nueva ni una deuda fantasma del período recién pagado); el ciclo pagado queda
 // ligado a la suscripción y sirve de cupo de documentos del período.
 func ApprovePayment(paymentID uint, planID uint, periodMonths int, adminNotes string, reviewerID uint) error {
-	return database.CentralDB.Transaction(func(tx *gorm.DB) error {
+	var tenantID uint
+	err := database.CentralDB.Transaction(func(tx *gorm.DB) error {
 		var payment database.SaasPayment
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&payment, paymentID).Error; err != nil {
 			return errors.New("pago no encontrado")
@@ -210,6 +267,37 @@ func ApprovePayment(paymentID uint, planID uint, periodMonths int, adminNotes st
 			}
 		}
 
+		// Foto de "cómo estaba todo antes de aprobar" — RevertApprovedPayment la usa para
+		// deshacer esta aprobación con precisión (ver approvalSnapshot). Se arma acá, antes de
+		// tocar nada, y se guarda en el pago recién al final (ya con el resultado de la
+		// extensión, para saber si creó ciclo/suscripción nuevos).
+		snap := approvalSnapshot{
+			TenantPlan:           tenant.Plan,
+			TenantStatus:         tenant.Status,
+			TenantStrikeCount:    tenant.StrikeCount,
+			TenantPaymentBlocked: tenant.PaymentBlocked,
+			HadSubscription:      hasCurSub,
+		}
+		if hasCurSub {
+			snap.PrevSubscriptionID = curSub.ID
+			snap.PrevSubPlanID = curSub.PlanID
+			snap.PrevSubBillingCycle = curSub.BillingCycle
+			snap.PrevSubEndDate = &curSub.EndDate
+			snap.PrevSubStatus = curSub.Status
+			snap.PrevSubBilledMonths = curSub.BilledMonths
+			snap.PrevSubDiscountType = curSub.DiscountType
+			snap.PrevSubDiscountValue = curSub.DiscountValue
+			snap.PrevSubProvisionalUntil = curSub.ProvisionalUntil
+			snap.PrevSubGraceEndsAt = curSub.GraceEndsAt
+			snap.PrevSubNotes = curSub.Notes
+		}
+		cycleExistedBefore := cycle != nil
+		if cycleExistedBefore {
+			snap.CyclePrevStatus = cycle.Status
+			snap.CyclePrevPaidAt = cycle.PaidAt
+			snap.CyclePrevPaymentID = cycle.PaymentID
+		}
+
 		now := NowLima()
 		if err := tx.Model(&payment).Updates(map[string]interface{}{
 			"status": database.SaasPayApproved, "admin_notes": adminNotes,
@@ -221,6 +309,10 @@ func ApprovePayment(paymentID uint, planID uint, periodMonths int, adminNotes st
 		if planID == 0 {
 			if cycle != nil && cycle.PlanID > 0 {
 				planID = cycle.PlanID
+			} else if payment.RequestedPlanID != nil && *payment.RequestedPlanID > 0 {
+				// Sin ciclo: es una solicitud de plan del tenant (ver SubmitRenewalRequest), no un
+				// cobro ya emitido. Su elección pesa más que quedarse callado con el plan viejo.
+				planID = *payment.RequestedPlanID
 			} else if hasCurSub {
 				planID = curSub.PlanID
 			}
@@ -233,7 +325,18 @@ func ApprovePayment(paymentID uint, planID uint, periodMonths int, adminNotes st
 			sub, err = extendSubscriptionToCycleTx(tx, payment.TenantID, planID, cycle,
 				fmt.Sprintf("Pago #%d aprobado", paymentID))
 		} else {
-			// Edge: pago sin ningún ciclo → extensión clásica por meses del plan.
+			// Edge: pago sin ningún ciclo → extensión clásica por meses del plan. Es el caso de
+			// una solicitud de plan de autoservicio (ver SubmitRenewalRequest): el tenant ya vio
+			// y pagó el descuento del ciclo fijo que eligió — sin recuperarlo acá, la suscripción/
+			// ciclo que resulta de aprobar quedaría al precio pleno, aunque haya pagado con
+			// descuento.
+			//
+			// extendSubscriptionTx crea/toca el ciclo del tramo recién cubierto (renewInPlaceTx o
+			// ensureBillingCycleTx) — ese es precisamente el ciclo que este pago paga, así que se
+			// recoge en newCycle para enlazarlo abajo. Antes se perdía (quedaba "pending" para
+			// siempre, sin payment_id): el pago figuraba "approved" en el panel central pero el
+			// tenant seguía viendo "pendiente" con botón pagar, porque /subscription/summary lee
+			// el estado desde saas_billing_cycles, no desde saas_payments.
 			extendMonths := periodMonths
 			if extendMonths <= 0 {
 				extendMonths = payment.PeriodMonths
@@ -241,18 +344,55 @@ func ApprovePayment(paymentID uint, planID uint, periodMonths int, adminNotes st
 			if extendMonths <= 0 && hasCurSub && curSub.BillingCycle != "" {
 				extendMonths = CycleMonthsFromBilling(curSub.BillingCycle)
 			}
-			sub, err = extendSubscriptionTx(tx, payment.TenantID, planID, extendMonths,
-				fmt.Sprintf("Pago #%d aprobado", paymentID))
+			var newCycle *database.SaasBillingCycle
+			sub, newCycle, err = extendSubscriptionTx(tx, payment.TenantID, planID, extendMonths,
+				fmt.Sprintf("Pago #%d aprobado", paymentID), nil, PlanCycleDiscount(planID, extendMonths))
+			cycle = newCycle
 		}
 		if err != nil {
 			return err
 		}
+		// El pago que llegó sin billing_cycle_id (solicitud de renovación, ver
+		// SubmitRenewalRequest) queda enlazado al ciclo que terminó pagando — sin esto el pago
+		// aprobado se quedaba con billing_cycle_id NULL para siempre aunque el ciclo sí supiera
+		// qué pago lo saldó (cycle.payment_id): el enlace solo iba en un sentido. Rompía, entre
+		// otras cosas, el comprobante del tenant (InvoiceView.ReceiptURL) para ese período.
+		if cycle != nil && payment.BillingCycleID == nil {
+			if err := tx.Model(&payment).Update("billing_cycle_id", cycle.ID).Error; err != nil {
+				return err
+			}
+			payment.BillingCycleID = &cycle.ID
+		}
 
-		if err := tx.Model(&payment).Update("subscription_id", sub.ID).Error; err != nil {
+		// Completa el snapshot con el resultado de la extensión: si abrió una suscripción nueva
+		// (cambio de plan) en vez de extender en sitio, y si el ciclo final no existía antes de
+		// este approve (lo creó recién la extensión) — ambos datos los necesita
+		// RevertApprovedPayment para saber qué deshacer y qué NO tocar.
+		snap.CreatedNewSubscription = hasCurSub && sub.ID != curSub.ID
+		if cycle != nil {
+			snap.CycleID = cycle.ID
+			snap.CycleWasCreated = !cycleExistedBefore
+		}
+		snapJSON, err := json.Marshal(snap)
+		if err != nil {
+			return fmt.Errorf("armando snapshot de reversión: %w", err)
+		}
+
+		if err := tx.Model(&payment).Updates(map[string]interface{}{
+			"subscription_id":            sub.ID,
+			"pre_approval_snapshot_json": string(snapJSON),
+		}).Error; err != nil {
 			return err
 		}
+		// Único punto que cierra "pago aprobado → ciclo pagado", para las dos rutas de arriba
+		// (ciclo ya existente, o ciclo recién creado al extender). Antes esto solo corría para el
+		// primer caso, así que un pago sin billing_cycle_id (o cuyo ciclo pendiente ya lo había
+		// cerrado otro pago segundos antes) aprobaba y extendía la suscripción correctamente, pero
+		// dejaba su propio ciclo huérfano en "pending".
 		if cycle != nil {
-			_ = markCyclePaidTx(tx, cycle.ID, payment.ID)
+			if err := markCyclePaidTx(tx, cycle.ID, payment.ID); err != nil {
+				return err
+			}
 			// Si el mismo ciclo tenía otro(s) pago(s) que quedaron pending_review sin
 			// resolver (p. ej. un comprobante viejo que nadie aprobó/rechazó y luego el
 			// tenant volvió a pagar), quedaban colgados para siempre: guardBillingCycleApprove
@@ -262,6 +402,16 @@ func ApprovePayment(paymentID uint, planID uint, periodMonths int, adminNotes st
 			if err := supersedeSiblingPendingPayments(tx, cycle.ID, payment.ID, reviewerID, now); err != nil {
 				return err
 			}
+			// Cinturón de seguridad: si por algún camino futuro esto dejara de cumplirse, que
+			// falle fuerte y aborte la transacción en vez de aprobar en silencio con el ciclo
+			// suelto — el bug que motivó este bloque era exactamente eso, y no daba ni un error.
+			var check database.SaasBillingCycle
+			if err := tx.First(&check, cycle.ID).Error; err != nil {
+				return err
+			}
+			if check.Status != database.SaasInvoicePaid || check.PaymentID == nil || *check.PaymentID != payment.ID {
+				return fmt.Errorf("inconsistencia al aprobar pago #%d: el ciclo #%d no quedó pagado/enlazado", payment.ID, cycle.ID)
+			}
 		}
 
 		sid := sub.ID
@@ -270,8 +420,202 @@ func ApprovePayment(paymentID uint, planID uint, periodMonths int, adminNotes st
 		}
 		LogEventTx(tx, payment.TenantID, &sid, EventPaymentApproved, "admin", &reviewerID, adminNotes, "")
 		LogEventTx(tx, payment.TenantID, &sid, EventReactivated, "admin", &reviewerID, adminNotes, "")
+		tenantID = payment.TenantID
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	// Mismo patrón que SubmitPayment/RejectPayment: invalidar tras comprometer la transacción,
+	// para que /subscription/summary no siga sirviendo el estado viejo desde caché (hasta 10s).
+	// Antes ApprovePayment no invalidaba nada — única mutación del paquete que se saltaba esto.
+	InvalidateTenantCache(tenantID)
+	return nil
+}
+
+// approvalSnapshot es la foto de "cómo estaba todo antes de aprobar este pago" — la captura
+// ApprovePayment antes de tocar nada y la usa RevertApprovedPayment para deshacer la aprobación
+// con precisión, en vez de reconstruir el estado previo adivinando a partir de otros ciclos.
+type approvalSnapshot struct {
+	TenantPlan           string `json:"tenant_plan"`
+	TenantStatus         string `json:"tenant_status"`
+	TenantStrikeCount    int    `json:"tenant_strike_count"`
+	TenantPaymentBlocked bool   `json:"tenant_payment_blocked"`
+
+	HadSubscription         bool       `json:"had_subscription"`
+	PrevSubscriptionID      uint       `json:"prev_subscription_id,omitempty"`
+	PrevSubPlanID           uint       `json:"prev_sub_plan_id,omitempty"`
+	PrevSubBillingCycle     string     `json:"prev_sub_billing_cycle,omitempty"`
+	PrevSubEndDate          *time.Time `json:"prev_sub_end_date,omitempty"`
+	PrevSubStatus           string     `json:"prev_sub_status,omitempty"`
+	PrevSubBilledMonths     int        `json:"prev_sub_billed_months,omitempty"`
+	PrevSubDiscountType     string     `json:"prev_sub_discount_type,omitempty"`
+	PrevSubDiscountValue    float64    `json:"prev_sub_discount_value,omitempty"`
+	PrevSubProvisionalUntil *time.Time `json:"prev_sub_provisional_until,omitempty"`
+	PrevSubGraceEndsAt      *time.Time `json:"prev_sub_grace_ends_at,omitempty"`
+	PrevSubNotes            string     `json:"prev_sub_notes,omitempty"`
+
+	// CreatedNewSubscription: true si aprobar este pago abrió una fila de suscripción nueva
+	// (cambio de plan, ver extendSubscriptionTx) en vez de extender en sitio la vigente.
+	CreatedNewSubscription bool `json:"created_new_subscription"`
+
+	CycleID uint `json:"cycle_id,omitempty"`
+	// CycleWasCreated: true si el ciclo no existía antes de aprobar (lo generó esta misma
+	// aprobación) — al revertir hay que BORRARLO, no solo cambiarle el estado: el índice único
+	// (subscription_id, period_end) impediría crear uno nuevo para el mismo tramo si el registro
+	// viejo se queda ahí con otro estado.
+	CycleWasCreated    bool       `json:"cycle_was_created"`
+	CyclePrevStatus    string     `json:"cycle_prev_status,omitempty"`
+	CyclePrevPaidAt    *time.Time `json:"cycle_prev_paid_at,omitempty"`
+	CyclePrevPaymentID *uint      `json:"cycle_prev_payment_id,omitempty"`
+}
+
+// RevertApprovedPayment anula un pago YA APROBADO y deshace exactamente lo que esa aprobación
+// produjo: la suscripción y el ciclo de facturación vuelven al estado de justo antes (o se
+// eliminan, si la aprobación los había creado), para que el tenant pueda repetir el pago o la
+// renovación desde cero. El pago NO se borra — queda 'reversed', con motivo y quién lo anuló,
+// igual que cualquier reverso contable (auditable, no un agujero en el historial).
+//
+// Solo se puede revertir el ÚLTIMO pago aprobado del tenant: si hay uno posterior ya aprobado,
+// ese encadenó su período desde el estado que dejó este (ver renewInPlaceTx), y deshacer este
+// primero rompería esa cadena. Hay que revertir el más reciente primero.
+//
+// Requiere que el pago se haya aprobado DESPUÉS de este cambio (con snapshot guardado); los
+// aprobados antes no tienen memoria de su estado previo y hay que ajustar la suscripción a mano.
+func RevertApprovedPayment(paymentID uint, reason string, actorID uint) error {
+	var tenantID uint
+	err := database.CentralDB.Transaction(func(tx *gorm.DB) error {
+		var payment database.SaasPayment
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&payment, paymentID).Error; err != nil {
+			return errors.New("pago no encontrado")
+		}
+		if payment.Status != database.SaasPayApproved {
+			return fmt.Errorf("solo se puede anular un pago aprobado (este está %s)", payment.Status)
+		}
+		if payment.PreApprovalSnapshotJSON == "" {
+			return errors.New("este pago se aprobó antes de existir la anulación automática; ajusta la suscripción manualmente")
+		}
+		tenantID = payment.TenantID
+
+		var newer database.SaasPayment
+		hasNewer := tx.Where("tenant_id = ? AND status = ? AND id <> ?", payment.TenantID, database.SaasPayApproved, payment.ID).
+			Where("reviewed_at > ? OR (reviewed_at = ? AND id > ?)", payment.ReviewedAt, payment.ReviewedAt, payment.ID).
+			Order("reviewed_at desc").First(&newer).Error == nil
+		if hasNewer {
+			return fmt.Errorf("hay un pago posterior ya aprobado (#%d) sobre esta suscripción; anula primero ese antes de revertir este", newer.ID)
+		}
+
+		var snap approvalSnapshot
+		if err := json.Unmarshal([]byte(payment.PreApprovalSnapshotJSON), &snap); err != nil {
+			return fmt.Errorf("snapshot de reversión corrupto: %w", err)
+		}
+
+		// Ciclo: si lo creó esta aprobación, se borra (no solo se despaga) — dejarlo con otro
+		// estado bloquearía crear uno nuevo para el mismo tramo cuando el tenant vuelva a pagar,
+		// por el índice único (subscription_id, period_end). Si ya existía, vuelve exactamente a
+		// como estaba (normalmente: pending, sin paid_at ni payment_id).
+		if snap.CycleID > 0 {
+			var otherPayment database.SaasPayment
+			if tx.Where("billing_cycle_id = ? AND id <> ?", snap.CycleID, payment.ID).
+				First(&otherPayment).Error == nil {
+				return fmt.Errorf("el ciclo #%d tiene otro pago (#%d) enlazado; resuélvelo antes de anular este", snap.CycleID, otherPayment.ID)
+			}
+			if snap.CycleWasCreated {
+				if err := tx.Where("id = ?", snap.CycleID).Delete(&database.SaasBillingCycle{}).Error; err != nil {
+					return err
+				}
+			} else {
+				if err := tx.Model(&database.SaasBillingCycle{}).Where("id = ?", snap.CycleID).
+					Updates(map[string]interface{}{
+						"status": snap.CyclePrevStatus, "paid_at": snap.CyclePrevPaidAt, "payment_id": snap.CyclePrevPaymentID,
+					}).Error; err != nil {
+					return err
+				}
+			}
+		}
+
+		var subID *uint
+		if snap.CreatedNewSubscription {
+			// Esta aprobación abrió una suscripción nueva (cambio de plan): se borra por completo
+			// y se reactiva la anterior, que había quedado 'expired'.
+			//
+			// Nota: si abrirla anuló (rejected) cobros solapados de la suscripción anterior vía
+			// voidOverlappingUnpaidCyclesTx, esos NO se restauran automáticamente acá — revisa
+			// saas_billing_cycles del tenant a mano si este caso (revertir un cambio de plan) aplica.
+			if payment.SubscriptionID != nil {
+				if err := tx.Where("id = ?", *payment.SubscriptionID).Delete(&database.SaasSubscription{}).Error; err != nil {
+					return err
+				}
+			}
+			if snap.HadSubscription {
+				if err := tx.Model(&database.SaasSubscription{}).Where("id = ?", snap.PrevSubscriptionID).
+					Update("status", snap.PrevSubStatus).Error; err != nil {
+					return err
+				}
+				sid := snap.PrevSubscriptionID
+				subID = &sid
+			}
+		} else if snap.HadSubscription {
+			// Caso normal de una renovación: extensión en sitio → la suscripción vuelve a sus
+			// valores de antes de aprobar.
+			if err := tx.Model(&database.SaasSubscription{}).Where("id = ?", snap.PrevSubscriptionID).
+				Updates(map[string]interface{}{
+					"plan_id": snap.PrevSubPlanID, "billing_cycle": snap.PrevSubBillingCycle,
+					"end_date": snap.PrevSubEndDate, "status": snap.PrevSubStatus,
+					"billed_months": snap.PrevSubBilledMonths,
+					"discount_type": snap.PrevSubDiscountType, "discount_value": snap.PrevSubDiscountValue,
+					"provisional_until": snap.PrevSubProvisionalUntil, "grace_ends_at": snap.PrevSubGraceEndsAt,
+					"notes": snap.PrevSubNotes,
+				}).Error; err != nil {
+				return err
+			}
+			sid := snap.PrevSubscriptionID
+			subID = &sid
+		}
+
+		if err := tx.Model(&database.Tenant{}).Where("id = ?", payment.TenantID).
+			Updates(map[string]interface{}{
+				"plan": snap.TenantPlan, "status": snap.TenantStatus,
+				"strike_count": snap.TenantStrikeCount, "payment_blocked": snap.TenantPaymentBlocked,
+			}).Error; err != nil {
+			return err
+		}
+
+		now := NowLima()
+		if err := tx.Model(&payment).Updates(map[string]interface{}{
+			"status": database.SaasPayReversed, "reversed_at": now, "reversed_by": actorID,
+			"reversal_reason": reason,
+		}).Error; err != nil {
+			return err
+		}
+		LogEventTx(tx, payment.TenantID, subID, EventPaymentReversed, "admin", &actorID, reason, "")
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	InvalidateTenantCache(tenantID)
+	return nil
+}
+
+// PlanCycleDiscount descuento del ciclo fijo del plan (si `months` calza con uno habilitado,
+// ver FixedPlanCycleMonths) — la MISMA tabla que ya usa el autoservicio del tenant
+// (SubmitRenewalRequest) y la aprobación de un pago sin ciclo (ver abajo). Exportada para que
+// el alta de empresas desde el panel central (internal/superadmin/service/tenant_service.go)
+// también la use: el descuento de una empresa nueva no debe depender de lo que el admin
+// escriba a mano, sino de lo que el plan tiene configurado para esos meses.
+// Lectura fuera de cualquier transacción a propósito (mismo patrón que LoadSettings dentro de
+// SubmitPayment): es una lectura pura, SaasPlanCycle no se modifica acá.
+func PlanCycleDiscount(planID uint, months int) Discount {
+	var plan database.SaasPlan
+	if database.CentralDB.First(&plan, planID).Error != nil {
+		return Discount{}
+	}
+	views := BuildPlanCycleViews(plan, LoadPlanCycles(planID))
+	if c := FindEnabledPlanCycle(views, months); c != nil {
+		return Discount{Type: c.DiscountType, Value: c.DiscountValue}
+	}
+	return Discount{}
 }
 
 // extendSubscriptionToCycleTx extiende EN SITIO la suscripción hasta el fin del período del ciclo
@@ -340,6 +684,7 @@ func extendSubscriptionToCycleTx(tx *gorm.DB, tenantID, planID uint, cycle *data
 // RejectPayment transacción segura: rechaza, revierte provisional, aplica strikes.
 func RejectPayment(paymentID uint, adminNotes string, reviewerID uint) error {
 	var tenantID uint
+	var tenantBlocked bool
 	err := database.CentralDB.Transaction(func(tx *gorm.DB) error {
 		var payment database.SaasPayment
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&payment, paymentID).Error; err != nil {
@@ -365,29 +710,43 @@ func RejectPayment(paymentID uint, adminNotes string, reviewerID uint) error {
 			return nil
 		}
 
+		// El ciclo vuelve de pending_review a un estado real (pending si su plazo sigue vigente,
+		// overdue si ya se agotó) — es lo que hace reaparecer el botón "Pagar ahora" en el panel
+		// del tenant SOLO al rechazar, y no antes. Mismo criterio de plazo que usa el cron diario
+		// (RunLimaDailyEvaluation), para no reabrir un ciclo como "pending" un día que el cron ya
+		// lo habría marcado "overdue".
+		if payment.BillingCycleID != nil {
+			if err := revertCycleAfterRejectionTx(tx, *payment.BillingCycleID, now); err != nil {
+				return err
+			}
+		}
+
 		var subID *uint
 		if payment.SubscriptionID != nil {
 			subID = payment.SubscriptionID
 		}
-		if payment.ProvisionalApplied && subID != nil {
-			_ = tx.Model(&database.SaasSubscription{}).Where("id = ?", *subID).Updates(map[string]interface{}{
-				"status": database.SaasSubSuspended, "provisional_until": nil,
-			})
-		}
-
+		// Qué le pasa a la suscripción (revertir provisional, suspender o no) lo decide
+		// ApplyStrikeOnReject en un solo lugar, respetando la gracia por calendario — ver su
+		// doc. Antes había un segundo `Updates` acá mismo que siempre forzaba `suspended`,
+		// pisando esa decisión.
 		_, blocked, err := ApplyStrikeOnReject(tx, payment.TenantID, subID, &reviewerID, adminNotes)
 		if err != nil {
 			return err
 		}
-		if blocked {
-			QueueNotification(payment.TenantID, 0, "in_app", "tenant_blocked", map[string]interface{}{"reason": adminNotes})
-		}
+		tenantBlocked = blocked
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	InvalidateTenantCache(tenantID)
+	// Fuera de la transacción a propósito (mismo patrón que SubmitPayment): QueueNotification
+	// escribe con database.CentralDB, no con `tx` — llamarla dentro de la transacción abierta
+	// competía por el mismo write-lock (en SQLite: SQLITE_BUSY; en cualquier motor, además,
+	// una notificación que "ya se envió" antes de que el commit sea definitivo).
+	if tenantBlocked {
+		QueueNotification(tenantID, 0, "in_app", "tenant_blocked", map[string]interface{}{"reason": adminNotes})
+	}
 	return nil
 }
 
@@ -413,17 +772,49 @@ func isDuplicateOfPaidCycle(tx *gorm.DB, billingCycleID *uint, paymentID uint) b
 	return approvedCount > 0
 }
 
-func extendSubscriptionTx(tx *gorm.DB, tenantID uint, planID uint, months int, notes string, discount ...Discount) (*database.SaasSubscription, error) {
+// revertCycleAfterRejectionTx saca un ciclo de pending_review al rechazar el pago que lo había
+// puesto ahí, devolviéndolo a 'pending' o 'overdue' según si su plazo de pago (mismo cálculo que
+// el cron RunLimaDailyEvaluation) ya se agotó o no. No hace nada si el ciclo no existe o ya no
+// está en pending_review (p. ej. lo superó un pago posterior — ver supersedePriorPendingPayments).
+func revertCycleAfterRejectionTx(tx *gorm.DB, cycleID uint, now time.Time) error {
+	var cycle database.SaasBillingCycle
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&cycle, cycleID).Error; err != nil {
+		return nil // ciclo no encontrado: nada que revertir
+	}
+	if cycle.Status != database.SaasInvoicePendingReview {
+		return nil
+	}
+	cfg, _ := LoadSettings()
+	payWindow := EffectivePaymentWindowDays(cfg)
+	overdueLimit := CalendarDateLima(now).AddDate(0, 0, -payWindow)
+	newStatus := database.SaasInvoicePending
+	if cycle.DueDate.Before(overdueLimit) {
+		newStatus = database.SaasInvoiceOverdue
+	}
+	return tx.Model(&database.SaasBillingCycle{}).Where("id = ?", cycleID).
+		Update("status", newStatus).Error
+}
+
+// startDate: piso opcional para el inicio de una suscripción SIN nada previo que continuar (alta
+// nueva, o tenant sin suscripción vigente). nil = arranca hoy, como antes. Si se pasa, debe ser
+// hoy o una fecha futura (se valida acá, no confiar solo en el frontend); típico caso de uso: se
+// registra la empresa hoy pero su suscripción/cobro real arranca unos días después. Se ignora
+// por completo en la rama de renovación en sitio (mismo plan): esa SIEMPRE encadena
+// automáticamente desde el fin de la suscripción vigente, nunca se elige a mano.
+// extendSubscriptionTx extiende/crea la suscripción y devuelve, junto con ella, el ciclo de
+// facturación que cubre el tramo recién añadido — quien llama (p. ej. ApprovePayment) lo necesita
+// para poder enlazarlo al pago que lo originó; ver comentario en ApprovePayment.
+func extendSubscriptionTx(tx *gorm.DB, tenantID uint, planID uint, months int, notes string, startDate *time.Time, discount ...Discount) (*database.SaasSubscription, *database.SaasBillingCycle, error) {
 	var d Discount
 	if len(discount) > 0 {
 		d = discount[0]
 	}
 	if tenantID == 0 || planID == 0 {
-		return nil, errors.New("tenant_id y plan_id requeridos")
+		return nil, nil, errors.New("tenant_id y plan_id requeridos")
 	}
 	var plan database.SaasPlan
 	if err := tx.First(&plan, planID).Error; err != nil {
-		return nil, errors.New("plan no encontrado")
+		return nil, nil, errors.New("plan no encontrado")
 	}
 	cycle := plan.BillingCycle
 	if cycle == "" {
@@ -448,8 +839,15 @@ func extendSubscriptionTx(tx *gorm.DB, tenantID uint, planID uint, months int, n
 		Update("status", database.SaasSubExpired)
 
 	now := NowLima()
-	var prev database.SaasSubscription
 	base := CalendarDateLima(now)
+	if startDate != nil {
+		requested := CalendarDateLima(*startDate)
+		if requested.Before(base) {
+			return nil, nil, errors.New("la fecha de inicio no puede ser anterior a hoy")
+		}
+		base = requested
+	}
+	var prev database.SaasSubscription
 	if err := tx.Where("tenant_id = ?", tenantID).Order("end_date desc").First(&prev).Error; err == nil {
 		prevDay := CalendarDateLima(prev.EndDate)
 		if prevDay.After(base) {
@@ -458,25 +856,34 @@ func extendSubscriptionTx(tx *gorm.DB, tenantID uint, planID uint, months int, n
 	}
 	endDay := base.AddDate(0, months, 0)
 
+	// Con startDate explícito, el inicio real es esa fecha (inicio del día en Lima), no el
+	// instante exacto de este request — así "arranca el 15" no queda con la hora de cuando el
+	// admin cargó el alta.
+	subStart := now
+	if startDate != nil {
+		subStart = base
+	}
+
 	sub := &database.SaasSubscription{
 		TenantID: tenantID, PlanID: planID, BillingCycle: cycle,
-		StartDate: now, EndDate: EndOfDayLima(endDay),
+		StartDate: subStart, EndDate: EndOfDayLima(endDay),
 		Status: database.SaasSubActive, Notes: notes,
 		BilledMonths: months, DiscountType: d.Type, DiscountValue: d.Value,
 	}
 	if err := tx.Create(sub).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	syncTenantModulesFromPlanTx(tx, tenantID, planID)
 	_ = tx.Model(&database.Tenant{}).Where("id = ?", tenantID).
 		Updates(map[string]interface{}{"plan": plan.Name, "status": database.TenantStatusActive}).Error
-	if _, err := ensureBillingCycleTx(tx, sub); err != nil {
-		return nil, fmt.Errorf("ciclo de facturación: %w", err)
+	newCycle, err := ensureBillingCycleTx(tx, sub)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ciclo de facturación: %w", err)
 	}
 	if err := voidOverlappingUnpaidCyclesTx(tx, tenantID, sub.ID, sub.StartDate, sub.EndDate); err != nil {
-		return nil, fmt.Errorf("anulando cobros solapados: %w", err)
+		return nil, nil, fmt.Errorf("anulando cobros solapados: %w", err)
 	}
-	return sub, nil
+	return sub, newCycle, nil
 }
 
 // voidOverlappingUnpaidCyclesTx anula los cobros impagos que el período nuevo vuelve a cubrir.
@@ -496,7 +903,7 @@ func voidOverlappingUnpaidCyclesTx(
 	var cycles []database.SaasBillingCycle
 	if err := tx.Where("tenant_id = ? AND subscription_id <> ? AND status IN ?",
 		tenantID, keepSubscriptionID,
-		[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue}).
+		[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue, database.SaasInvoicePendingReview}).
 		Find(&cycles).Error; err != nil {
 		return err
 	}
@@ -505,6 +912,15 @@ func voidOverlappingUnpaidCyclesTx(
 		// Intervalos [inicio, fin) que se cruzan en al menos un día.
 		if !c.PeriodStart.Before(newEnd) || !newStart.Before(c.PeriodEnd) {
 			continue
+		}
+		// Si había un comprobante en revisión sobre este ciclo, se rechaza en cascada: el cobro
+		// que cubría ya no existe (lo reemplazó la nueva suscripción), así que dejar el pago
+		// "en revisión" para siempre sería mostrarle al tenant una espera que nunca se resuelve.
+		if c.Status == database.SaasInvoicePendingReview {
+			if err := CascadeRejectPendingPaymentsForCycleTx(tx, c.ID, "system", nil,
+				"Rechazado automáticamente: el período quedó cubierto por una nueva suscripción"); err != nil {
+				return err
+			}
 		}
 		if err := tx.Model(c).Update("status", database.SaasInvoiceRejected).Error; err != nil {
 			return err
@@ -519,6 +935,31 @@ func voidOverlappingUnpaidCyclesTx(
 				"period_end":        CalendarDateLima(c.PeriodEnd).Format("2006-01-02"),
 				"superseded_by_sub": keepSubscriptionID,
 			}))
+	}
+	return nil
+}
+
+// CascadeRejectPendingPaymentsForCycleTx rechaza automáticamente cualquier pago pending/
+// pending_review que haya quedado ligado a un ciclo que se está anulando por una causa
+// administrativa o del sistema (el cobro que cubrían deja de existir) — no por una decisión
+// sobre el comprobante en sí. Evita que el pago quede huérfano "en revisión" para siempre.
+// Exportada: la usa tanto pkg/saas (voidOverlappingUnpaidCyclesTx, CancelInvoice) como
+// internal/subscriptions/service (Cancel de suscripción completa).
+func CascadeRejectPendingPaymentsForCycleTx(tx *gorm.DB, cycleID uint, actorType string, actorID *uint, reason string) error {
+	var pending []database.SaasPayment
+	if err := tx.Where("billing_cycle_id = ? AND status IN ?", cycleID,
+		[]string{database.SaasPayPending, database.SaasPayPendingReview}).Find(&pending).Error; err != nil {
+		return err
+	}
+	now := NowLima()
+	for _, p := range pending {
+		if err := tx.Model(&database.SaasPayment{}).Where("id = ?", p.ID).Updates(map[string]interface{}{
+			"status": database.SaasPayRejected, "admin_notes": reason,
+			"reviewed_by": actorID, "reviewed_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		LogEventTx(tx, p.TenantID, p.SubscriptionID, EventPaymentRejected, actorType, actorID, reason, "")
 	}
 	return nil
 }
@@ -549,7 +990,7 @@ func renewInPlaceTx(
 	months int,
 	notes string,
 	d Discount,
-) (*database.SaasSubscription, error) {
+) (*database.SaasSubscription, *database.SaasBillingCycle, error) {
 	base := CalendarDateLima(NowLima())
 	if end := CalendarDateLima(sub.EndDate); end.After(base) {
 		base = end
@@ -578,7 +1019,7 @@ func renewInPlaceTx(
 		"provisional_until": nil,
 		"grace_ends_at":     nil,
 	}).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Cualquier otra suscripción del tenant queda como histórico: una sola vigente.
 	_ = tx.Model(&database.SaasSubscription{}).
@@ -590,19 +1031,22 @@ func renewInPlaceTx(
 	_ = tx.Model(&database.Tenant{}).Where("id = ?", sub.TenantID).
 		Updates(map[string]interface{}{"plan": plan.Name, "status": database.TenantStatusActive}).Error
 
-	if err := createCycleForPeriodTx(tx, sub, plan, periodStart, newEnd, months, d); err != nil {
-		return nil, fmt.Errorf("ciclo de facturación: %w", err)
+	newCycle, err := createCycleForPeriodTx(tx, sub, plan, periodStart, newEnd, months, d)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ciclo de facturación: %w", err)
 	}
 	// Aquí el tramo nuevo no solapa con los cobros de esta misma suscripción, pero sí puede
 	// hacerlo con huérfanos de suscripciones anteriores del tenant.
 	if err := voidOverlappingUnpaidCyclesTx(tx, sub.TenantID, sub.ID, periodStart, newEnd); err != nil {
-		return nil, fmt.Errorf("anulando cobros solapados: %w", err)
+		return nil, nil, fmt.Errorf("anulando cobros solapados: %w", err)
 	}
 	_ = tx.First(sub, sub.ID).Error
-	return sub, nil
+	return sub, newCycle, nil
 }
 
 // createCycleForPeriodTx emite el cobro de un tramo concreto (prepago: vence al iniciarlo).
+// Devuelve siempre el ciclo vigente para ese tramo (el recién creado, o el que ya existía),
+// para que quien llama pueda enlazarlo a un pago si corresponde — nunca lo deja "perdido".
 func createCycleForPeriodTx(
 	tx *gorm.DB,
 	sub *database.SaasSubscription,
@@ -610,11 +1054,11 @@ func createCycleForPeriodTx(
 	periodStart, periodEnd time.Time,
 	months int,
 	d Discount,
-) error {
+) (*database.SaasBillingCycle, error) {
 	var existing database.SaasBillingCycle
 	if err := tx.Where("subscription_id = ? AND period_end = ?", sub.ID, periodEnd).
 		First(&existing).Error; err == nil {
-		return nil
+		return &existing, nil
 	}
 	cfg, _ := LoadSettings()
 	amounts := ComputeCycleAmounts(plan.Price, months, d)
@@ -628,18 +1072,26 @@ func createCycleForPeriodTx(
 	}
 	if err := tx.Create(cycle).Error; err != nil {
 		if isDuplicateBillingCycleErr(err) {
-			return nil
+			var raced database.SaasBillingCycle
+			if err2 := tx.Where("subscription_id = ? AND period_end = ?", sub.ID, periodEnd).
+				First(&raced).Error; err2 != nil {
+				return nil, err2
+			}
+			return &raced, nil
 		}
-		return err
+		return nil, err
 	}
 	limit := 0
 	if !plan.IsUnlimitedDocuments {
 		limit = plan.MonthlyDocumentsLimit
 	}
-	return tx.Model(cycle).Updates(map[string]interface{}{
+	if err := tx.Model(cycle).Updates(map[string]interface{}{
 		"is_unlimited_documents": plan.IsUnlimitedDocuments,
 		"documents_limit":        limit,
-	}).Error
+	}).Error; err != nil {
+		return nil, err
+	}
+	return cycle, nil
 }
 
 // guardBillingCycleApprove evita doble aprobación por ciclo (FOR UPDATE + 1 approved por billing_cycle).
@@ -690,6 +1142,30 @@ func supersedePriorPendingPayments(tx *gorm.DB, cycleID uint, now time.Time) err
 	return nil
 }
 
+// supersedePriorPendingRenewalRequestsTx es supersedePriorPendingPayments para el camino SIN
+// ciclo (SubmitRenewalRequest — "elegir plan"/renovar sin factura previa emitida): agrupa por
+// tenant_id en vez de billing_cycle_id, ya que estos pagos nunca tienen uno.
+func supersedePriorPendingRenewalRequestsTx(tx *gorm.DB, tenantID uint, now time.Time) error {
+	var prior []database.SaasPayment
+	if err := tx.Where("tenant_id = ? AND billing_cycle_id IS NULL AND status IN ?",
+		tenantID, []string{database.SaasPayPendingReview, database.SaasPayPending}).
+		Find(&prior).Error; err != nil {
+		return err
+	}
+	for _, p := range prior {
+		note := "Superado automáticamente: se envió una solicitud de renovación más reciente"
+		if err := tx.Model(&database.SaasPayment{}).Where("id = ?", p.ID).Updates(map[string]interface{}{
+			"status":      database.SaasPayRejected,
+			"admin_notes": note,
+			"reviewed_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		LogEventTx(tx, p.TenantID, p.SubscriptionID, EventPaymentRejected, "system", nil, note, "")
+	}
+	return nil
+}
+
 // supersedeSiblingPendingPayments rechaza automáticamente cualquier otro pago que haya
 // quedado pending_review/pending para el mismo ciclo de facturación ya pagado por
 // `approvedPaymentID`. Sin esto, un comprobante viejo sin resolver seguía marcando al
@@ -728,7 +1204,8 @@ func markCyclePaidTx(tx *gorm.DB, cycleID uint, paymentID uint) error {
 // ExtendSubscription crea o extiende suscripción (API pública).
 // ExtendSubscription crea la nueva suscripción del tenant. El descuento es opcional y queda
 // guardado en la suscripción, de modo que cualquier cobro que se genere para ella lo aplique.
-func ExtendSubscription(tenantID uint, planID uint, months int, notes string, discount ...Discount) (*database.SaasSubscription, error) {
+// startDate: ver extendSubscriptionTx — nil = arranca hoy (comportamiento de siempre).
+func ExtendSubscription(tenantID uint, planID uint, months int, notes string, startDate *time.Time, discount ...Discount) (*database.SaasSubscription, error) {
 	var d Discount
 	if len(discount) > 0 {
 		d = discount[0]
@@ -739,7 +1216,9 @@ func ExtendSubscription(tenantID uint, planID uint, months int, notes string, di
 	}
 	var sub *database.SaasSubscription
 	err = database.CentralDB.Transaction(func(tx *gorm.DB) error {
-		s, err := extendSubscriptionTx(tx, tenantID, planID, months, notes, norm)
+		// Alta/extensión manual sin pago detrás: el ciclo del tramo nuevo queda "pending" a
+		// propósito (es deuda real por cobrar), por eso se descarta acá.
+		s, _, err := extendSubscriptionTx(tx, tenantID, planID, months, notes, startDate, norm)
 		sub = s
 		return err
 	})

@@ -114,14 +114,15 @@ func TestRenewalChain_consecutivePeriods(t *testing.T) {
 	}
 }
 
-// Anular un cobro con un pago vivo dejaría el comprobante del cliente sin deuda a la que
-// aplicarse: primero hay que resolver el pago.
-func TestCancelInvoiceRechazaCobroConPagoAsociado(t *testing.T) {
+// Anular un cobro con un comprobante en revisión ya no bloquea: rechaza ese pago en cascada
+// como parte de la misma anulación, para no dejarlo "en revisión" para siempre sobre una deuda
+// que el admin decidió que ya no existe.
+func TestCancelInvoiceCascadeRechazaPagoEnRevision(t *testing.T) {
 	db := setupApprovePaymentDB(t)
 	cycle := database.SaasBillingCycle{
 		TenantID: 1, SubscriptionID: 1, PlanID: 1,
 		PeriodStart: time.Now(), PeriodEnd: time.Now().AddDate(0, 1, 0), DueDate: time.Now(),
-		Amount: 99, Currency: "PEN", Status: database.SaasInvoicePending,
+		Amount: 99, Currency: "PEN", Status: database.SaasInvoicePendingReview,
 	}
 	if err := db.Create(&cycle).Error; err != nil {
 		t.Fatalf("crear ciclo: %v", err)
@@ -134,19 +135,43 @@ func TestCancelInvoiceRechazaCobroConPagoAsociado(t *testing.T) {
 		t.Fatalf("crear pago: %v", err)
 	}
 
-	if err := CancelInvoice(cycle.ID); err == nil {
-		t.Error("se esperaba error al anular un cobro con pago en revisión")
+	if err := CancelInvoice(cycle.ID, "duplicado", 7); err != nil {
+		t.Fatalf("CancelInvoice: %v", err)
 	}
 
-	// Rechazado el pago, el cobro ya puede anularse.
-	db.Model(&pago).Update("status", database.SaasPayRejected)
-	if err := CancelInvoice(cycle.ID); err != nil {
-		t.Errorf("con el pago rechazado debía poder anularse: %v", err)
+	var afterCycle database.SaasBillingCycle
+	db.First(&afterCycle, cycle.ID)
+	if afterCycle.Status != database.SaasInvoiceRejected {
+		t.Errorf("ciclo status = %q, se esperaba rejected", afterCycle.Status)
 	}
-	var after database.SaasBillingCycle
-	db.First(&after, cycle.ID)
-	if after.Status != database.SaasInvoiceRejected {
-		t.Errorf("estado = %q, se esperaba anulado", after.Status)
+
+	var afterPago database.SaasPayment
+	db.First(&afterPago, pago.ID)
+	if afterPago.Status != database.SaasPayRejected {
+		t.Errorf("pago status = %q, se esperaba rejected (rechazado en cascada)", afterPago.Status)
+	}
+	if afterPago.ReviewedBy == nil || *afterPago.ReviewedBy != 7 {
+		t.Errorf("reviewed_by = %v, se esperaba 7 (el actor que anuló el cobro)", afterPago.ReviewedBy)
+	}
+}
+
+// Un pago YA aprobado sí bloquea: eso significaría que el ciclo debería estar 'paid', no
+// anulable por esta vía — sería una inconsistencia a revisar a mano, no algo que resolver solo.
+func TestCancelInvoiceRechazaConPagoAprobado(t *testing.T) {
+	db := setupApprovePaymentDB(t)
+	cycle := database.SaasBillingCycle{
+		TenantID: 1, SubscriptionID: 1, PlanID: 1,
+		PeriodStart: time.Now(), PeriodEnd: time.Now().AddDate(0, 1, 0), DueDate: time.Now(),
+		Amount: 99, Currency: "PEN", Status: database.SaasInvoicePending,
+	}
+	db.Create(&cycle)
+	pago := database.SaasPayment{
+		TenantID: 1, BillingCycleID: &cycle.ID, Amount: 99, Status: database.SaasPayApproved,
+	}
+	db.Create(&pago)
+
+	if err := CancelInvoice(cycle.ID, "", 1); err == nil {
+		t.Error("un cobro con un pago aprobado asociado no debe poder anularse")
 	}
 }
 
@@ -158,7 +183,7 @@ func TestCancelInvoiceRechazaPagadoYaAnulado(t *testing.T) {
 		Amount: 99, Currency: "PEN", Status: database.SaasInvoicePaid,
 	}
 	db.Create(&pagado)
-	if err := CancelInvoice(pagado.ID); err == nil {
+	if err := CancelInvoice(pagado.ID, "", 1); err == nil {
 		t.Error("un cobro pagado no debe poder anularse")
 	}
 
@@ -168,7 +193,7 @@ func TestCancelInvoiceRechazaPagadoYaAnulado(t *testing.T) {
 		Amount: 99, Currency: "PEN", Status: database.SaasInvoiceRejected,
 	}
 	db.Create(&anulado)
-	if err := CancelInvoice(anulado.ID); err == nil {
+	if err := CancelInvoice(anulado.ID, "", 1); err == nil {
 		t.Error("un cobro ya anulado no debe volver a anularse")
 	}
 }

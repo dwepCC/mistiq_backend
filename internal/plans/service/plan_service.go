@@ -15,7 +15,8 @@ func NewPlanService() *PlanService { return &PlanService{} }
 
 type PlanWithModules struct {
 	database.SaasPlan
-	Modules []string `json:"modules"`
+	Modules []string             `json:"modules"`
+	Cycles  []saas.PlanCycleView `json:"cycles"`
 }
 
 func (s *PlanService) List() ([]PlanWithModules, error) {
@@ -25,7 +26,7 @@ func (s *PlanService) List() ([]PlanWithModules, error) {
 	}
 	result := make([]PlanWithModules, 0, len(plans))
 	for _, p := range plans {
-		pw := PlanWithModules{SaasPlan: p}
+		pw := PlanWithModules{SaasPlan: p, Cycles: saas.BuildPlanCycleViews(p, saas.LoadPlanCycles(p.ID))}
 		var pms []database.SaasPlanModule
 		database.CentralDB.Where("plan_id = ?", p.ID).Find(&pms)
 		for _, pm := range pms {
@@ -44,7 +45,7 @@ func (s *PlanService) GetByID(id uint) (*PlanWithModules, error) {
 	if err := database.CentralDB.First(&plan, id).Error; err != nil {
 		return nil, errors.New("plan no encontrado")
 	}
-	pw := &PlanWithModules{SaasPlan: plan, Modules: []string{}}
+	pw := &PlanWithModules{SaasPlan: plan, Modules: []string{}, Cycles: saas.BuildPlanCycleViews(plan, saas.LoadPlanCycles(id))}
 	var pms []database.SaasPlanModule
 	database.CentralDB.Where("plan_id = ?", id).Find(&pms)
 	for _, pm := range pms {
@@ -54,17 +55,21 @@ func (s *PlanService) GetByID(id uint) (*PlanWithModules, error) {
 }
 
 type CreatePlanInput struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Price        float64  `json:"price"`
-	BillingCycle string   `json:"billing_cycle"`
-	Modules      []string `json:"modules"`
-	IsUnlimitedDocuments  bool `json:"is_unlimited_documents"`
-	MonthlyDocumentsLimit int  `json:"monthly_documents_limit"`
+	Name                  string   `json:"name"`
+	Description           string   `json:"description"`
+	Price                 float64  `json:"price"`
+	BillingCycle          string   `json:"billing_cycle"`
+	Modules               []string `json:"modules"`
+	IsUnlimitedDocuments  bool     `json:"is_unlimited_documents"`
+	MonthlyDocumentsLimit int      `json:"monthly_documents_limit"`
 	// Cuotas del plan (0 = ilimitado).
 	MaxUsers    int `json:"max_users"`
 	MaxBranches int `json:"max_branches"`
 	MaxProducts int `json:"max_products"`
+	// Cycles: descuento por cada uno de los 4 ciclos fijos (1/3/6/12 meses) que el tenant puede
+	// elegir al renovar por autoservicio. Sin entrada para un months, o vacío, ese ciclo queda
+	// sin descuento (precio pleno) pero sigue habilitado — ver saas.SyncPlanCycles.
+	Cycles []saas.PlanCycleInput `json:"cycles"`
 }
 
 func (s *PlanService) Create(input CreatePlanInput) (*database.SaasPlan, error) {
@@ -87,6 +92,7 @@ func (s *PlanService) Create(input CreatePlanInput) (*database.SaasPlan, error) 
 		return nil, err
 	}
 	s.syncModules(plan.ID, input.Modules)
+	saas.SyncPlanCycles(plan.ID, input.Cycles)
 	return plan, nil
 }
 
@@ -108,6 +114,7 @@ func (s *PlanService) Update(id uint, input CreatePlanInput) error {
 		"max_products":            input.MaxProducts,
 	})
 	s.syncModules(id, input.Modules)
+	saas.SyncPlanCycles(id, input.Cycles)
 	syncBillingCyclesDocumentQuota(id)
 	// Reconciliar módulos de los tenants ya suscritos a este plan (respeta cortesías manuales).
 	_ = saas.ReconcileTenantModulesFromPlan(id)
@@ -118,7 +125,7 @@ func (s *PlanService) Update(id uint, input CreatePlanInput) error {
 func syncBillingCyclesDocumentQuota(planID uint) {
 	var cycles []database.SaasBillingCycle
 	database.CentralDB.Where("plan_id = ? AND status IN ?", planID,
-		[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue}).Find(&cycles)
+		[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue, database.SaasInvoicePendingReview}).Find(&cycles)
 	for i := range cycles {
 		_ = docusage.SyncCycleDocumentQuotaFromPlan(&cycles[i], planID)
 	}
@@ -139,6 +146,7 @@ func (s *PlanService) Delete(id uint) error {
 		return errors.New("no se puede eliminar: el plan tiene suscripciones asociadas")
 	}
 	database.CentralDB.Where("plan_id = ?", id).Delete(&database.SaasPlanModule{})
+	database.CentralDB.Where("plan_id = ?", id).Delete(&database.SaasPlanCycle{})
 	return database.CentralDB.Delete(&database.SaasPlan{}, id).Error
 }
 

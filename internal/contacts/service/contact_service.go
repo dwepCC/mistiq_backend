@@ -152,6 +152,62 @@ func (s *ContactService) replaceContactPersons(tx *gorm.DB, contactID uint, pers
 	return nil
 }
 
+// contactTypesThatCollideWith devuelve los valores de `type` que ya ocupan el mismo "rol" que
+// contactType para un mismo documento. "both" cubre el rol de cliente Y de proveedor a la vez,
+// así que colisiona con cualquiera de los dos; "customer"/"supplier" solo colisionan con su
+// propio rol o con "both". Esto permite que un mismo documento tenga un registro de cliente y
+// otro de proveedor por separado (son roles distintos), pero nunca dos con el mismo rol.
+func contactTypesThatCollideWith(contactType string) []string {
+	switch contactType {
+	case "supplier":
+		return []string{"supplier", "both"}
+	case "both":
+		return []string{"customer", "supplier", "both"}
+	default: // "customer" y cualquier valor no reconocido caen en cliente, igual que el default del modelo
+		return []string{"customer", "both"}
+	}
+}
+
+func contactTypeLabel(t string) string {
+	switch t {
+	case "supplier":
+		return "proveedor"
+	case "both":
+		return "cliente/proveedor"
+	default:
+		return "cliente"
+	}
+}
+
+// findDuplicateContact busca un contacto ACTIVO existente con el mismo documento cuyo tipo
+// colisione con contactType (ver contactTypesThatCollideWith). excludeID se usa desde Update
+// para no chocar contra el propio registro que se está editando.
+//
+// Solo cuentan los activos a propósito: un contacto desactivado (la forma en que hoy se
+// "retiran" duplicados viejos sin borrar su historial, mientras no hay UNIQUE INDEX en BD)
+// no debe bloquear ediciones futuras del contacto que sí quedó vigente para ese documento —
+// si no, apenas alguien desactive un duplicado, el que quedó activo se vuelve imposible de
+// editar porque esta misma validación chocaría contra su gemelo dormido.
+func (s *ContactService) findDuplicateContact(tx *gorm.DB, docType, docNumber, contactType string, excludeID uint) (*database.TenantContact, error) {
+	var existing database.TenantContact
+	q := tx.Where("doc_type = ? AND doc_number = ? AND type IN ? AND active = ?", docType, docNumber, contactTypesThatCollideWith(contactType), true)
+	if excludeID != 0 {
+		q = q.Where("id <> ?", excludeID)
+	}
+	err := q.First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &existing, nil
+}
+
+func duplicateContactError(existing *database.TenantContact) error {
+	return fmt.Errorf("ya existe un %s con este documento: %s", contactTypeLabel(existing.Type), existing.BusinessName)
+}
+
 func (s *ContactService) Create(input ContactInput) (*database.TenantContact, error) {
 	if input.DocNumber == "" || input.BusinessName == "" {
 		return nil, errors.New("número de documento y razón social son requeridos")
@@ -160,11 +216,21 @@ func (s *ContactService) Create(input ContactInput) (*database.TenantContact, er
 		return nil, err
 	}
 
+	docType := normalizeContactDocType(input.DocType)
+	if docType == "" {
+		docType = "6" // RUC por defecto, igual que el default de la columna en BD
+	}
+	docNumber := strings.TrimSpace(input.DocNumber)
+	contactType := input.Type
+	if contactType == "" {
+		contactType = "customer"
+	}
+
 	addr, ubi := database.NormalizeTenantContactAddressUbigeo(input.Address, input.Ubigeo)
 	contact := &database.TenantContact{
-		Type:                            input.Type,
-		DocType:                         input.DocType,
-		DocNumber:                       input.DocNumber,
+		Type:                            contactType,
+		DocType:                         docType,
+		DocNumber:                       docNumber,
 		BusinessName:                    input.BusinessName,
 		TradeName:                       input.TradeName,
 		Address:                         addr,
@@ -180,11 +246,15 @@ func (s *ContactService) Create(input ContactInput) (*database.TenantContact, er
 		EsBuenContribuyente:             boolOrDefault(input.EsBuenContribuyente, false),
 		Active:                          true,
 	}
-	if contact.Type == "" {
-		contact.Type = "customer"
-	}
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		dup, err := s.findDuplicateContact(tx, docType, docNumber, contactType, 0)
+		if err != nil {
+			return err
+		}
+		if dup != nil {
+			return duplicateContactError(dup)
+		}
 		if err := tx.Create(contact).Error; err != nil {
 			return err
 		}
@@ -200,11 +270,22 @@ func (s *ContactService) Update(id uint, input ContactInput) error {
 	if err := validateContactPersons(input.ContactPersons); err != nil {
 		return err
 	}
+
+	docType := normalizeContactDocType(input.DocType)
+	if docType == "" {
+		docType = "6"
+	}
+	docNumber := strings.TrimSpace(input.DocNumber)
+	contactType := input.Type
+	if contactType == "" {
+		contactType = "customer"
+	}
+
 	addr, ubi := database.NormalizeTenantContactAddressUbigeo(input.Address, input.Ubigeo)
 	updates := map[string]interface{}{
-		"type":                                input.Type,
-		"doc_type":                            input.DocType,
-		"doc_number":                          input.DocNumber,
+		"type":                                contactType,
+		"doc_type":                            docType,
+		"doc_number":                          docNumber,
 		"business_name":                       input.BusinessName,
 		"trade_name":                          input.TradeName,
 		"address":                             addr,
@@ -220,6 +301,13 @@ func (s *ContactService) Update(id uint, input ContactInput) error {
 		"es_buen_contribuyente":               boolOrDefault(input.EsBuenContribuyente, false),
 	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		dup, err := s.findDuplicateContact(tx, docType, docNumber, contactType, id)
+		if err != nil {
+			return err
+		}
+		if dup != nil {
+			return duplicateContactError(dup)
+		}
 		if err := tx.Model(&database.TenantContact{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}

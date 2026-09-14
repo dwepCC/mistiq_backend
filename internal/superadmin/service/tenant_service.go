@@ -37,25 +37,26 @@ func NewTenantService() *TenantService {
 }
 
 type CreateTenantInput struct {
-	Name               string `json:"name"`
-	Email              string `json:"email"`
-	Phone              string `json:"phone"`
-	RUC                string `json:"ruc"`
-	Plan               string `json:"plan"`
-	Slug               string `json:"slug"`
-	Address            string `json:"address"`
-	Ubigeo             string `json:"ubigeo"` // código 6 dígitos del distrito
-	AdminEmail         string `json:"admin_email"`
-	AdminPassword      string `json:"admin_password"`
+	Name          string `json:"name"`
+	Email         string `json:"email"`
+	Phone         string `json:"phone"`
+	RUC           string `json:"ruc"`
+	Plan          string `json:"plan"`
+	Slug          string `json:"slug"`
+	Address       string `json:"address"`
+	Ubigeo        string `json:"ubigeo"` // código 6 dígitos del distrito
+	AdminEmail    string `json:"admin_email"`
+	AdminPassword string `json:"admin_password"`
 	// SubscriptionMonths duración de la suscripción inicial. Toda empresa nace con una
 	// suscripción —las gratuitas también, vinculadas al plan gratis—, así que 0 se corrige a 1
 	// en vez de saltarse el alta.
-	SubscriptionMonths int    `json:"subscription_months"`
-	Rubro              string `json:"rubro"`           // general | gastronomico
-	TaxpayerRegime     string `json:"taxpayer_regime"` // general | nrus — régimen tributario del contribuyente
-	// Descuento opcional sobre el cobro inicial (precio del plan × meses).
-	DiscountType  string  `json:"discount_type"`
-	DiscountValue float64 `json:"discount_value"`
+	SubscriptionMonths int `json:"subscription_months"`
+	// StartDate opcional (YYYY-MM-DD): la empresa se registra hoy pero su suscripción/primer
+	// cobro puede arrancar unos días después. Vacío = arranca hoy (comportamiento de siempre).
+	// Debe ser hoy o una fecha futura — se valida al crear la suscripción.
+	StartDate      string `json:"start_date"`
+	Rubro          string `json:"rubro"`           // general | gastronomico
+	TaxpayerRegime string `json:"taxpayer_regime"` // general | nrus — régimen tributario del contribuyente
 }
 
 // Create provisioning completo y transaccional (rollback automático si falla cualquier paso).
@@ -65,6 +66,17 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 	}
 	if input.AdminEmail == "" || input.AdminPassword == "" {
 		return nil, errors.New("email y contraseña del administrador son requeridos")
+	}
+	// Sin esto, Address/Ubigeo vacíos caían en el default de conveniencia "Arequipa" / "040101"
+	// (pkg/database/tenant_contact_defaults.go, pensado solo para no romper la emisión SUNAT de
+	// tenants de prueba) y terminaba impreso como domicilio fiscal real de empresas de otras
+	// regiones. El frontend ya lo exige, pero se valida también acá por si algún otro caller
+	// (API interna, importación masiva, etc.) pasa por alto ese formulario.
+	if strings.TrimSpace(input.Address) == "" {
+		return nil, errors.New("la dirección es requerida")
+	}
+	if strings.TrimSpace(input.Ubigeo) == "" {
+		return nil, errors.New("debe seleccionar departamento, provincia y distrito")
 	}
 
 	slug, err := resolveCreateSlug(input)
@@ -82,6 +94,21 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 		return nil, errors.New("ya existe una empresa con ese subdominio. Elige otro identificador")
 	}
 
+	// Bug reportado: el RUC nunca se validaba como único (solo el slug) — se pudieron crear
+	// dos tenants con el mismo RUC (misma empresa registrada dos veces). La columna tampoco
+	// tenía índice en BD (ver RUC en pkg/database/migrations.go), así que este chequeo es el
+	// único resguardo real hasta que el próximo AutoMigrate cree el índice único.
+	ruc := strings.TrimSpace(input.RUC)
+	if ruc != "" {
+		var rucCount int64
+		if err = s.db.Unscoped().Model(&database.Tenant{}).Where("ruc = ?", ruc).Count(&rucCount).Error; err != nil {
+			return nil, err
+		}
+		if rucCount > 0 {
+			return nil, errors.New("ya existe una empresa registrada con ese RUC")
+		}
+	}
+
 	// Sin default: el catálogo de planes lo define el superadmin y no tiene por qué existir
 	// uno llamado «trial». Antes se asumía ese nombre y el alta fallaba con un error opaco de
 	// plan no encontrado en vez de decir que faltaba elegirlo.
@@ -93,6 +120,14 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 	if months <= 0 {
 		months = 1
 	}
+	var startDate *time.Time
+	if sd := strings.TrimSpace(input.StartDate); sd != "" {
+		t, parseErr := time.ParseInLocation("2006-01-02", sd, saas.LimaLocation())
+		if parseErr != nil {
+			return nil, errors.New("fecha de inicio inválida (formato esperado AAAA-MM-DD)")
+		}
+		startDate = &t
+	}
 
 	dbName := "saas_tenant_" + slug
 	trialEnd := time.Now().AddDate(0, 0, 30)
@@ -100,7 +135,7 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 	regime := string(taxregime.Normalize(input.TaxpayerRegime))
 	tenant = &database.Tenant{
 		Name: input.Name, Slug: slug, DBName: dbName, Plan: plan, Status: "active",
-		Email: input.Email, Phone: input.Phone, RUC: input.RUC, Rubro: rubro,
+		Email: input.Email, Phone: input.Phone, RUC: ruc, Rubro: rubro,
 		TaxpayerRegime: regime,
 		Address:        input.Address, Ubigeo: input.Ubigeo, TrialEndsAt: &trialEnd,
 	}
@@ -119,7 +154,7 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 
 	seedIn := database.TenantSeedInput{
 		AdminEmail: input.AdminEmail, AdminPassword: input.AdminPassword,
-		CompanyName: input.Name, RUC: input.RUC,
+		CompanyName: input.Name, RUC: ruc,
 		Address: input.Address, Ubigeo: input.Ubigeo,
 		Phone: input.Phone, Email: input.Email,
 		Rubro:          rubro,
@@ -156,11 +191,15 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 	if err = roleSvc.SetRolePermissions(adminRole.ID, permIDs); err != nil {
 		return nil, fmt.Errorf("asignando permisos al Administrador: %w", err)
 	}
+	if err = roleSvc.SeedDefaultRolePermissions(); err != nil {
+		return nil, fmt.Errorf("asignando permisos por defecto a los roles del sistema: %w", err)
+	}
 
-	// 5–6. Suscripción + billing cycle (módulos según plan vía syncTenantModulesFromPlanTx)
+	// 5–6. Suscripción + billing cycle (módulos según plan vía syncTenantModulesFromPlanTx).
+	// El descuento lo calcula ProvisionInitialSubscription según el plan y los meses elegidos
+	// (PlanCycleDiscount) — ya no se recibe del formulario.
 	if _, err = saas.ProvisionInitialSubscription(
-		tenant.ID, plan, months, "Suscripción creada al registrar la empresa",
-		saas.Discount{Type: input.DiscountType, Value: input.DiscountValue},
+		tenant.ID, plan, months, "Suscripción creada al registrar la empresa", startDate,
 	); err != nil {
 		return nil, fmt.Errorf("suscripción SaaS: %w", err)
 	}
@@ -201,11 +240,17 @@ type TenantListParams struct {
 	Status      string
 	RegionID    string
 	ProvinciaID string
+	// CreatedFrom/CreatedTo: filtro por fecha de activación (YYYY-MM-DD, inclusive en ambos
+	// extremos). Es created_at del tenant — al registrarse, la empresa se suscribe a un plan
+	// obligatoriamente el mismo día, así que created_at hace de "fecha de activación" sin
+	// necesidad de mirar la suscripción.
+	CreatedFrom string
+	CreatedTo   string
 	Page        int
 	PerPage     int
 }
 
-func (s *TenantService) applyTenantFilters(q *gorm.DB, query, status, regionID, provinciaID string) *gorm.DB {
+func (s *TenantService) applyTenantFilters(q *gorm.DB, query, status, regionID, provinciaID, createdFrom, createdTo string) *gorm.DB {
 	if query != "" {
 		q = q.Where("name LIKE ? OR slug LIKE ? OR ruc LIKE ? OR address LIKE ? OR email LIKE ?",
 			"%"+query+"%", "%"+query+"%", "%"+query+"%", "%"+query+"%", "%"+query+"%")
@@ -224,13 +269,23 @@ func (s *TenantService) applyTenantFilters(q *gorm.DB, query, status, regionID, 
 		prefix := provinciaID[:4]
 		q = q.Where("ubigeo LIKE ?", prefix+"%")
 	}
+	if from, err := time.Parse("2006-01-02", createdFrom); err == nil {
+		q = q.Where("created_at >= ?", from)
+	}
+	if to, err := time.Parse("2006-01-02", createdTo); err == nil {
+		q = q.Where("created_at < ?", to.AddDate(0, 0, 1))
+	}
 	return q
 }
 
 // List devuelve tenants paginados (LIMIT/OFFSET en BD).
 func (s *TenantService) List(params TenantListParams) ([]database.Tenant, int64, error) {
 	page, perPage := pagination.Normalize(params.Page, params.PerPage)
-	q := s.applyTenantFilters(s.db.Model(&database.Tenant{}), params.Query, params.Status, params.RegionID, params.ProvinciaID)
+	q := s.applyTenantFilters(
+		s.db.Model(&database.Tenant{}),
+		params.Query, params.Status, params.RegionID, params.ProvinciaID,
+		params.CreatedFrom, params.CreatedTo,
+	)
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -350,11 +405,25 @@ func (s *TenantService) Update(id uint, input database.Tenant) error {
 		newPlan = &plan
 	}
 
+	// Mismo chequeo que en Create: sin esto, editar el RUC de un tenant puede hacerlo
+	// colisionar con el de otro (bug reportado — dos tenants terminaron con el mismo RUC).
+	ruc := strings.TrimSpace(input.RUC)
+	if ruc != "" {
+		var rucCount int64
+		if err := s.db.Unscoped().Model(&database.Tenant{}).
+			Where("ruc = ? AND id <> ?", ruc, id).Count(&rucCount).Error; err != nil {
+			return err
+		}
+		if rucCount > 0 {
+			return errors.New("ya existe una empresa registrada con ese RUC")
+		}
+	}
+
 	updates := map[string]interface{}{
 		"name":    input.Name,
 		"email":   input.Email,
 		"phone":   input.Phone,
-		"ruc":     input.RUC,
+		"ruc":     ruc,
 		"status":  input.Status,
 		"address": input.Address,
 		"ubigeo":  input.Ubigeo,
@@ -785,7 +854,7 @@ func (s *TenantService) MasterAccess(tenantID, saUserID uint, saEmail, clientIP 
 		"owner_user_id":    user.ID,
 		"owner_email":      user.Email,
 	})
-	_ = s.db.Create(&database.AuditLog{
+	database.WriteAuditLogTx(s.db, &database.AuditLog{
 		TenantID:  tenant.ID,
 		UserID:    saUserID,
 		Action:    "master_access",
@@ -793,7 +862,7 @@ func (s *TenantService) MasterAccess(tenantID, saUserID uint, saEmail, clientIP 
 		EntityID:  user.ID,
 		Payload:   string(payload),
 		IPAddress: clientIP,
-	}).Error
+	})
 
 	rootDomain := ""
 	if config.AppConfig != nil {

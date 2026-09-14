@@ -35,7 +35,7 @@ func TestCompanyService_UpdateSeries_highCorrelativeWithoutDocsAllowed(t *testin
 		t.Fatal(err)
 	}
 	newCorr := uint(250)
-	if err := svc.UpdateSeries(ser.ID, "NV99", true, "NOTA DE VENTA", &newCorr); err != nil {
+	if err := svc.UpdateSeries(ser.ID, "NV99", true, "NOTA DE VENTA", &newCorr, nil); err != nil {
 		t.Fatalf("UpdateSeries: %v", err)
 	}
 	var loaded database.TenantDocumentSeries
@@ -66,12 +66,12 @@ func TestCompanyService_UpdateSeries_inUseOnlyActiveEditable(t *testing.T) {
 	}
 
 	newCorr := uint(99)
-	err := svc.UpdateSeries(ser.ID, "NV02", false, "NOTA DE VENTA", &newCorr)
+	err := svc.UpdateSeries(ser.ID, "NV02", false, "NOTA DE VENTA", &newCorr, nil)
 	if err == nil {
 		t.Fatal("debe rechazar cambio de serie/correlativo cuando hay documentos")
 	}
 
-	if err := svc.UpdateSeries(ser.ID, ser.Series, false, ser.DocType, nil); err != nil {
+	if err := svc.UpdateSeries(ser.ID, ser.Series, false, ser.DocType, nil, nil); err != nil {
 		t.Fatalf("debe permitir cambiar active: %v", err)
 	}
 	var loaded database.TenantDocumentSeries
@@ -133,13 +133,13 @@ func TestCompanyService_CreateSeries_almacenDifferentCodesPerBranch(t *testing.T
 		t.Fatal(err)
 	}
 	svc := NewCompanyService(db)
-	if err := svc.CreateSeries(b1.ID, "INGRESO_INVENTARIO", "ING001", nil); err != nil {
+	if err := svc.CreateSeries(b1.ID, "INGRESO_INVENTARIO", "ING001", nil, false); err != nil {
 		t.Fatalf("branch1 ING001: %v", err)
 	}
-	if err := svc.CreateSeries(b2.ID, "INGRESO_INVENTARIO", "ING002", nil); err != nil {
+	if err := svc.CreateSeries(b2.ID, "INGRESO_INVENTARIO", "ING002", nil, false); err != nil {
 		t.Fatalf("branch2 ING002: %v", err)
 	}
-	if err := svc.CreateSeries(b1.ID, "INGRESO_INVENTARIO", "ING001", nil); err == nil {
+	if err := svc.CreateSeries(b1.ID, "INGRESO_INVENTARIO", "ING001", nil, false); err == nil {
 		t.Fatal("debe rechazar ING001 duplicado en la misma sucursal")
 	}
 }
@@ -147,7 +147,7 @@ func TestCompanyService_CreateSeries_almacenDifferentCodesPerBranch(t *testing.T
 func TestCompanyService_CreateSeries_cotizacionPerBranch(t *testing.T) {
 	db := setupCompanySeriesTestDB(t)
 	svc := NewCompanyService(db)
-	if err := svc.CreateSeries(1, "Cotización", "COT001", nil); err != nil {
+	if err := svc.CreateSeries(1, "Cotización", "COT001", nil, false); err != nil {
 		t.Fatalf("CreateSeries: %v", err)
 	}
 	var row database.TenantDocumentSeries
@@ -162,7 +162,7 @@ func TestCompanyService_CreateSeries_cotizacionPerBranch(t *testing.T) {
 func TestCompanyService_CreateSeries_derivesDocumentCodeFromType(t *testing.T) {
 	db := setupCompanySeriesTestDB(t)
 	svc := NewCompanyService(db)
-	if err := svc.CreateSeries(1, "BOLETA", "B001", nil); err != nil {
+	if err := svc.CreateSeries(1, "BOLETA", "B001", nil, false); err != nil {
 		t.Fatalf("CreateSeries: %v", err)
 	}
 	var row database.TenantDocumentSeries
@@ -181,7 +181,7 @@ func TestCompanyService_CreateSeries_customCorrelative(t *testing.T) {
 	db := setupCompanySeriesTestDB(t)
 	svc := NewCompanyService(db)
 	start := uint(150)
-	if err := svc.CreateSeries(1, "NOTA DE VENTA", "NV150", &start); err != nil {
+	if err := svc.CreateSeries(1, "NOTA DE VENTA", "NV150", &start, false); err != nil {
 		t.Fatalf("CreateSeries: %v", err)
 	}
 	var row database.TenantDocumentSeries
@@ -224,5 +224,103 @@ func TestCompanyService_ListSeriesEnriched_returnsUsageMetadata(t *testing.T) {
 	}
 	if item.UsageTable != "tenant_sales" || item.UsageReason == "" {
 		t.Fatalf("usage metadata incompleta: %+v", item)
+	}
+}
+
+// Marcar una serie como default debe desmarcar cualquier otra default de la misma sucursal +
+// categoría venta, dejando siempre a lo sumo una.
+func TestCompanyService_CreateSeries_isDefaultUnsetsOtherOfSameBranchCategory(t *testing.T) {
+	db := setupCompanySeriesTestDB(t)
+	svc := NewCompanyService(db)
+
+	notaVenta := database.TenantDocumentSeries{
+		BranchID: 1, DocType: "NOTA DE VENTA", SunatCode: "00", Category: "venta",
+		Series: "NV01", Correlative: 1, Active: true, IsDefault: true,
+	}
+	if err := db.Create(&notaVenta).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.CreateSeries(1, "BOLETA", "B001", nil, true); err != nil {
+		t.Fatalf("CreateSeries boleta default: %v", err)
+	}
+
+	var reloadedNV database.TenantDocumentSeries
+	if err := db.First(&reloadedNV, notaVenta.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reloadedNV.IsDefault {
+		t.Fatal("la nota de venta debía perder is_default al marcar la boleta como default")
+	}
+	var boleta database.TenantDocumentSeries
+	if err := db.Where("series = ?", "B001").First(&boleta).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !boleta.IsDefault {
+		t.Fatal("la boleta debía quedar marcada is_default")
+	}
+
+	// Otra sucursal no se ve afectada.
+	if err := svc.CreateSeries(2, "NOTA DE VENTA", "NV02", nil, true); err != nil {
+		t.Fatalf("CreateSeries sucursal 2: %v", err)
+	}
+	if err := db.First(&reloadedNV, notaVenta.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&boleta, boleta.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !boleta.IsDefault {
+		t.Fatal("marcar default en otra sucursal no debe afectar la boleta de la sucursal 1")
+	}
+}
+
+// Solo nota de venta/boleta/factura (category=venta) pueden marcarse como default.
+func TestCompanyService_CreateSeries_isDefaultRejectsNonVentaCategory(t *testing.T) {
+	db := setupCompanySeriesTestDB(t)
+	svc := NewCompanyService(db)
+	if err := svc.CreateSeries(1, "INGRESO_INVENTARIO", "ING001", nil, true); err == nil {
+		t.Fatal("no debe permitir default en una serie de almacén")
+	}
+}
+
+// SetDefaultSeries es el atajo de un clic: marca y desmarca sin tocar los demás campos.
+func TestCompanyService_SetDefaultSeries_switchesExclusively(t *testing.T) {
+	db := setupCompanySeriesTestDB(t)
+	svc := NewCompanyService(db)
+	nv := database.TenantDocumentSeries{
+		BranchID: 1, DocType: "NOTA DE VENTA", SunatCode: "00", Category: "venta",
+		Series: "NV01", Correlative: 1, Active: true, IsDefault: true,
+	}
+	if err := db.Create(&nv).Error; err != nil {
+		t.Fatal(err)
+	}
+	factura := database.TenantDocumentSeries{
+		BranchID: 1, DocType: "FACTURA", SunatCode: "01", Category: "venta",
+		Series: "F001", Correlative: 1, Active: true,
+	}
+	if err := db.Create(&factura).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.SetDefaultSeries(factura.ID); err != nil {
+		t.Fatalf("SetDefaultSeries: %v", err)
+	}
+	var reloadedNV, reloadedFactura database.TenantDocumentSeries
+	if err := db.First(&reloadedNV, nv.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&reloadedFactura, factura.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reloadedNV.IsDefault {
+		t.Fatal("nota de venta debía perder is_default")
+	}
+	if !reloadedFactura.IsDefault {
+		t.Fatal("factura debía quedar como default")
+	}
+	// Otros campos intactos.
+	if reloadedFactura.Series != "F001" || reloadedFactura.Correlative != 1 {
+		t.Fatalf("SetDefaultSeries no debe tocar otros campos: %+v", reloadedFactura)
 	}
 }

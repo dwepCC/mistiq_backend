@@ -15,15 +15,22 @@ import (
 // CAJA — Sesiones
 // ══════════════════════════════════════════════
 
-// GET /api/cashbank/sessions?branch_id=
+// GET /api/cashbank/sessions?branch_id=&page=&per_page=
 func (h *CashBankHandler) ListSessionsAPI(c fiber.Ctx) error {
 	req, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
 	branchID := branch.ResolveReadBranchFilter(c, uint(req))
-	sessions, err := service.NewCashBankService(db(c)).ListSessionsEnriched(branchID)
+	page, _ := strconv.Atoi(c.Query("page"))
+	perPage, _ := strconv.Atoi(c.Query("per_page"))
+	// callerUserIDOrZero: 0 si administra cualquier caja (ve todas), su propio user_id si no —
+	// mismo criterio que antes aplicaba filterSessionsForCaller después de traer la página
+	// completa, ahora filtrado en la propia consulta SQL (ver SessionListParams.OpenedBy), para
+	// que el total y el offset de la paginación sean correctos también para quien no administra.
+	params := service.SessionListParams{BranchID: branchID, OpenedBy: callerUserIDOrZero(c), Page: page, PerPage: perPage}
+	sessions, total, err := service.NewCashBankService(db(c)).ListSessionsEnriched(params)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": filterSessionsForCaller(c, sessions)})
+	return c.JSON(fiber.Map{"data": sessions, "total": total})
 }
 
 // GET /api/cashbank/sessions/open/list?branch_id= — cajas abiertas en sucursal (solo lectura).
@@ -168,6 +175,88 @@ func (h *CashBankHandler) GetMovementsAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": movements})
 }
 
+// GetSessionBalanceAPI GET /api/cashbank/sessions/:id/balance — fuente única de saldo: totales
+// por método de pago (efectivo, Yape, Plin, transferencia, tarjeta, otros) + total de la sesión +
+// el efectivo esperado (mismo cálculo que usa el cierre/arqueo). El frontend consume esto en vez
+// de sumar movimientos por su cuenta.
+func (h *CashBankHandler) GetSessionBalanceAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	svc := service.NewCashBankService(db(c))
+	sess, err := svc.GetSessionByID(uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	}
+	if !canAccessCashSession(c, sess) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "No puede ver el saldo de esta sesión"})
+	}
+	summary, err := svc.GetSessionBalanceSummary(uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": summary})
+}
+
+// ReverseMovementAPI POST /api/cashbank/movements/:id/reverse — revierte un movimiento MANUAL
+// (ingreso/egreso sin venta/compra asociada). El original nunca se borra ni se modifica: se crea
+// un movimiento nuevo de signo opuesto con reversal_of_id, trazable, dentro de la misma sesión.
+func (h *CashBankHandler) ReverseMovementAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	svc := service.NewCashBankService(db(c))
+	var body struct {
+		Notes string `json:"notes"`
+		// Kind: "cash" (tenant_cash_movements) o "bank" (tenant_bank_movements) — GetMovements ya
+		// devuelve este dato por fila (CashMovementView.Kind); el frontend lo reenvía tal cual, sin
+		// adivinar, porque ambas tablas tienen su propia secuencia de IDs (un mismo número puede
+		// existir en las dos). Vacío = "cash", por compatibilidad con un frontend aún no
+		// actualizado — hasta ahora el único tipo que existía.
+		Kind string `json:"kind"`
+	}
+	_ = c.Bind().Body(&body)
+	kind := body.Kind
+	if kind == "" {
+		kind = "cash"
+	}
+
+	var sessionID uint
+	switch kind {
+	case "cash":
+		var mov database.TenantCashMovement
+		if err := db(c).First(&mov, uint(id)).Error; err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Movimiento no encontrado"})
+		}
+		sessionID = mov.CashSessionID
+	case "bank":
+		var mov database.TenantBankMovement
+		if err := db(c).First(&mov, uint(id)).Error; err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Movimiento no encontrado"})
+		}
+		if mov.CashSessionID == nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Sesión de caja no encontrada"})
+		}
+		sessionID = *mov.CashSessionID
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Tipo de movimiento inválido"})
+	}
+
+	sess, err := svc.GetSessionByID(sessionID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Sesión de caja no encontrada"})
+	}
+	if !canAccessCashSession(c, sess) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "No puede revertir movimientos de esta sesión"})
+	}
+	if err := svc.ReverseManualMovement(db(c), kind, uint(id), userID(c), body.Notes); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
 // POST /api/cashbank/sessions/:id/movements
 func (h *CashBankHandler) AddMovementAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
@@ -175,12 +264,15 @@ func (h *CashBankHandler) AddMovementAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	var body struct {
-		Type           string  `json:"type"`      // income | expense
-		Category       string  `json:"category"`
-		Reference      string  `json:"reference"`
-		PaymentMethod  string  `json:"payment_method"`
-		Amount         float64 `json:"amount"`
-		Notes          string  `json:"notes"`
+		Type          string  `json:"type"` // income | expense
+		Category      string  `json:"category"`
+		Reference     string  `json:"reference"`
+		PaymentMethod string  `json:"payment_method"`
+		Amount        float64 `json:"amount"`
+		Notes         string  `json:"notes"`
+		// ContactID: proveedor/cliente vinculado (opcional) — típico en un egreso a proveedor sin
+		// compra registrada todavía (frontend: CashMovementTypeView.tsx, vista de Egresos).
+		ContactID *uint `json:"contact_id"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
@@ -190,7 +282,7 @@ func (h *CashBankHandler) AddMovementAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := svc.AddMovement(
-		uint(id), userID(c), body.Type, body.Category, body.Reference, body.PaymentMethod, body.Amount, body.Notes,
+		uint(id), userID(c), body.Type, body.Category, body.Reference, body.PaymentMethod, body.Amount, body.Notes, body.ContactID,
 	); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -501,17 +593,36 @@ func (h *CashBankHandler) UpdateBankAccountAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
-// GET /api/cashbank/bank-accounts/:id/movements
+// GET /api/cashbank/bank-accounts/:id/movements?page=&per_page=&from=&to=&type=
 func (h *CashBankHandler) GetBankMovementsAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	movements, err := service.NewCashBankService(db(c)).ListBankMovements(uint(id))
+	page, _ := strconv.Atoi(c.Query("page"))
+	perPage, _ := strconv.Atoi(c.Query("per_page"))
+	params := service.BankMovementListParams{
+		Type:    c.Query("type"),
+		Page:    page,
+		PerPage: perPage,
+	}
+	if from := c.Query("from"); from != "" {
+		if t, err := time.ParseInLocation("2006-01-02", from, time.Local); err == nil {
+			start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+			params.DateFrom = &start
+		}
+	}
+	if to := c.Query("to"); to != "" {
+		if t, err := time.ParseInLocation("2006-01-02", to, time.Local); err == nil {
+			end := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.Local)
+			params.DateTo = &end
+		}
+	}
+	movements, total, summary, err := service.NewCashBankService(db(c)).ListBankMovementsPaged(uint(id), params)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": movements})
+	return c.JSON(fiber.Map{"data": movements, "total": total, "summary": summary})
 }
 
 // POST /api/cashbank/bank-accounts/:id/movements
@@ -521,7 +632,7 @@ func (h *CashBankHandler) AddBankMovementAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	var body struct {
-		Type        string  `json:"type"`        // credit | debit
+		Type        string  `json:"type"` // credit | debit
 		Description string  `json:"description"`
 		Reference   string  `json:"reference"`
 		Amount      float64 `json:"amount"`
@@ -530,8 +641,11 @@ func (h *CashBankHandler) AddBankMovementAPI(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
-	date, _ := time.Parse("2006-01-02", body.Date)
-	if date.IsZero() {
+	// ParseInLocation (no Parse a secas): la conexión MySQL usa loc=Local, así que un date-only
+	// parseado como UTC se corre un día hacia atrás al guardarse (medianoche UTC = 19:00 del día
+	// anterior en hora Perú) — se detectó al construir el filtro from/to de ListBankMovementsPaged.
+	date, err := time.ParseInLocation("2006-01-02", body.Date, time.Local)
+	if err != nil {
 		date = time.Now()
 	}
 	if err := service.NewCashBankService(db(c)).AddBankMovement(

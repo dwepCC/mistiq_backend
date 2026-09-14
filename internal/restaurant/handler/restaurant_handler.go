@@ -509,6 +509,9 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		DiscountAmount float64                `json:"discount_amount"`
 		DiscountMode   string                 `json:"discount_mode"`
 		DiscountValue  float64                `json:"discount_value"`
+		// ComandaIDs: dividir cuenta — factura solo estas comandas (deben estar pendientes en la
+		// sesión). Vacío = cobra todo lo pendiente (comportamiento clásico).
+		ComandaIDs []uint `json:"comanda_ids"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -557,6 +560,7 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		DiscountMode:    body.DiscountMode,
 		DiscountValue:   body.DiscountValue,
 		CentralTenantID: centralTenantID,
+		ComandaIDs:      body.ComandaIDs,
 	}, taxCfg)
 	if err != nil {
 		st := fiber.StatusBadRequest
@@ -762,6 +766,31 @@ func (h *RestaurantHandler) UpdateSession(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
 	if err := svc(c).UpdateSession(id, body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// PATCH /api/restaurant/sessions/:id/table — cambia la mesa de una sesión abierta.
+func (h *RestaurantHandler) MoveSessionTable(c fiber.Ctx) error {
+	id, err := parseID(c)
+	if err != nil {
+		return err
+	}
+	var body struct {
+		TableID uint `json:"table_id"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	if body.TableID == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "mesa destino requerida"})
+	}
+	bid, err := activeBranch(c)
+	if err != nil {
+		return c.Status(403).JSON(fiber.Map{"error": err.Error(), "code": branch.CodeBranchRequired})
+	}
+	if err := svc(c).MoveSessionTable(id, body.TableID, bid); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

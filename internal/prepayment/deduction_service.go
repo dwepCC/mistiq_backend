@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"tukifac/pkg/database"
 	sunatpre "tukifac/pkg/sunat/prepayment"
@@ -229,11 +230,55 @@ func (s *Service) PersistApplicationsTx(tx *gorm.DB, consumerSaleID uint, resolv
 	return nil
 }
 
-// LoadApplicationsByConsumerSale carga deducciones aplicadas en una venta.
+// LoadApplicationsByConsumerSale carga deducciones aplicadas en una venta (incluye revertidas: el
+// PDF/reimpresión debe seguir mostrando lo que el comprobante declaró al emitirse ante SUNAT).
 func (s *Service) LoadApplicationsByConsumerSale(consumerSaleID uint) ([]database.TenantSalePrepaymentApplication, error) {
 	var rows []database.TenantSalePrepaymentApplication
 	err := s.db.Where("consumer_sale_id = ?", consumerSaleID).Order("id ASC").Find(&rows).Error
 	return rows, err
+}
+
+// ReverseApplicationsForConsumerSaleTx repone el saldo de los vouchers que una venta dedujo y marca
+// esas aplicaciones como revertidas (sin borrarlas), cuando esa venta se anula por nota de crédito.
+//
+// Antes, anular con NC la venta que dedujo un anticipo revertía stock/series/caja (SaleService.Cancel)
+// pero nunca esto: el voucher origen quedaba con balance_amount reducido para siempre y no volvía a
+// aparecer en la lista de anticipos disponibles (ListOpenVouchers exige balance_amount > 0).
+func (s *Service) ReverseApplicationsForConsumerSaleTx(tx *gorm.DB, consumerSaleID uint) error {
+	var apps []database.TenantSalePrepaymentApplication
+	if err := tx.Where("consumer_sale_id = ? AND reversed_at IS NULL", consumerSaleID).
+		Find(&apps).Error; err != nil {
+		return err
+	}
+	for _, a := range apps {
+		var voucher database.TenantSalePrepaymentVoucher
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&voucher, "sale_id = ?", a.SourceSaleID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// Voucher origen ya no existe: no bloquear la anulación por esto, solo marcar revertida.
+				continue
+			}
+			return err
+		}
+		newBalance := voucher.BalanceAmount + a.Total
+		if newBalance > voucher.OriginalAmount {
+			newBalance = voucher.OriginalAmount
+		}
+		if err := tx.Model(&voucher).Update("balance_amount", newBalance).Error; err != nil {
+			return err
+		}
+	}
+	if len(apps) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(apps))
+	for _, a := range apps {
+		ids = append(ids, a.ID)
+	}
+	now := time.Now()
+	return tx.Model(&database.TenantSalePrepaymentApplication{}).
+		Where("id IN ?", ids).
+		Update("reversed_at", now).Error
 }
 
 // DeductionFiscalContext reconstruye totales SUNAT de deducción para billing/XML.
@@ -242,9 +287,15 @@ func (s *Service) DeductionFiscalContext(
 	items []database.TenantSaleItem,
 	taxRatePercent float64,
 ) ([]database.TenantSalePrepaymentApplication, sunatpre.SaleGroupTotals, sunatpre.ApplyDeductionResult, bool, error) {
-	apps, err := s.LoadApplicationsByConsumerSale(consumerSaleID)
+	allApps, err := s.LoadApplicationsByConsumerSale(consumerSaleID)
 	if err != nil {
 		return nil, sunatpre.SaleGroupTotals{}, sunatpre.ApplyDeductionResult{}, false, err
+	}
+	apps := make([]database.TenantSalePrepaymentApplication, 0, len(allApps))
+	for _, a := range allApps {
+		if a.ReversedAt == nil {
+			apps = append(apps, a)
+		}
 	}
 	if len(apps) == 0 {
 		return nil, sunatpre.SaleGroupTotals{}, sunatpre.ApplyDeductionResult{}, false, nil

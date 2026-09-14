@@ -10,6 +10,7 @@ import (
 
 	"tukifac/internal/payments/service"
 	"tukifac/pkg/database"
+	"tukifac/pkg/pagination"
 	"tukifac/pkg/saas"
 	"tukifac/pkg/tenantstorage"
 	"tukifac/pkg/uploadlimits"
@@ -26,13 +27,30 @@ func NewPaymentHandler() *PaymentHandler {
 	return &PaymentHandler{svc: service.NewPaymentService()}
 }
 
-// GET /api/superadmin/payments?status=
+// GET /api/superadmin/payments?status=&q=&date_from=&date_to=&page=&per_page=
 func (h *PaymentHandler) ListAPI(c fiber.Ctx) error {
-	payments, err := h.svc.List(c.Query("status"))
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	perPage, _ := strconv.Atoi(c.Query("per_page", "25"))
+	page, perPage = pagination.Normalize(page, perPage)
+
+	payments, total, err := h.svc.List(service.PaymentListParams{
+		Status:   c.Query("status"),
+		Query:    c.Query("q"),
+		DateFrom: c.Query("date_from"),
+		DateTo:   c.Query("date_to"),
+		Page:     page,
+		PerPage:  perPage,
+	})
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": payments})
+	return c.JSON(fiber.Map{
+		"data":        payments,
+		"page":        page,
+		"per_page":    perPage,
+		"total":       total,
+		"total_pages": pagination.TotalPages(total, perPage),
+	})
 }
 
 // GET /api/superadmin/payments/:id
@@ -99,6 +117,26 @@ func (h *PaymentHandler) CreateAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	// Auditoría: Create aplica la aprobación en el mismo paso (ver comentario en routes.go), así
+	// que se audita igual que un approve. Nunca se registra el comprobante ni datos del método de
+	// pago más allá de su tipo.
+	database.WriteAuditLog(&database.AuditLog{
+		TenantID: payment.TenantID,
+		UserID:   saUserID,
+		Action:   "payment_created_and_approved",
+		Entity:   "saas_payment",
+		EntityID: payment.ID,
+		Payload: saas.MetaJSON(fiber.Map{
+			"to":             payment.Status,
+			"amount":         payment.Amount,
+			"currency":       payment.Currency,
+			"period_months":  payment.PeriodMonths,
+			"payment_method": payment.PaymentMethod,
+		}),
+		IPAddress: c.IP(),
+	})
+
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "data": payment})
 }
 
@@ -111,18 +149,47 @@ func (h *PaymentHandler) ApproveAPI(c fiber.Ctx) error {
 	var body struct {
 		PlanID     uint   `json:"plan_id"`
 		AdminNotes string `json:"admin_notes"`
+		// PeriodMonths opcional: si el admin lo deja en 0, ApprovePayment cae a
+		// payment.PeriodMonths (lo que pidió el tenant al enviarlo) — ver saas.ApprovePayment.
+		PeriodMonths int `json:"period_months"`
 	}
 	c.Bind().JSON(&body)
 
 	reviewerID, _ := c.Locals("sa_user_id").(uint)
+	previous, _ := h.svc.GetByID(uint(id))
 	if err := h.svc.Approve(uint(id), service.ApproveInput{
-		PlanID:     body.PlanID,
-		AdminNotes: body.AdminNotes,
-		ReviewerID: reviewerID,
+		PlanID:       body.PlanID,
+		AdminNotes:   body.AdminNotes,
+		PeriodMonths: body.PeriodMonths,
+		ReviewerID:   reviewerID,
 	}); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	oldStatus := ""
+	if previous != nil {
+		oldStatus = previous.Status
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		TenantID:  paymentTenantID(previous),
+		UserID:    reviewerID,
+		Action:    "payment_approved",
+		Entity:    "saas_payment",
+		EntityID:  uint(id),
+		Payload:   saas.MetaJSON(fiber.Map{"from": oldStatus, "to": database.SaasPayApproved}),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
+}
+
+// paymentTenantID extrae TenantID de forma segura cuando GetByID falló antes de la operación
+// (previous == nil) — la auditoría no debe fallar por eso, queda con TenantID=0.
+func paymentTenantID(p *service.PaymentDetail) uint {
+	if p == nil {
+		return 0
+	}
+	return p.TenantID
 }
 
 // PATCH /api/superadmin/payments/:id/reject
@@ -137,9 +204,64 @@ func (h *PaymentHandler) RejectAPI(c fiber.Ctx) error {
 	c.Bind().JSON(&body)
 
 	reviewerID, _ := c.Locals("sa_user_id").(uint)
+	previous, _ := h.svc.GetByID(uint(id))
 	if err := h.svc.Reject(uint(id), body.AdminNotes, reviewerID); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	oldStatus := ""
+	if previous != nil {
+		oldStatus = previous.Status
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		TenantID:  paymentTenantID(previous),
+		UserID:    reviewerID,
+		Action:    "payment_rejected",
+		Entity:    "saas_payment",
+		EntityID:  uint(id),
+		Payload:   saas.MetaJSON(fiber.Map{"from": oldStatus, "to": database.SaasPayRejected, "reason": body.AdminNotes}),
+		IPAddress: c.IP(),
+	})
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// PATCH /api/superadmin/payments/:id/revert — anula un pago ya aprobado y deshace la extensión
+// de suscripción/ciclo que produjo (ver saas.RevertApprovedPayment). El pago queda 'reversed',
+// no se borra.
+func (h *PaymentHandler) RevertAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	c.Bind().JSON(&body)
+	if strings.TrimSpace(body.Reason) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "indica el motivo de la anulación"})
+	}
+
+	actorID, _ := c.Locals("sa_user_id").(uint)
+	previous, _ := h.svc.GetByID(uint(id))
+	if err := h.svc.Revert(uint(id), body.Reason, actorID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	oldStatus := ""
+	if previous != nil {
+		oldStatus = previous.Status
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		TenantID:  paymentTenantID(previous),
+		UserID:    actorID,
+		Action:    "payment_reverted",
+		Entity:    "saas_payment",
+		EntityID:  uint(id),
+		Payload:   saas.MetaJSON(fiber.Map{"from": oldStatus, "to": database.SaasPayReversed, "reason": body.Reason}),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }
 

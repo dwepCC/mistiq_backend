@@ -383,7 +383,33 @@ func (s *CompanyService) assertSeriesCodeUnique(branchID uint, category, seriesN
 	return nil
 }
 
-func (s *CompanyService) CreateSeries(branchID uint, docType, seriesName string, correlative *uint) error {
+// validateDefaultSeriesEligible solo nota de venta/factura/boleta (category=venta, sunat_code
+// 00/01/03) pueden marcarse como comprobante por defecto de una sucursal.
+func validateDefaultSeriesEligible(category, sunatCode string) error {
+	if strings.TrimSpace(strings.ToLower(category)) != "venta" {
+		return errors.New("solo nota de venta, boleta o factura pueden marcarse como comprobante por defecto")
+	}
+	switch strings.TrimSpace(sunatCode) {
+	case "00", "01", "03":
+		return nil
+	default:
+		return errors.New("solo nota de venta, boleta o factura pueden marcarse como comprobante por defecto")
+	}
+}
+
+// clearOtherDefaultSeriesTx desmarca is_default en las demás series activas de la misma
+// sucursal+categoría 'venta', para que a lo sumo una quede marcada (se llama antes de guardar la
+// nueva serie por defecto, dentro de la misma transacción).
+func clearOtherDefaultSeriesTx(tx *gorm.DB, branchID uint, category string, excludeID uint) error {
+	q := tx.Model(&database.TenantDocumentSeries{}).
+		Where("branch_id = ? AND category = ? AND is_default = ?", branchID, category, true)
+	if excludeID > 0 {
+		q = q.Where("id != ?", excludeID)
+	}
+	return q.Update("is_default", false).Error
+}
+
+func (s *CompanyService) CreateSeries(branchID uint, docType, seriesName string, correlative *uint, isDefault bool) error {
 	if seriesName == "" || docType == "" {
 		return errors.New("serie y tipo de documento son requeridos")
 	}
@@ -400,6 +426,11 @@ func (s *CompanyService) CreateSeries(branchID uint, docType, seriesName string,
 	if err := s.assertSeriesCodeUnique(branchID, category, seriesName, 0); err != nil {
 		return err
 	}
+	if isDefault {
+		if err := validateDefaultSeriesEligible(category, documentCode); err != nil {
+			return err
+		}
+	}
 	startCorrelative := uint(1)
 	if correlative != nil {
 		if *correlative == 0 {
@@ -407,7 +438,7 @@ func (s *CompanyService) CreateSeries(branchID uint, docType, seriesName string,
 		}
 		startCorrelative = *correlative
 	}
-	return s.db.Create(&database.TenantDocumentSeries{
+	row := database.TenantDocumentSeries{
 		BranchID:    branchID,
 		DocType:     docType,
 		SunatCode:   documentCode,
@@ -415,7 +446,17 @@ func (s *CompanyService) CreateSeries(branchID uint, docType, seriesName string,
 		Series:      seriesName,
 		Correlative: startCorrelative,
 		Active:      true,
-	}).Error
+		IsDefault:   isDefault,
+	}
+	if !isDefault {
+		return s.db.Create(&row).Error
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := clearOtherDefaultSeriesTx(tx, branchID, category, 0); err != nil {
+			return err
+		}
+		return tx.Create(&row).Error
+	})
 }
 
 func (s *CompanyService) seriesUsageSvc() *SeriesUsageService {
@@ -456,6 +497,29 @@ func (s *CompanyService) ListSeriesEnriched(branchID uint) ([]SeriesListItem, er
 	return out, nil
 }
 
+// SetDefaultSeries marca `id` como el comprobante por defecto de su sucursal (para el atajo de
+// un clic en Ajustes → Series, sin pasar por el resto de campos de UpdateSeries). Funciona incluso
+// si la serie está en uso (marcar default no cambia el documento en sí, no hay riesgo de romper
+// comprobantes ya emitidos).
+func (s *CompanyService) SetDefaultSeries(id uint) error {
+	var existing database.TenantDocumentSeries
+	if err := s.db.First(&existing, id).Error; err != nil {
+		return err
+	}
+	if !existing.Active {
+		return errors.New("solo una serie activa puede marcarse como comprobante por defecto")
+	}
+	if err := validateDefaultSeriesEligible(existing.Category, existing.SunatCode); err != nil {
+		return err
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := clearOtherDefaultSeriesTx(tx, existing.BranchID, existing.Category, id); err != nil {
+			return err
+		}
+		return tx.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).Update("is_default", true).Error
+	})
+}
+
 func (s *CompanyService) DeleteSeries(id uint) error {
 	inUse, info, err := s.seriesUsageSvc().IsSeriesInUse(id)
 	if err != nil {
@@ -467,8 +531,15 @@ func (s *CompanyService) DeleteSeries(id uint) error {
 	return s.db.Delete(&database.TenantDocumentSeries{}, id).Error
 }
 
-func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, docType string, correlative *uint) error {
-	inUse, usageInfo, err := s.seriesUsageSvc().IsSeriesInUse(id)
+// UpdateSeries actualiza una serie. isDefault es opcional: nil = no tocar la preferencia actual
+// (evita que el formulario legacy, que no la conoce, la desmarque sin querer en cada edición);
+// &true/&false la fija explícitamente, desmarcando las demás de la misma sucursal+categoría.
+func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, docType string, correlative *uint, isDefault *bool) error {
+	// HasRealFiscalUsage (no IsSeriesInUse): una serie cuyas únicas ventas asociadas están
+	// 'rejected' por SUNAT no tiene numeración fiscal real que proteger — se puede corregir
+	// (típico: serie con formato inválido, ej. "005" en vez de "B002", que SUNAT rechaza antes
+	// de validar el documento). Ver HasRealFiscalUsage.
+	inUse, usageInfo, err := s.seriesUsageSvc().HasRealFiscalUsage(id)
 	if err != nil {
 		return err
 	}
@@ -497,7 +568,23 @@ func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, d
 		if correlative != nil && *correlative != existing.Correlative {
 			return errors.New(lockMsg)
 		}
-		return s.db.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).Update("active", active).Error
+		if isDefault == nil {
+			return s.db.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).Update("active", active).Error
+		}
+		if *isDefault {
+			if err := validateDefaultSeriesEligible(existing.Category, existing.SunatCode); err != nil {
+				return err
+			}
+		}
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if *isDefault {
+				if err := clearOtherDefaultSeriesTx(tx, existing.BranchID, existing.Category, id); err != nil {
+					return err
+				}
+			}
+			return tx.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).
+				Updates(map[string]interface{}{"active": active, "is_default": *isDefault}).Error
+		})
 	}
 
 	var existing database.TenantDocumentSeries
@@ -526,6 +613,11 @@ func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, d
 		}
 		finalName = normalized
 	}
+	if isDefault != nil && *isDefault {
+		if err := validateDefaultSeriesEligible(finalCat, finalDocumentCode); err != nil {
+			return err
+		}
+	}
 	updates := map[string]interface{}{"active": active}
 	if seriesName != "" {
 		updates["series"] = finalName
@@ -538,5 +630,16 @@ func (s *CompanyService) UpdateSeries(id uint, seriesName string, active bool, d
 	if correlative != nil {
 		updates["correlative"] = *correlative
 	}
-	return s.db.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).Updates(updates).Error
+	if isDefault == nil {
+		return s.db.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).Updates(updates).Error
+	}
+	updates["is_default"] = *isDefault
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if *isDefault {
+			if err := clearOtherDefaultSeriesTx(tx, existing.BranchID, finalCat, id); err != nil {
+				return err
+			}
+		}
+		return tx.Model(&database.TenantDocumentSeries{}).Where("id = ?", id).Updates(updates).Error
+	})
 }

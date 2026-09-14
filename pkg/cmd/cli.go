@@ -48,6 +48,18 @@ func Execute(args []string) int {
 		return RunRepairTenantMigrations(args[1:])
 	case "backfill-product-codes":
 		return RunBackfillProductCodes(args[1:])
+	case "backfill-sale-payment-cash-session":
+		return RunBackfillSalePaymentCashSession(args[1:])
+	case "audit-migration-history-errors":
+		return RunAuditMigrationHistoryErrors(args[1:])
+	case "reset-migration-history":
+		return RunResetMigrationHistory(args[1:])
+	case "diagnose-tenant-permissions":
+		return RunDiagnoseTenantPermissions(args[1:])
+	case "audit-tenant-permission-catalog":
+		return RunAuditTenantPermissionCatalog(args[1:])
+	case "reseed-tenant-permissions":
+		return RunReseedTenantPermissions(args[1:])
 	case "payment":
 		return RunPayment(args[1:])
 	case "validate-prepayment-phase0":
@@ -79,6 +91,12 @@ func printUsage() {
   migrate-backfill-branch    Alias backfill V31 fleet
   repair-tenant-migrations   Reconciliar drift [--slug=] [--limit=50] [--dry-run] [--reconcile-only]
   backfill-product-codes     Código a productos sin él + snapshot de ventas [--tenant=slug] [--dry-run] [--active-only]
+  backfill-sale-payment-cash-session  cash_session_id histórico en tenant_sale_payments [--tenant=slug] [--dry-run] [--active-only]
+  audit-migration-history-errors  Detecta fallos de migración/backfill mal registrados como éxito [--active-only]
+  reset-migration-history   Reparación puntual: borra historial de un tenant/versión para reintentar [--tenant=slug] [--version=n] [--type=schema|backfill] [--dry-run]
+  diagnose-tenant-permissions  Compara catálogo/asignación de permisos de un tenant contra el código vigente [--ruc=n | --slug=s] [--role=nombre]
+  audit-tenant-permission-catalog  Escanea la flota buscando tenants con catálogo de permisos incompleto [--active-only]
+  reseed-tenant-permissions  Completa catálogo de permisos de un tenant y reasigna todo al Administrador [--tenant=slug]
   payment audit|repair|verify [--slug=tenant]  Dominio financiero (métodos/condiciones/tributario)
   validate-prepayment-phase0 [--slug=demo]   E2E Fase 0: boleta+factura anticipo SUNAT Beta
 

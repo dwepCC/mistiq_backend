@@ -361,21 +361,12 @@ func (h *InventoryHandler) StockAPI(c fiber.Ctx) error {
 
 	var product database.TenantProduct
 	if err := db(c).Select("has_variants").First(&product, productID).Error; err == nil && product.HasVariants {
-		type presStockRow struct {
-			ProductID uint    `json:"product_id"`
-			BranchID  uint    `json:"branch_id"`
-			Quantity  float64 `json:"quantity"`
-		}
-		var rows []presStockRow
-		pq := db(c).Table("tenant_product_presentation_stocks AS ps").
-			Select("pr.product_id AS product_id, ps.branch_id, SUM(ps.quantity) AS quantity").
-			Joins("JOIN tenant_product_presentations pr ON pr.id = ps.presentation_id AND pr.deleted_at IS NULL").
-			Where("pr.product_id = ?", productID).
-			Group("pr.product_id, ps.branch_id")
-		if branchID > 0 {
-			pq = pq.Where("ps.branch_id = ?", branchID)
-		}
-		_ = pq.Scan(&rows).Error
+		// Antes se perdía la identidad de la presentación acá (SUM ... GROUP BY solo
+		// product_id, branch_id): un producto con 3 presentaciones mostraba un único número
+		// por sucursal, sin forma de saber cuánto había de cada una. Ver
+		// InventoryService.GetPresentationStockByProduct para el desglose real.
+		svc := service.NewInventoryService(db(c))
+		rows := svc.GetPresentationStockByProduct(uint(productID), uint(branchID))
 		return c.JSON(fiber.Map{"data": rows})
 	}
 

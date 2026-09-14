@@ -146,6 +146,20 @@ func (s *UserService) Update(id uint, input UpdateUserInput) error {
 		}
 	}
 
+	// El usuario principal (el primero creado al aprovisionar el tenant) no puede quedar
+	// inactivo: es quien recibe el acceso maestro de soporte (ver TenantService.MasterAccess,
+	// que ya rechaza "usuario propietario inactivo") y, sin él, nadie puede reactivar la cuenta.
+	// Editar sus demás datos (nombre, email, teléfono, contraseña) sigue permitido.
+	if !input.Active && user.Active {
+		isOwner, err := database.IsTenantOwnerUser(s.db, id)
+		if err != nil {
+			return err
+		}
+		if isOwner {
+			return errors.New("no se puede desactivar al usuario principal del sistema")
+		}
+	}
+
 	updates := map[string]interface{}{
 		"name":      input.Name,
 		"email":     input.Email,
@@ -193,6 +207,17 @@ func (s *UserService) ToggleActive(id uint) error {
 	var user database.TenantUser
 	if err := s.db.First(&user, id).Error; err != nil {
 		return err
+	}
+	// Mismo criterio que Update: el usuario principal no puede quedar inactivo. Reactivarlo (caso
+	// user.Active==false) nunca se bloquea — solo la transición activo→inactivo.
+	if user.Active {
+		isOwner, err := database.IsTenantOwnerUser(s.db, id)
+		if err != nil {
+			return err
+		}
+		if isOwner {
+			return errors.New("no se puede desactivar al usuario principal del sistema")
+		}
 	}
 	return s.db.Model(&user).Update("active", !user.Active).Error
 }

@@ -37,6 +37,17 @@ type InvoiceView struct {
 	PeriodStart     string  `json:"period_start"`
 	PeriodEnd       string  `json:"period_end"`
 	ProvisionalUsed bool    `json:"provisional_used"`
+	// FiscalDocURL boleta/factura del pago que saldó este período (ver saas_billing_cycles.
+	// payment_id); vacío si el ciclo no está pagado o el admin todavía no la adjuntó. Vive acá
+	// —no en el historial de pagos— porque conceptualmente es el comprobante DEL PERÍODO, y un
+	// período puede haber tenido más de un intento de pago (rechazados, anulados) antes del que
+	// finalmente lo saldó.
+	FiscalDocURL string `json:"fiscal_doc_url,omitempty"`
+	// ReceiptURL comprobante que el TENANT subió (voucher/captura de yape, transferencia, etc.)
+	// del pago más reciente ligado a este ciclo — sea cual sea su estado (pending_review,
+	// approved, rejected). Distinto de FiscalDocURL: ese es la boleta/factura que el admin le
+	// emite AL tenant; este es lo que el tenant mismo adjuntó como prueba de pago.
+	ReceiptURL string `json:"receipt_url,omitempty"`
 }
 
 type PaymentView struct {
@@ -170,15 +181,64 @@ func PendingCycleForTenant(tenantID uint) *database.SaasBillingCycle {
 func ListInvoicesView(tenantID uint) []InvoiceView {
 	var cycles []database.SaasBillingCycle
 	database.CentralDB.Where("tenant_id = ?", tenantID).Order("due_date desc").Limit(24).Find(&cycles)
+
+	// Boleta/factura de cada ciclo pagado: sale del pago que lo saldó (cycle.PaymentID), no de
+	// "el último pago del tenant" — un período puede haber tenido intentos rechazados/anulados
+	// antes del que finalmente lo pagó. Una sola consulta para todos los ciclos de esta página.
+	paymentIDs := make([]uint, 0, len(cycles))
+	for _, c := range cycles {
+		if c.PaymentID != nil {
+			paymentIDs = append(paymentIDs, *c.PaymentID)
+		}
+	}
+	fiscalDocByPayment := map[uint]string{}
+	if len(paymentIDs) > 0 {
+		var payments []database.SaasPayment
+		database.CentralDB.Where("id IN ?", paymentIDs).Find(&payments)
+		for _, p := range payments {
+			if p.FiscalDocURL != "" {
+				fiscalDocByPayment[p.ID] = p.FiscalDocURL
+			}
+		}
+	}
+
+	// Comprobante que el TENANT subió, por ciclo: el del intento MÁS RECIENTE, sea cual sea su
+	// estado (en revisión, aprobado, rechazado) — a diferencia del bloque de arriba (boleta/
+	// factura, que solo existe para el que finalmente pagó). Una sola consulta para todos los
+	// ciclos de esta página, quedándose con el primero (más reciente) por billing_cycle_id.
+	cycleIDs := make([]uint, 0, len(cycles))
+	for _, c := range cycles {
+		cycleIDs = append(cycleIDs, c.ID)
+	}
+	receiptByCycle := map[uint]string{}
+	if len(cycleIDs) > 0 {
+		var payments []database.SaasPayment
+		database.CentralDB.Where("billing_cycle_id IN ?", cycleIDs).
+			Order("created_at desc").Find(&payments)
+		for _, p := range payments {
+			if p.BillingCycleID == nil || p.ReceiptURL == "" {
+				continue
+			}
+			if _, seen := receiptByCycle[*p.BillingCycleID]; !seen {
+				receiptByCycle[*p.BillingCycleID] = p.ReceiptURL
+			}
+		}
+	}
+
 	out := make([]InvoiceView, 0, len(cycles))
 	for _, c := range cycles {
-		out = append(out, InvoiceView{
+		v := InvoiceView{
 			ID: c.ID, Amount: c.Amount, ReconnectionFee: c.ReconnectionFee, Currency: c.Currency,
 			Status: c.Status, ProvisionalUsed: c.ProvisionalUsed,
 			DueDate:     c.DueDate.In(lima()).Format(timeRFC3339Lima),
 			PeriodStart: c.PeriodStart.In(lima()).Format(timeRFC3339Lima),
 			PeriodEnd:   c.PeriodEnd.In(lima()).Format(timeRFC3339Lima),
-		})
+			ReceiptURL:  receiptByCycle[c.ID],
+		}
+		if c.PaymentID != nil {
+			v.FiscalDocURL = fiscalDocByPayment[*c.PaymentID]
+		}
+		out = append(out, v)
 	}
 	return out
 }
@@ -240,6 +300,10 @@ func EventLabel(t string) string {
 		return "Cobro emitido"
 	case EventValidityAdjusted:
 		return "Vigencia ajustada"
+	case EventInvoiceSuperseded:
+		return "Cobro reemplazado"
+	case EventPaymentReversed:
+		return "Pago anulado"
 	default:
 		return t
 	}

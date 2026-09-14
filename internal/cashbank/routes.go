@@ -29,11 +29,15 @@ func RegisterRoutes(api fiber.Router) {
 	api.Delete("/cashbank/sessions/:id",
 		mod, loadRest, middleware.RequireCashbankAccess("delete_session"), h.DeleteSessionAPI)
 	api.Post("/cashbank/sessions/:id/arqueo",
-		mod, loadRest, middleware.RequireCashbankAccess("view"), h.SaveArqueoAPI)
+		mod, loadRest, middleware.RequireCashbankAccess("arqueo"), h.SaveArqueoAPI)
+	api.Get("/cashbank/sessions/:id/balance",
+		mod, loadRest, middleware.RequireCashbankAccess("view"), h.GetSessionBalanceAPI)
 	api.Get("/cashbank/sessions/:id/movements",
 		mod, loadRest, middleware.RequireCashbankAccess("view"), h.GetMovementsAPI)
 	api.Post("/cashbank/sessions/:id/movements",
 		mod, loadRest, middleware.RequireCashbankAccess("movements"), h.AddMovementAPI)
+	api.Post("/cashbank/movements/:id/reverse",
+		mod, loadRest, middleware.RequireCashbankAccess("movements"), h.ReverseMovementAPI)
 	api.Get("/cashbank/sessions/:id/report", mod, loadRest, middleware.RequireCashbankAccess("view"), h.GetSessionReportAPI)
 	api.Get("/cashbank/sessions/:id/report/products", mod, loadRest, middleware.RequireCashbankAccess("view"), h.GetSessionProductsReportAPI)
 	api.Get("/cashbank/reports/movements", mod, loadRest, middleware.RequireCashbankAccess("view"), h.ListMovementsReportAPI)

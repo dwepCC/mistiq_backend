@@ -12,7 +12,25 @@ const (
 	CurrencyUSD    = "USD"
 	OpVentaInterna = "0101"
 	OpDetraccion   = "1001"
+	// OpVentasNoDomiciliados: cliente sin RUC peruano (extranjero, no domiciliado) que no
+	// califica como exportación. Solo cambia qué tipo de documento de identidad se acepta en
+	// factura (01) — sin campos ni cálculos propios. Ver sale_service.go: la factura exige RUC
+	// salvo con esta operación.
+	OpVentasNoDomiciliados = "0401"
+	// OpDetraccionTransporte: detracción por servicio de transporte de carga por vía terrestre
+	// (Resolución 073-2006-SUNAT), código de bien 027 exclusivo. Mismo valor que
+	// sunatdet.OpDetraccionTransporte en pkg/sunat/detraccion — duplicado a propósito, igual que
+	// OpDetraccion/OpDetraccionGeneral, porque ese paquete ya importa este y crear una dependencia
+	// inversa sería un ciclo.
+	OpDetraccionTransporte = "1004"
 )
+
+// IsDetraccion agrupa las dos variantes de detracción (1001 general, 1004 transporte de carga):
+// comparten toda la validación de factura/moneda/cliente en sale_service.go, y solo difieren en
+// el código de bien permitido, el umbral y los campos adicionales que exige 1004.
+func IsDetraccion(opCode string) bool {
+	return opCode == OpDetraccion || opCode == OpDetraccionTransporte
+}
 
 // NormalizeCurrency valida PEN/USD.
 func NormalizeCurrency(raw string) (string, error) {
@@ -26,21 +44,23 @@ func NormalizeCurrency(raw string) (string, error) {
 	return c, nil
 }
 
-// NormalizeOperationType permite venta interna (0101), emisión de anticipos (configurable) y detracción (1001).
+// NormalizeOperationType permite venta interna (0101), emisión de anticipos (configurable),
+// detracción general (1001), ventas no domiciliados (0401) y detracción por transporte de carga
+// (1004).
 func NormalizeOperationType(raw string) (string, error) {
 	code := strings.TrimSpace(raw)
 	if code == "" {
 		return OpVentaInterna, nil
 	}
 	switch code {
-	case OpVentaInterna, OpDetraccion:
+	case OpVentaInterna, OpDetraccion, OpVentasNoDomiciliados, OpDetraccionTransporte:
 		return code, nil
 	default:
 		if sunatpre.IsAllowedEmitOperationType(code) {
 			return code, nil
 		}
-		return "", fmt.Errorf("tipo de operación %s no está habilitado; use %s, %s o %s",
-			code, OpVentaInterna, sunatpre.EmitOperationTypeCode(), OpDetraccion)
+		return "", fmt.Errorf("tipo de operación %s no está habilitado; use %s, %s, %s, %s o %s",
+			code, OpVentaInterna, sunatpre.EmitOperationTypeCode(), OpDetraccion, OpVentasNoDomiciliados, OpDetraccionTransporte)
 	}
 }
 

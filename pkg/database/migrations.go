@@ -20,7 +20,7 @@ type Tenant struct {
 	Status             string         `gorm:"size:50;default:'active'" json:"status"`
 	Email              string         `gorm:"size:255" json:"email"`
 	Phone              string         `gorm:"size:50" json:"phone"`
-	RUC                string         `gorm:"size:20" json:"ruc"`
+	RUC                string         `gorm:"size:20;uniqueIndex" json:"ruc"`                         // único: ver TenantService.Create/Update (bug: dos tenants con mismo RUC)
 	Rubro              string         `gorm:"size:30;default:'general';index" json:"rubro"`           // general | gastronomico
 	TaxpayerRegime     string         `gorm:"size:20;default:'general';index" json:"taxpayer_regime"` // general | nrus — régimen tributario del contribuyente
 	Address            string         `gorm:"size:500" json:"address"`
@@ -38,14 +38,27 @@ type Tenant struct {
 }
 
 type SuperAdminUser struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	Name      string         `gorm:"size:255;not null" json:"name"`
-	Email     string         `gorm:"size:255;uniqueIndex;not null" json:"email"`
-	Password  string         `gorm:"size:255;not null" json:"-"`
-	Role      string         `gorm:"size:50;default:'admin'" json:"role"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	Name     string `gorm:"size:255;not null" json:"name"`
+	Email    string `gorm:"size:255;uniqueIndex;not null" json:"email"`
+	Password string `gorm:"size:255;not null" json:"-"`
+	// Role es el mecanismo de bypass total ("superadmin") — no depende de RoleID/permisos de BD.
+	// Se mantiene por compatibilidad y como red de seguridad anti-lockout. Comparar SIEMPRE con
+	// igualdad exacta ("superadmin"), nunca con contains/prefix.
+	Role string `gorm:"size:50;default:'admin'" json:"role"`
+	// RoleID referencia el rol granular (SARole) para usuarios no-superadmin. NULL = sin permisos
+	// (nunca debe interpretarse como acceso total). Ver SARolePermission para el detalle de permisos.
+	RoleID *uint `gorm:"index" json:"role_id"`
+	// Active permite desactivar el acceso de un usuario sin eliminarlo. El middleware de auth debe
+	// verificarlo en cada request (no solo confiar en el JWT).
+	Active bool `gorm:"default:true;not null" json:"active"`
+	// TokenVersion invalida sesiones activas: se incrementa al cambiar rol/permisos/estado o al
+	// forzar un reset de seguridad. El JWT lleva la versión vigente al momento del login; el
+	// middleware la compara contra la BD y rechaza el token si no coincide.
+	TokenVersion uint           `gorm:"default:0;not null" json:"-"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 func (u *SuperAdminUser) SetPassword(password string) error {
@@ -59,6 +72,102 @@ func (u *SuperAdminUser) SetPassword(password string) error {
 
 func (u *SuperAdminUser) CheckPassword(password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password)) == nil
+}
+
+// IncrementTokenVersion invalida TODAS las sesiones activas de este usuario: cualquier JWT ya
+// emitido deja de pasar la verificación de sesión (middleware.verifySuperAdminSession) en el
+// siguiente request, sin importar que su firma y expiración sigan siendo válidas.
+//
+// Punto de invalidación de sesión ÚNICO y centralizado — cualquier operación que cambie rol,
+// permisos efectivos, estado (Active) o credenciales de un SuperAdminUser debe llamar a este
+// método (nunca incrementar `token_version` a mano en otro lugar). Usa un UPDATE atómico
+// (token_version = token_version + 1) para no perder incrementos concurrentes.
+func (u *SuperAdminUser) IncrementTokenVersion(db *gorm.DB) error {
+	if err := db.Model(u).UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
+		return err
+	}
+	u.TokenVersion++
+	return nil
+}
+
+// =================== RBAC DEL PANEL CENTRAL (SuperAdmin) ===================
+//
+// Réplica del patrón ya usado para el RBAC de tenants (TenantRole/TenantPermission/
+// TenantRolePermission, ver internal/users/service/role_service.go), pero aplicado a la BD
+// central (tukifac_saas) para los usuarios del panel central (SuperAdminUser). Son sistemas
+// independientes: este RBAC central NO debe leerse ni modificarse desde el RBAC de tenants,
+// y viceversa.
+//
+// El superadmin real (SuperAdminUser.Role == "superadmin") sigue teniendo bypass total y no
+// depende de estas tablas — es el mecanismo de emergencia anti-lockout. SARole/SAPermission
+// gobiernan únicamente a los usuarios "admin" con permisos granulares.
+//
+// Importante: "empresas.destroy" (borrado completo de un tenant) y el endpoint que rota la
+// operations-key (PUT /saas-settings/operations-key) quedan DELIBERADAMENTE fuera de este
+// catálogo de permisos — no son otorgables a ningún rol. Permanecen protegidos por un chequeo
+// de bypass superadmin hardcodeado en el handler (igual que hoy), nunca por SARolePermission.
+
+type SARole struct {
+	ID          uint           `gorm:"primaryKey" json:"id"`
+	Name        string         `gorm:"size:100;not null;uniqueIndex" json:"name"`
+	Description string         `gorm:"size:255" json:"description"`
+	IsSystem    bool           `gorm:"default:false" json:"is_system"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+type SAPermission struct {
+	ID     uint   `gorm:"primaryKey" json:"id"`
+	Module string `gorm:"size:100;not null" json:"module"`
+	Action string `gorm:"size:100;not null" json:"action"`
+	Label  string `gorm:"size:255" json:"label"`
+}
+
+type SARolePermission struct {
+	RoleID       uint `gorm:"primaryKey" json:"role_id"`
+	PermissionID uint `gorm:"primaryKey" json:"permission_id"`
+}
+
+// =================== FASE 7 — MIGRACIÓN REAL DE RoleID (usuarios reales) ===================
+//
+// Ver internal/superadmin/service/sa_user_role_migration.go para el mecanismo completo. Estas
+// dos tablas son deliberadamente independientes de SuperAdminUser: nunca se JOINean con lógica de
+// negocio ni se leen en ningún camino de autenticación/autorización — solo existen para hacer la
+// migración reversible (backup) y mutuamente excluyente entre ejecuciones concurrentes (lock).
+
+// SAUserRoleMigrationBackup conserva el estado ANTES y DESPUÉS de cada fila que una ejecución de
+// la migración de RoleID modificó — asociado a un RunID concreto (nunca ambiguo: "qué ejecución
+// tocó a este usuario" siempre se puede responder). Es la base del rollback (Fase 7 §11): el
+// rollback restaura RoleIDBefore SOLO si el estado actual del usuario todavía coincide con
+// RoleIDAfter/RoleAfter (si algo más lo cambió desde entonces, el rollback debe abortar, no
+// pisarlo — ver comprobación de conflicto en RollbackUserRoleMigration).
+type SAUserRoleMigrationBackup struct {
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	RunID           string     `gorm:"size:64;not null;index" json:"run_id"`
+	UserID          uint       `gorm:"not null;index" json:"user_id"`
+	RoleBefore      string     `gorm:"size:50" json:"role_before"`
+	RoleIDBefore    *uint      `json:"role_id_before"`
+	RoleAfter       string     `gorm:"size:50" json:"role_after"`
+	RoleIDAfter     *uint      `json:"role_id_after"`
+	ActiveBefore    bool       `json:"active_before"`
+	DeletedAtBefore *time.Time `json:"deleted_at_before"`
+	CreatedAt       time.Time  `json:"created_at"`
+}
+
+// SAMigrationLock es un mutex a nivel de BD (no un booleano en memoria, ver Fase 7 §12):
+// adquirirlo es un INSERT con LockName como PRIMARY KEY — si ya existe una fila con ese nombre, el
+// INSERT falla por violación de clave primaria (atómico tanto en MySQL/InnoDB como en SQLite, sin
+// depender de ningún locking específico de motor). Liberarlo es un DELETE de esa fila, siempre en
+// un `defer`, corra la migración con éxito o falle. Limitación documentada: si el proceso muere
+// entre adquirir y liberar (crash, kill -9), la fila queda huérfana y bloquea ejecuciones futuras
+// hasta que un operador la borre manualmente tras confirmar que ningún proceso sigue corriendo —
+// no hay expiración automática (evita la complejidad y las condiciones de carrera de un TTL, y no
+// fue pedido explícitamente).
+type SAMigrationLock struct {
+	LockName string    `gorm:"primaryKey;size:100" json:"lock_name"`
+	LockedAt time.Time `json:"locked_at"`
+	LockedBy string    `gorm:"size:255" json:"locked_by"`
 }
 
 type TenantModule struct {
@@ -87,6 +196,8 @@ type AuditLog struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// El hook BeforeCreate y los helpers de escritura de AuditLog viven en audit_log.go.
+
 // SaasPlan — planes de suscripción disponibles
 type SaasPlan struct {
 	ID           uint    `gorm:"primaryKey" json:"id"`
@@ -105,6 +216,31 @@ type SaasPlan struct {
 	MaxProducts int       `gorm:"default:0" json:"max_products"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// SaasPlanCycle — descuento configurado para uno de los 4 ciclos fijos de un plan (1/3/6/12
+// meses, ver saas.FixedPlanCycleMonths — no hay más valores posibles, es a propósito). Sin fila
+// para un (plan_id, months) dado, o con DiscountType="" , ese ciclo se cobra al precio pleno
+// (price × months, sin descuento) — no es un error, es el estado "sin descuento configurado".
+// Esto es EXCLUSIVO del autoservicio del tenant (elegir plan + ciclo para renovar); no aplica al
+// "ciclo libre" que ya puede armar un admin desde el panel central (SubscriptionService.Create),
+// que sigue aceptando cualquier cantidad de meses con su propio descuento libre.
+type SaasPlanCycle struct {
+	ID            uint    `gorm:"primaryKey" json:"id"`
+	PlanID        uint    `gorm:"not null;uniqueIndex:idx_plan_cycle,priority:1" json:"plan_id"`
+	Months        int     `gorm:"not null;uniqueIndex:idx_plan_cycle,priority:2" json:"months"`
+	DiscountType  string  `gorm:"size:10" json:"discount_type"` // "" | percent | fixed
+	DiscountValue float64 `gorm:"default:0" json:"discount_value"`
+	// Enabled: permite ocultar un ciclo del selector del tenant sin perder el descuento que ya
+	// se le configuró, por si se vuelve a habilitar después.
+	//
+	// Sin default de BD a propósito: GORM omite del INSERT los campos en su zero-value cuando
+	// tienen `gorm:"default:..."`, así que un Enabled:false explícito (SyncPlanCycles
+	// deshabilitando un ciclo) se hubiera colado como el default de la columna (true) en vez de
+	// guardarse como false — el mismo bug de omitempty/zero-value que ya picó una vez en este
+	// código con un float64. Cada fila la escribe siempre saas.SyncPlanCycles con su Enabled
+	// explícito, así que no hace falta ningún default acá.
+	Enabled bool `gorm:"not null" json:"enabled"`
 }
 
 // SaasModule — catálogo global de módulos (única fuente de verdad para panel central, tukifac
@@ -158,30 +294,43 @@ type SaasSubscription struct {
 	// Descuento pactado para esta suscripción: se aplica a cada cobro que genere.
 	// Vive aquí y no en el ciclo porque es parte del acuerdo con el cliente (típicamente
 	// a cambio de contratar varios meses por adelantado).
-	DiscountType  string  `gorm:"size:10" json:"discount_type"` // "" | percent | fixed
-	DiscountValue float64 `gorm:"default:0" json:"discount_value"`
+	DiscountType  string     `gorm:"size:10" json:"discount_type"` // "" | percent | fixed
+	DiscountValue float64    `gorm:"default:0" json:"discount_value"`
 	CancelledAt   *time.Time `json:"cancelled_at,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // SaasPayment — pagos manuales con comprobante (solo BD central).
 type SaasPayment struct {
-	ID              uint       `gorm:"primaryKey" json:"id"`
-	TenantID        uint       `gorm:"not null;index" json:"tenant_id"`
-	SubscriptionID  *uint      `gorm:"index" json:"subscription_id"`
-	BillingCycleID  *uint      `gorm:"index" json:"billing_cycle_id"`
-	Amount          float64    `gorm:"not null;default:0" json:"amount"`
-	ReconnectionFee float64    `gorm:"default:0" json:"reconnection_fee"`
-	Currency        string     `gorm:"size:10;default:'PEN'" json:"currency"`
-	PeriodMonths    int        `gorm:"default:1" json:"period_months"`
-	PaymentMethod   string     `gorm:"size:30" json:"payment_method"` // yape, plin, transfer, deposit
-	PaymentDate     *time.Time `json:"payment_date,omitempty"`
-	Reference       string     `gorm:"size:120" json:"reference"`
-	ReceiptURL      string     `gorm:"size:500" json:"receipt_url"` // voucher que sube el cliente
+	ID              uint    `gorm:"primaryKey" json:"id"`
+	TenantID        uint    `gorm:"not null;index" json:"tenant_id"`
+	SubscriptionID  *uint   `gorm:"index" json:"subscription_id"`
+	BillingCycleID  *uint   `gorm:"index" json:"billing_cycle_id"`
+	Amount          float64 `gorm:"not null;default:0" json:"amount"`
+	ReconnectionFee float64 `gorm:"default:0" json:"reconnection_fee"`
+	Currency        string  `gorm:"size:10;default:'PEN'" json:"currency"`
+	PeriodMonths    int     `gorm:"default:1" json:"period_months"`
+	PaymentMethod   string  `gorm:"size:30" json:"payment_method"` // yape, plin, transfer, deposit
+	// PaymentMethodLabel/Kind/DetailsJSON: snapshot de lo que se le mostró al tenant al pagar
+	// (nombre del método, si era QR o cuenta bancaria, y el QR/las cuentas vigentes en ese
+	// momento). PaymentMethod por sí solo no bastaba para saber CÓMO pagó realmente ni permitía
+	// auditar contra un QR/cuenta que después se reemplazó o se borró en la config central.
+	PaymentMethodLabel string     `gorm:"size:100" json:"payment_method_label,omitempty"`
+	PaymentMethodKind  string     `gorm:"size:20" json:"payment_method_kind,omitempty"`
+	PaymentDetailsJSON string     `gorm:"type:text" json:"payment_details_json,omitempty"`
+	PaymentDate        *time.Time `json:"payment_date,omitempty"`
+	Reference          string     `gorm:"size:120" json:"reference"`
+	ReceiptURL         string     `gorm:"size:500" json:"receipt_url"` // voucher que sube el cliente
 	// FiscalDocURL boleta/factura que la empresa emite AL cliente por este pago. La sube el
 	// superadmin tras aprobar y el tenant la descarga desde el mismo pago en su panel.
-	FiscalDocURL       string     `gorm:"size:500" json:"fiscal_doc_url"`
+	FiscalDocURL string `gorm:"size:500" json:"fiscal_doc_url"`
+	// RequestedPlanID: plan que el TENANT pidió al enviar este pago (elegir plan / renovar sin
+	// ciclo de facturación previo, ver POST /api/subscription/renewal-request). Es la intención
+	// del tenant, no una decisión: ApprovePayment prioriza este valor como default del plan a
+	// aplicar, pero el admin puede reasignarlo antes de aprobar (mismo dropdown que ya existe en
+	// PaymentsPage). nil cuando el pago es contra un billing_cycle ya emitido (no hubo elección).
+	RequestedPlanID    *uint      `gorm:"index" json:"requested_plan_id,omitempty"`
 	Status             string     `gorm:"size:30;default:'pending_review';index" json:"status"`
 	ProvisionalApplied bool       `gorm:"default:false" json:"provisional_applied"`
 	Notes              string     `gorm:"size:500" json:"notes"`
@@ -189,8 +338,19 @@ type SaasPayment struct {
 	SubmittedBy        *uint      `json:"submitted_by,omitempty"` // tenant user id
 	ReviewedBy         *uint      `json:"reviewed_by"`
 	ReviewedAt         *time.Time `json:"reviewed_at"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	// ReversedAt/ReversedBy/ReversalReason: cuándo y quién anuló un pago YA aprobado (ver
+	// saas.RevertApprovedPayment) — deshace la aprobación (suscripción, ciclo, tenant) pero el
+	// pago no se borra: queda como 'reversed', trazable para auditoría.
+	ReversedAt     *time.Time `json:"reversed_at,omitempty"`
+	ReversedBy     *uint      `json:"reversed_by,omitempty"`
+	ReversalReason string     `gorm:"size:500" json:"reversal_reason,omitempty"`
+	// PreApprovalSnapshotJSON: foto exacta de tenant/suscripción/ciclo justo ANTES de que este
+	// pago se aprobara (ver saas.approvalSnapshot). Es la memoria que usa RevertApprovedPayment
+	// para deshacer la aprobación con precisión, en vez de reconstruir el estado previo
+	// adivinando a partir de otros ciclos — vacío en pagos aprobados antes de que existiera esto.
+	PreApprovalSnapshotJSON string    `gorm:"type:text" json:"-"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
 }
 
 // CentralAjuste — configuración general del sistema central (una sola fila: ID=1).
@@ -248,6 +408,7 @@ func MigrateCentral() error {
 		&TenantModule{},
 		&AuditLog{},
 		&SaasPlan{},
+		&SaasPlanCycle{},
 		&SaasModule{},
 		&SaasPlanModule{},
 		&SaasSubscription{},
@@ -265,6 +426,11 @@ func MigrateCentral() error {
 		&UbiRegion{},
 		&UbiProvincia{},
 		&UbiDistrito{},
+		&SARole{},
+		&SAPermission{},
+		&SARolePermission{},
+		&SAUserRoleMigrationBackup{},
+		&SAMigrationLock{},
 	)
 }
 
@@ -423,23 +589,47 @@ func SyncModuleCodeMetadata() error {
 	return nil
 }
 
+// ensureBootstrapSuperadmin crea el superadmin de arranque SOLO si no existe ya un superadmin
+// OPERATIVO — Role=="superadmin" && Active==true (y no eliminado: gorm.DeletedAt lo excluye
+// automáticamente en cualquier consulta sobre un modelo con soft-delete, sin necesidad de
+// agregarlo a mano al Where).
+//
+// Fase 6 (pre-migración, Grupo 7): la condición ANTERIOR contaba "cualquier SuperAdminUser"
+// (Count sin Where), así que un solo usuario "admin" ya bastaba para que el bootstrap NO creara
+// el superadmin de emergencia — dejando potencialmente el sistema sin ningún superadmin real.
+// Extraída a su propia función (antes vivía inline en SeedCentral) para poder testear esta
+// condición de forma aislada, sin arrastrar el resto del seed (módulos, planes, etc.).
+//
+// Nota (edge case documentado, no resuelto aquí — ver informe de Fase 6): si existe un
+// SuperAdminUser con email "superadmin@saas.com" pero inactivo o eliminado, y NINGÚN superadmin
+// operativo, este método intentará crear uno nuevo con ese mismo email fijo y Create() fallará
+// por la unique-index de email. Es una falla ruidosa (SeedCentral retorna error, el arranque
+// falla), no silenciosa — pero requeriría una decisión de negocio (¿reactivar el existente?
+// ¿usar otro email?) que no estaba autorizada en esta fase.
+func ensureBootstrapSuperadmin(db *gorm.DB) error {
+	var operationalSuperadmins int64
+	if err := db.Model(&SuperAdminUser{}).Where("role = ? AND active = ?", "superadmin", true).
+		Count(&operationalSuperadmins).Error; err != nil {
+		return err
+	}
+	if operationalSuperadmins > 0 {
+		return nil
+	}
+	admin := &SuperAdminUser{
+		Name:  "Super Administrador",
+		Email: "superadmin@saas.com",
+		Role:  "superadmin",
+	}
+	if err := admin.SetPassword("superadmin123"); err != nil {
+		return err
+	}
+	return db.Create(admin).Error
+}
+
 // SeedCentral inserta datos iniciales en la BD central.
 func SeedCentral() error {
-	// Super admin
-	var adminCount int64
-	CentralDB.Model(&SuperAdminUser{}).Count(&adminCount)
-	if adminCount == 0 {
-		admin := &SuperAdminUser{
-			Name:  "Super Administrador",
-			Email: "superadmin@saas.com",
-			Role:  "superadmin",
-		}
-		if err := admin.SetPassword("superadmin123"); err != nil {
-			return err
-		}
-		if err := CentralDB.Create(admin).Error; err != nil {
-			return err
-		}
+	if err := ensureBootstrapSuperadmin(CentralDB); err != nil {
+		return err
 	}
 
 	// Módulos del catálogo global
@@ -537,6 +727,11 @@ func SeedCentral() error {
 	CentralDB.Model(&CentralAjuste{}).Count(&ajusteCount)
 	if ajusteCount == 0 {
 		CentralDB.Create(&CentralAjuste{ID: 1, NombreSistema: "Tukifac"})
+	}
+
+	// RBAC del panel central (roles/permisos de SuperAdminUser) — idempotente, ver sa_rbac_seed.go
+	if err := SASeedRolesAndPermissions(CentralDB); err != nil {
+		return err
 	}
 
 	return nil
@@ -670,6 +865,11 @@ type TenantCompanyConfig struct {
 	UpdatedAt                      time.Time `json:"updated_at"`
 }
 
+// TenantDocumentSeries.IsDefault: comprobante preferido al iniciar una venta (POS, registro de
+// ventas), por sucursal. Solo aplica a category=venta (nota de venta/factura/boleta); a lo sumo
+// una serie activa por (branch_id, category=venta) debe tener is_default=true — se aplica en
+// CompanyService.CreateSeries/UpdateSeries, no con un índice único (MySQL no soporta índices
+// únicos parciales sin columnas generadas).
 type TenantDocumentSeries struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	BranchID    uint      `gorm:"not null;index" json:"branch_id"`
@@ -679,6 +879,7 @@ type TenantDocumentSeries struct {
 	Series      string    `gorm:"size:10;not null" json:"series"`
 	Correlative uint      `gorm:"default:1" json:"correlative"`
 	Active      bool      `gorm:"default:true" json:"active"`
+	IsDefault   bool      `gorm:"default:false" json:"is_default"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -734,6 +935,40 @@ type TenantCategory struct {
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
+// TenantBrand marca de producto (mismo rol que TenantCategory, sin jerarquía).
+type TenantBrand struct {
+	ID          uint           `gorm:"primaryKey" json:"id"`
+	Name        string         `gorm:"size:255;not null" json:"name"`
+	Description string         `gorm:"size:255" json:"description"`
+	SortOrder   int            `gorm:"default:0;index" json:"sort_order"`
+	Active      bool           `gorm:"default:true" json:"active"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// TenantUnit catálogo de unidades de medida del tenant (Catálogo SUNAT N°03), gestionable desde
+// Tukifac y visible en Tukifac/Tukichef. Los productos (TenantProduct.UnitID) referencian su
+// unidad por ID en vez de texto libre — IsSystem marca las filas sembradas por defecto al
+// aprovisionar el tenant (código bloqueado en edición, igual que TenantPaymentMethod); el tenant
+// puede agregar sus propias filas adicionales (IsSystem=false) libremente.
+type TenantUnit struct {
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	Code      string `gorm:"size:10;not null;uniqueIndex" json:"code"`
+	Name      string `gorm:"size:100;not null" json:"name"`
+	Symbol    string `gorm:"size:20" json:"symbol"`
+	IsSystem  bool   `gorm:"default:false" json:"is_system"`
+	SortOrder int    `gorm:"default:0" json:"sort_order"`
+	// Active: sin default de columna a propósito — el seed siembra una mezcla de true/false
+	// (solo 8 activas por defecto) y un `gorm:"default:true"` aquí hace que GORM OMITA el false
+	// (zero-value) del INSERT, dejando que la BD aplique su default true y active TODAS las filas
+	// sin importar lo que pida el código. Cada creación (seed, CreateUnit) ya fija Active a mano.
+	Active    bool           `json:"active"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
 // TenantPreparationArea área de preparación configurable (cocina, bar, etc.) para productos restaurante.
 type TenantPreparationArea struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
@@ -747,13 +982,19 @@ type TenantPreparationArea struct {
 }
 
 type TenantProduct struct {
-	ID                 uint    `gorm:"primaryKey" json:"id"`
-	CategoryID         *uint   `gorm:"index" json:"category_id"`
-	Code               string  `gorm:"size:100;not null;index" json:"code"`
-	Name               string  `gorm:"size:255;not null" json:"name"`
-	Description        string  `gorm:"type:text" json:"description"`
-	Type               string  `gorm:"size:20;default:'product'" json:"type"` // product, service
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	CategoryID  *uint  `gorm:"index" json:"category_id"`
+	BrandID     *uint  `gorm:"index" json:"brand_id"`
+	Code        string `gorm:"size:100;not null;index" json:"code"`
+	Name        string `gorm:"size:255;not null" json:"name"`
+	Description string `gorm:"type:text" json:"description"`
+	Type        string `gorm:"size:20;default:'product'" json:"type"` // product, service
+	// Unit: código SUNAT catálogo N°03 denormalizado desde UnitID.TenantUnit.Code — no se edita
+	// directo, se sincroniza al guardar (ver ProductService.resolveUnitReference). Se conserva como
+	// string porque ventas/cotizaciones/compras/facturación/impresión ya lo leen así en decenas de
+	// lugares; UnitID es la fuente de verdad para la UI (selects por ID, no texto libre).
 	Unit               string  `gorm:"size:50;default:'NIU'" json:"unit"`
+	UnitID             *uint   `gorm:"index" json:"unit_id"`
 	SalePrice          float64 `gorm:"type:decimal(15,2);not null" json:"sale_price"`
 	PurchasePrice      float64 `gorm:"type:decimal(15,2)" json:"purchase_price"`
 	TaxRate            float64 `gorm:"type:decimal(5,2);default:18.00" json:"tax_rate"`
@@ -802,9 +1043,12 @@ type TenantEcommerceSettings struct {
 	CardStyle      string  `gorm:"size:30;default:'rounded'" json:"card_style"`
 	// CategoryStyle: 'circles' (íconos redondos) | 'pills' (botones de texto). Define cómo se
 	// navega por categorías en la tienda pública.
-	CategoryStyle string    `gorm:"size:20;default:'circles'" json:"category_style"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	CategoryStyle string `gorm:"size:20;default:'circles'" json:"category_style"`
+	// Muestra "Agotado" en la tienda pública cuando manage_stock y stock_total<=0. Si es false, el
+	// stock (incluido stock_by_branch) no se envía en la respuesta pública de productos.
+	ShowStock bool      `gorm:"column:show_stock;default:true" json:"show_stock"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // TenantEcommerceSlider imagen del carrusel principal de la tienda pública.
@@ -1098,6 +1342,15 @@ type TenantSale struct {
 	BillingStatus        string     `gorm:"size:30;default:'pending'" json:"billing_status"` // pending, sent, accepted, rejected
 	RestaurantSessionID  *uint      `gorm:"index" json:"restaurant_session_id,omitempty"`    // pedido restaurante que originó la venta
 	OriginalSaleID       *uint      `gorm:"index" json:"original_sale_id"`                   // Si es NOTA_CREDITO: venta que se anuló
+	// Motivo SUNAT elegido al emitir la nota (catálogo 09 para NC, catálogo 10 para ND).
+	// Vacío en notas emitidas antes de existir este campo — se interpreta como "01" (NC) /
+	// "02" (ND), el único motivo que el sistema podía emitir hasta ahora.
+	NoteReasonCode string `gorm:"size:5" json:"note_reason_code,omitempty"`
+	// Documento afectado declarado a mano (Fase 3 — nota de crédito/débito independiente,
+	// sin venta local que referenciar): tipo (01 factura / 03 boleta) y serie-número
+	// ("F001-123"). Vacío en cualquier nota con original_sale_id.
+	ManualAffectedDocType   string `gorm:"size:5" json:"manual_affected_doc_type,omitempty"`
+	ManualAffectedDocNumber string `gorm:"size:20" json:"manual_affected_doc_number,omitempty"`
 	// Si esta venta es factura/boleta (01/03) generada desde una nota de venta (00), apunta al ID de esa NV.
 	IssuedFromNotaSaleID *uint `gorm:"index" json:"issued_from_nota_sale_id,omitempty"`
 	// Origen comercial: direct | converted_from_nota | api | migration | legacy
@@ -1174,6 +1427,10 @@ type TenantSaleItem struct {
 	// ItemNote nota libre de esta línea (p. ej. "segundo uso"). Queda en el snapshot de la
 	// venta; NO modifica el producto del catálogo.
 	ItemNote string `gorm:"size:255" json:"item_note"`
+	// OriginalSaleItemID: en una línea de nota de crédito parcial, la línea de la venta
+	// original de la que nace (para revertir stock exacto vía tenant_stock_movements.sale_item_id).
+	// NULL en cualquier otro caso (venta normal, o nota que copia el 100%).
+	OriginalSaleItemID *uint `gorm:"index" json:"original_sale_item_id,omitempty"`
 }
 
 // TenantSaleFiscalProfile información adicional fiscal de una venta (1:1).
@@ -1231,9 +1488,12 @@ type TenantSaleFiscalObligation struct {
 
 func (TenantSaleFiscalObligation) TableName() string { return "tenant_sale_fiscal_obligations" }
 
-// TenantSaleDetraccion datos de detracción SUNAT (1:1 con venta factura 1001).
+// TenantSaleDetraccion datos de detracción SUNAT (1:1 con venta factura 1001 o 1004).
 type TenantSaleDetraccion struct {
-	SaleID                  uint       `gorm:"primaryKey" json:"sale_id"`
+	SaleID uint `gorm:"primaryKey" json:"sale_id"`
+	// OperationTypeCode: 1001 (general) o 1004 (transporte de carga). Default '1001' porque las
+	// filas creadas antes de esta columna son todas de la única operación que existía entonces.
+	OperationTypeCode       string     `gorm:"size:10;not null;default:'1001'" json:"operation_type_code"`
 	GoodCode                string     `gorm:"size:10;not null" json:"good_code"`
 	PaymentMethodCode       string     `gorm:"size:10;not null" json:"payment_method_code"`
 	BankAccount             string     `gorm:"size:30;not null" json:"bank_account"`
@@ -1245,8 +1505,19 @@ type TenantSaleDetraccion struct {
 	BnConfirmationStatus    string     `gorm:"size:20;default:'pending'" json:"bn_confirmation_status"`
 	BnConfirmedAt           *time.Time `json:"bn_confirmed_at,omitempty"`
 	BnConfirmationReference string     `gorm:"size:100" json:"bn_confirmation_reference,omitempty"`
-	CreatedAt               time.Time  `json:"created_at"`
-	UpdatedAt               time.Time  `json:"updated_at"`
+	// Campos exclusivos de 1004 (transporte de carga), vacíos/NULL en 1001. Van al comprobante
+	// como cac:InvoiceLine/cac:Item/cac:AdditionalItemProperty (Catálogo N° 55 SUNAT) — no existe
+	// un nodo de cabecera para esto; SUNAT lo exige a nivel de ítem. Captura manual: ni este
+	// sistema ni el de referencia calculan las tablas de tarifas MTC (D.S. 020-2021-MTC).
+	ValorReferencialPen    *float64  `gorm:"type:decimal(15,2)" json:"valor_referencial_pen,omitempty"`
+	MtcRegistro            string    `gorm:"size:30" json:"mtc_registro,omitempty"`
+	ConfiguracionVehicular string    `gorm:"size:10" json:"configuracion_vehicular,omitempty"`
+	PuntoOrigen            string    `gorm:"size:200" json:"punto_origen,omitempty"`
+	PuntoDestino           string    `gorm:"size:200" json:"punto_destino,omitempty"`
+	CargaEfectivaTm        *float64  `gorm:"type:decimal(10,2)" json:"carga_efectiva_tm,omitempty"`
+	CargaUtilTm            *float64  `gorm:"type:decimal(10,2)" json:"carga_util_tm,omitempty"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 func (TenantSaleDetraccion) TableName() string { return "tenant_sale_detraccion" }
@@ -1282,6 +1553,9 @@ type TenantSalePrepaymentApplication struct {
 	Amount           float64   `gorm:"type:decimal(15,2);not null" json:"amount"`
 	Total            float64   `gorm:"type:decimal(15,2);not null" json:"total"`
 	CreatedAt        time.Time `json:"created_at"`
+	// ReversedAt: NULL = deducción vigente. Se marca (sin borrar la fila) cuando la venta que
+	// dedujo se anula por nota de crédito, y se repone el balance_amount del voucher origen.
+	ReversedAt *time.Time `json:"reversed_at,omitempty"`
 }
 
 func (TenantSalePrepaymentApplication) TableName() string {
@@ -1553,12 +1827,61 @@ type TenantPurchase struct {
 	PaymentMethod string     `gorm:"size:50" json:"payment_method"`
 	Notes         string     `gorm:"type:text" json:"notes"`
 	Status        string     `gorm:"size:30;default:'received'" json:"status"`
+	// CashSessionID: sesión de Caja (turno) en la que se REGISTRÓ el documento de compra — mismo
+	// patrón que TenantSale.CashSessionID. Se exige y resuelve SIEMPRE (ResolveCashSessionForPurchase),
+	// para TODA compra sin importar el método ni si tiene pago inmediato — incluida una compra
+	// 100% a crédito (Fase 2 / decisión A): registrar el documento exige caja abierta del
+	// usuario, igual que ya exige toda venta, aunque no se mueva dinero todavía.
+	//
+	// Este campo NUNCA se modifica después de creado — ni por un pago inmediato distinto, ni por
+	// un pago a proveedor posterior (PayableService.Pay, Fase 2 — CxP). La Caja donde ocurre CADA
+	// pago vive en TenantPurchasePayment.CashSessionID, un campo distinto con un significado
+	// distinto: "dónde se registró el documento" vs. "dónde ocurrió este pago" no deben
+	// confundirse ni fusionarse en un solo campo (ver TenantSalePayment para el mismo criterio
+	// del lado de ventas).
+	//
+	// Nulo únicamente en compras anteriores a que se exigiera esta resolución (compatibilidad
+	// histórica — ver listNonCashPurchasesForSession, que solo debe encontrar candidatas para
+	// ese caso histórico, nunca compras nuevas).
+	CashSessionID *uint `gorm:"index" json:"cash_session_id,omitempty"`
 	// PriceIncludesIgv: criterio con el que se registró la compra. Si es true, los unit_cost
 	// tecleados ya traían IGV y se desagregó; si es false, el IGV se sumó encima.
 	PriceIncludesIgv bool           `gorm:"default:false" json:"price_includes_igv"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
 	DeletedAt        gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// TenantPurchasePayable cuenta por pagar (CxP) de una compra a crédito — 1:1 con TenantPurchase,
+// solo existe cuando la compra se registró con PaymentMethod vacío (sin pago inmediato). Mismo
+// patrón que TenantSaleCreditInstallment/CxC, pero como una única obligación con saldo corriente
+// en vez de un calendario de cuotas: a diferencia de una venta, una compra hoy no tiene concepto
+// de cronograma de vencimientos por línea (una sola DueDate en TenantPurchase, ya reutilizada acá
+// sin duplicarla). Varios pagos parciales se aplican contra esta misma fila (PaidAmount se
+// acumula), no contra un arreglo de cuotas.
+type TenantPurchasePayable struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	PurchaseID     uint      `gorm:"not null;uniqueIndex" json:"purchase_id"`
+	OriginalAmount float64   `gorm:"type:decimal(15,2);not null" json:"original_amount"`
+	PaidAmount     float64   `gorm:"type:decimal(15,2);default:0" json:"paid_amount"`
+	Status         string    `gorm:"size:20;default:'pending'" json:"status"` // pending, partial, paid
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// TenantPurchasePayment registra cada pago a proveedor contra una compra — mismo patrón que
+// TenantSalePayment, con su propia CashSessionID: la Caja donde OCURRIÓ ESE pago, que puede ser
+// distinta de TenantPurchase.CashSessionID (la Caja donde se REGISTRÓ la compra, que nunca se
+// modifica por un pago posterior — ver P0).
+type TenantPurchasePayment struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	PurchaseID    uint      `gorm:"not null;index" json:"purchase_id"`
+	Method        string    `gorm:"size:50;not null" json:"method"`
+	Amount        float64   `gorm:"type:decimal(15,2);not null" json:"amount"`
+	Reference     string    `gorm:"size:100" json:"reference"`
+	Notes         string    `gorm:"size:255" json:"notes"`
+	CashSessionID *uint     `gorm:"index" json:"cash_session_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type TenantPurchaseItem struct {
@@ -1601,19 +1924,23 @@ type TenantCashSession struct {
 }
 
 type TenantCashMovement struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	CashSessionID uint      `gorm:"not null;index" json:"cash_session_id"`
-	Type          string    `gorm:"size:20;not null" json:"type"` // income, expense
-	Amount        float64   `gorm:"type:decimal(15,2);not null" json:"amount"`
-	PaymentMethod string    `gorm:"size:50" json:"payment_method"` // para movimientos manuales: efectivo, yape, plin, tarjeta, transferencia
-	Category      string    `gorm:"size:100" json:"category"`
-	Reference     string    `gorm:"size:100" json:"reference"`
-	SaleID        *uint     `gorm:"index" json:"sale_id"`
-	PurchaseID    *uint     `gorm:"index" json:"purchase_id"`
-	ReversalOfID  *uint     `gorm:"index" json:"reversal_of_id,omitempty"`
-	Notes         string    `gorm:"type:text" json:"notes"`
-	UserID        uint      `gorm:"not null" json:"user_id"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            uint    `gorm:"primaryKey" json:"id"`
+	CashSessionID uint    `gorm:"not null;index" json:"cash_session_id"`
+	Type          string  `gorm:"size:20;not null" json:"type"` // income, expense
+	Amount        float64 `gorm:"type:decimal(15,2);not null" json:"amount"`
+	PaymentMethod string  `gorm:"size:50" json:"payment_method"` // para movimientos manuales: efectivo, yape, plin, tarjeta, transferencia
+	Category      string  `gorm:"size:100" json:"category"`
+	Reference     string  `gorm:"size:100" json:"reference"`
+	SaleID        *uint   `gorm:"index" json:"sale_id"`
+	PurchaseID    *uint   `gorm:"index" json:"purchase_id"`
+	ReversalOfID  *uint   `gorm:"index" json:"reversal_of_id,omitempty"`
+	Notes         string  `gorm:"type:text" json:"notes"`
+	UserID        uint    `gorm:"not null" json:"user_id"`
+	// ContactID: proveedor/cliente vinculado a un movimiento MANUAL (AddMovement) — típicamente un
+	// egreso a un proveedor sin compra registrada todavía. Nulo en movimientos de venta/compra
+	// (esos ya se vinculan por SaleID/PurchaseID → tenant_sales.contact_id / tenant_purchases.contact_id).
+	ContactID *uint     `gorm:"index" json:"contact_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // TenantPaymentMethod medios reales de cobro (efectivo, Yape, Plin, etc.).
@@ -1694,7 +2021,28 @@ type TenantBankMovement struct {
 	Date          time.Time `gorm:"not null" json:"date"`
 	UserID        uint      `gorm:"not null" json:"user_id"`
 	ReversalOfID  *uint     `gorm:"index" json:"reversal_of_id,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	// SaleID/PurchaseID: vínculo tipado al documento de origen (además de Reference, texto
+	// libre heredado). Nulo en movimientos manuales.
+	SaleID     *uint `gorm:"index" json:"sale_id,omitempty"`
+	PurchaseID *uint `gorm:"index" json:"purchase_id,omitempty"`
+	// CashSessionID: sesión de Caja (turno) en la que ocurrió este movimiento — igual que ya
+	// tiene TenantSale.CashSessionID, para que un pago no efectivo (Yape/Plin/transferencia/
+	// tarjeta) de una venta o compra sea trazable directamente a su sesión sin depender de un
+	// join indirecto por sale_id/purchase_id. Nulo en movimientos anteriores a esta columna.
+	CashSessionID *uint `gorm:"index" json:"cash_session_id,omitempty"`
+	// Category/Notes: solo pobladas en movimientos MANUALES (AddMovement, sin sale_id/
+	// purchase_id) por un método con cuenta asociada — un ingreso/egreso de venta/compra sigue
+	// sin usarlas, igual que antes. Simétrico con TenantCashMovement.Category/Notes: un
+	// movimiento manual ahora vive en EXACTAMENTE una de las dos tablas según su método (nunca
+	// en ambas), así que necesita los mismos campos que un manual en efectivo para no perder
+	// esos datos.
+	Category string `gorm:"size:100" json:"category,omitempty"`
+	Notes    string `gorm:"type:text" json:"notes,omitempty"`
+	// ContactID: proveedor/cliente vinculado a un movimiento MANUAL (AddMovement) — mismo
+	// criterio que TenantCashMovement.ContactID (nulo en movimientos de venta/compra, que ya se
+	// vinculan por SaleID/PurchaseID).
+	ContactID *uint     `gorm:"index" json:"contact_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type TenantExternalModule struct {
@@ -1810,14 +2158,31 @@ type TenantDeliveryDriver struct {
 	DeliveryCompany *TenantDeliveryCompany `gorm:"foreignKey:DeliveryCompanyID" json:"delivery_company,omitempty"`
 }
 
+// TenantBranchDailyComandaCounter contador atómico de "Pedido #N" por sucursal y día de negocio
+// (YYYYMMDD, hora local). Antes ese número se calculaba como MAX(order_number)+1 por sesión de
+// mesa (TenantTableSession) — se reiniciaba en 1 cada vez que una mesa se cerraba y volvía a
+// abrirse, permitiendo varios "Pedido #1" simultáneos el mismo día en mesas distintas. Este
+// contador es independiente de la mesa: una fila por sucursal+día, incrementada con el mismo
+// patrón de SELECT...FOR UPDATE que ya usa el correlativo de series SUNAT (pkg/docseries).
+type TenantBranchDailyComandaCounter struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	BranchID     uint      `gorm:"not null;uniqueIndex:ux_branch_daily_comanda_counter" json:"branch_id"`
+	BusinessDate string    `gorm:"size:8;not null;uniqueIndex:ux_branch_daily_comanda_counter" json:"business_date"` // YYYYMMDD
+	LastNumber   int       `gorm:"not null;default:0" json:"last_number"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 // TenantTableOrder representa una ronda/comanda de cocina (ticket) dentro de la sesión.
 type TenantTableOrder struct {
-	ID          uint       `gorm:"primaryKey" json:"id"`
-	SessionID   uint       `gorm:"not null;index" json:"session_id"`
-	WaiterID    *uint      `gorm:"index" json:"waiter_id,omitempty"` // deprecado
-	StaffID     *uint      `gorm:"index" json:"staff_id"`
-	UserID      uint       `gorm:"not null;index" json:"user_id"`
-	OrderNumber int        `gorm:"not null" json:"order_number"` // número de comanda/ronda en la sesión
+	ID        uint  `gorm:"primaryKey" json:"id"`
+	SessionID uint  `gorm:"not null;index" json:"session_id"`
+	WaiterID  *uint `gorm:"index" json:"waiter_id,omitempty"` // deprecado
+	StaffID   *uint `gorm:"index" json:"staff_id"`
+	UserID    uint  `gorm:"not null;index" json:"user_id"`
+	// "Pedido #N" que ve mesero/cocina/ticket — único por sucursal y día de negocio (ver
+	// TenantBranchDailyComandaCounter), NO por sesión de mesa. Antes se reiniciaba por mesa.
+	OrderNumber int        `gorm:"not null" json:"order_number"`
 	Notes       string     `gorm:"type:text" json:"notes"`
 	Status      string     `gorm:"size:20;default:'active'" json:"status"` // active, cancelled
 	PrintedAt   *time.Time `json:"printed_at"`
@@ -1835,28 +2200,31 @@ type TenantComanda struct {
 	// PresentationID: variante/presentación elegida (ej. color), cuando el producto vende por
 	// presentación con stock propio. Se resuelve del mismo modifiers_json (type:"variant") y se
 	// persiste aparte para no tener que reparsear JSON al facturar/descontar stock.
-	PresentationID     *uint      `gorm:"index" json:"presentation_id,omitempty"`
-	ProductCode        string     `gorm:"size:100" json:"product_code"`
-	ProductName        string     `gorm:"size:255;not null" json:"product_name"`
-	PreparationArea    string     `gorm:"size:50" json:"preparation_area"`  // snapshot slug al enviar (cocina, bar, etc.)
-	PreparationAreaID  *uint      `gorm:"index" json:"preparation_area_id"` // vínculo estable al área (el slug puede renombrarse)
-	Quantity           float64    `gorm:"type:decimal(15,3);not null" json:"quantity"`
-	UnitPrice          float64    `gorm:"type:decimal(15,2);not null" json:"unit_price"`
-	Notes              string     `gorm:"size:500" json:"notes"`                 // instrucciones especiales (sin cebolla, etc.)
-	ModifiersJSON      string     `gorm:"type:text" json:"modifiers_json"`       // variantes y extras [{ option_id, option_name, extra_price, type, ... }]
-	ComboParentKey     string     `gorm:"size:64;index" json:"combo_parent_key"` // agrupa las N comandas explotadas de un mismo combo
-	ComboJSON          string     `gorm:"type:text" json:"combo_json"`           // snapshot del combo dueño [{ combo_id, combo_name, group_id, ... }]
-	IgvAffectationType string     `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
-	PriceIncludesIgv   bool       `gorm:"default:true" json:"price_includes_igv"`
-	Status             string     `gorm:"size:20;default:'pendiente'" json:"status"` // pendiente, preparacion, lista, entregada
-	Printed            bool       `gorm:"default:false" json:"printed"`
-	PrintedAt          *time.Time `json:"printed_at"`
-	PrintedByID        *uint      `gorm:"index" json:"printed_by_id"`
-	CancelledAt        *time.Time `json:"cancelled_at"`
-	CancelledByID      *uint      `gorm:"index" json:"cancelled_by_id"`
-	CancelReason       string     `gorm:"size:255" json:"cancel_reason"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	PresentationID     *uint   `gorm:"index" json:"presentation_id,omitempty"`
+	ProductCode        string  `gorm:"size:100" json:"product_code"`
+	ProductName        string  `gorm:"size:255;not null" json:"product_name"`
+	PreparationArea    string  `gorm:"size:50" json:"preparation_area"`  // snapshot slug al enviar (cocina, bar, etc.)
+	PreparationAreaID  *uint   `gorm:"index" json:"preparation_area_id"` // vínculo estable al área (el slug puede renombrarse)
+	Quantity           float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	UnitPrice          float64 `gorm:"type:decimal(15,2);not null" json:"unit_price"`
+	Notes              string  `gorm:"size:500" json:"notes"`                 // instrucciones especiales (sin cebolla, etc.)
+	ModifiersJSON      string  `gorm:"type:text" json:"modifiers_json"`       // variantes y extras [{ option_id, option_name, extra_price, type, ... }]
+	ComboParentKey     string  `gorm:"size:64;index" json:"combo_parent_key"` // agrupa las N comandas explotadas de un mismo combo
+	ComboJSON          string  `gorm:"type:text" json:"combo_json"`           // snapshot del combo dueño [{ combo_id, combo_name, group_id, ... }]
+	IgvAffectationType string  `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
+	PriceIncludesIgv   bool    `gorm:"default:true" json:"price_includes_igv"`
+	Status             string  `gorm:"size:20;default:'pendiente'" json:"status"` // pendiente, preparacion, lista, entregada
+	// BilledAt: marca "ya incluida en un cobro" independiente de Status (que es 100% de cocina).
+	// NULL = pendiente de facturar. Ver V112ComandaBilledAt para el porqué de separarlo de Status.
+	BilledAt      *time.Time `gorm:"index" json:"billed_at,omitempty"`
+	Printed       bool       `gorm:"default:false" json:"printed"`
+	PrintedAt     *time.Time `json:"printed_at"`
+	PrintedByID   *uint      `gorm:"index" json:"printed_by_id"`
+	CancelledAt   *time.Time `json:"cancelled_at"`
+	CancelledByID *uint      `gorm:"index" json:"cancelled_by_id"`
+	CancelReason  string     `gorm:"size:255" json:"cancel_reason"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // TenantRestaurantSetting configuración del módulo restaurante (una fila por tenant).
@@ -1903,13 +2271,19 @@ type TenantUserRestaurantRole struct {
 
 // TenantSalePayment registra pagos individuales (pagos mixtos) asociados a una venta.
 type TenantSalePayment struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	SaleID    uint      `gorm:"not null;index" json:"sale_id"`
-	Method    string    `gorm:"size:50;not null" json:"method"` // efectivo, tarjeta, transferencia, yape, plin, credito
-	Amount    float64   `gorm:"type:decimal(15,2);not null" json:"amount"`
-	Reference string    `gorm:"size:100" json:"reference"` // nro. de operación, voucher, etc.
-	Notes     string    `gorm:"size:255" json:"notes"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        uint    `gorm:"primaryKey" json:"id"`
+	SaleID    uint    `gorm:"not null;index" json:"sale_id"`
+	Method    string  `gorm:"size:50;not null" json:"method"` // efectivo, tarjeta, transferencia, yape, plin, credito
+	Amount    float64 `gorm:"type:decimal(15,2);not null" json:"amount"`
+	Reference string  `gorm:"size:100" json:"reference"` // nro. de operación, voucher, etc.
+	Notes     string  `gorm:"size:255" json:"notes"`
+	// CashSessionID: sesión de Caja donde OCURRIÓ este pago — no necesariamente la misma que
+	// tenant_sales.cash_session_id (que representa dónde se REGISTRÓ el documento y nunca debe
+	// modificarse). Una venta a crédito puede registrarse en la Caja 25 y cobrarse después en la
+	// Caja 30 y luego en la 35: cada TenantSalePayment conserva la suya, la venta conserva la 25.
+	// Nulo en pagos anteriores a esta columna (ver listado de compatibilidad histórica al poblarla).
+	CashSessionID *uint     `gorm:"index" json:"cash_session_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // TenantMembership — cuota recurrente entre el tenant y un cliente (gimnasio, colegio, etc.).

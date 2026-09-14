@@ -11,6 +11,7 @@ import (
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
 	"tukifac/pkg/paymentcondition"
+	"tukifac/pkg/salescope"
 	"tukifac/pkg/taxpayment"
 
 	"gorm.io/gorm"
@@ -89,6 +90,11 @@ type StatementLine struct {
 	Credit      float64   `json:"credit"`
 	Balance     float64   `json:"balance"`
 	SaleID      uint      `json:"sale_id,omitempty"`
+	// CashSessionID: Caja donde OCURRIÓ el cobro (TenantSalePayment.CashSessionID) — solo en
+	// líneas type="payment"; nil en "invoice" (esa línea es el registro del documento, cuya
+	// propia Caja es TenantSale.CashSessionID, un dato distinto que este estado de cuenta no
+	// muestra). Puramente informativo: no cambia ningún cálculo de saldo.
+	CashSessionID *uint `json:"cash_session_id,omitempty"`
 }
 
 type StatementResult struct {
@@ -222,6 +228,9 @@ func (s *ReceivableService) Collect(saleID uint, in CollectPaymentInput) error {
 	if sale.Status == "cancelled" {
 		return errors.New("no se puede cobrar una venta anulada")
 	}
+	if salescope.IsNoteDocType(sale.DocType) {
+		return errors.New("una nota de crédito/débito no es una venta cobrable")
+	}
 
 	var det *database.TenantSaleDetraccion
 	var detRow database.TenantSaleDetraccion
@@ -263,7 +272,10 @@ func (s *ReceivableService) Collect(saleID uint, in CollectPaymentInput) error {
 		}
 		payLines = append(payLines, cashbanksvc.PaymentLineInput{Method: p.Method, Amount: p.Amount})
 	}
-	cashSessionID, err := cbSvc.ResolveCashSessionForPayments(sale.BranchID, in.UserID, in.CashSessionID, payLines)
+	// ResolveCashSessionForCollection exige sesión de caja del usuario para CUALQUIER cobro,
+	// sin importar el método (antes: ResolveCashSessionForPayments, que solo la exigía para
+	// efectivo — un cobro 100% Yape/Plin/transferencia/tarjeta podía registrarse sin sesión).
+	cashSessionID, err := cbSvc.ResolveCashSessionForCollection(sale.BranchID, in.UserID, in.CashSessionID, payLines)
 	if err != nil {
 		return err
 	}
@@ -274,10 +286,14 @@ func (s *ReceivableService) Collect(saleID uint, in CollectPaymentInput) error {
 			if p.Amount <= 0 || p.Method == "" {
 				continue
 			}
+			// CashSessionID aquí es la Caja donde OCURRIÓ este cobro — puede ser distinta de
+			// sale.CashSessionID (la Caja donde se REGISTRÓ la venta), que nunca se toca en este
+			// flujo. Ver comentario del campo en pkg/database/migrations.go.
 			if err := tx.Create(&database.TenantSalePayment{
-				SaleID: saleID,
-				Method: p.Method,
-				Amount: p.Amount,
+				SaleID:        saleID,
+				Method:        p.Method,
+				Amount:        p.Amount,
+				CashSessionID: cashSessionID,
 			}).Error; err != nil {
 				return err
 			}
@@ -313,12 +329,14 @@ func (s *ReceivableService) Collect(saleID uint, in CollectPaymentInput) error {
 		} else {
 			newStatus = "credit"
 		}
+		// sale.CashSessionID NUNCA se toca aquí: representa exclusivamente dónde se REGISTRÓ la
+		// venta, no dónde se cobró. Cada cobro conserva su propia Caja en
+		// TenantSalePayment.CashSessionID (arriba) y en el TenantCashMovement/TenantBankMovement
+		// que crea RecordPayment — eso es suficiente para saber "dónde ocurrió cada pago" sin
+		// pisar la sesión de registro de la venta.
 		updates := map[string]interface{}{"status": newStatus}
 		if paidAfter > 0 && newStatus == "paid" {
 			updates["payment_method"] = salessvc.PrimaryDirectPaymentMethod(in.Payments, sale.PaymentMethod)
-		}
-		if cashSessionID != nil && *cashSessionID > 0 {
-			updates["cash_session_id"] = *cashSessionID
 		}
 		return tx.Model(&sale).Updates(updates).Error
 	})
@@ -415,13 +433,14 @@ func (s *ReceivableService) Statement(contactID uint, branchID uint) (*Statement
 			}
 			running -= p.Amount
 			res.Lines = append(res.Lines, StatementLine{
-				Date:        p.CreatedAt,
-				Type:        "payment",
-				Reference:   p.Reference,
-				Description: "Cobro " + sale.Number + " (" + p.Method + ")",
-				Credit:      p.Amount,
-				Balance:     money.RoundDisplay(running),
-				SaleID:      sale.ID,
+				Date:          p.CreatedAt,
+				Type:          "payment",
+				Reference:     p.Reference,
+				Description:   "Cobro " + sale.Number + " (" + p.Method + ")",
+				Credit:        p.Amount,
+				Balance:       money.RoundDisplay(running),
+				SaleID:        sale.ID,
+				CashSessionID: p.CashSessionID,
 			})
 		}
 		if due > 0 {

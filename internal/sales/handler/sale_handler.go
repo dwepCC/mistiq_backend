@@ -9,8 +9,8 @@ import (
 
 	billingSvc "tukifac/internal/billing/service"
 	detraccionsvc "tukifac/internal/detraccion"
-	prepaymentsvc "tukifac/internal/prepayment"
 	salecontext "tukifac/internal/fiscal/salecontext"
+	prepaymentsvc "tukifac/internal/prepayment"
 	quotationsvc "tukifac/internal/quotations/service"
 	"tukifac/internal/sales/nvdisplay"
 	"tukifac/internal/sales/service"
@@ -110,28 +110,28 @@ func (h *SaleHandler) POSPage(c fiber.Ctx) error {
 
 func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 	var body struct {
-		BranchID      uint                     `json:"branch_id"`
-		ContactID     *uint                    `json:"contact_id"`
-		CashSessionID *uint                    `json:"cash_session_id"`
-		SeriesID      uint                     `json:"series_id"`
-		DocType       string                   `json:"doc_type"`
-		IssueDate     string                   `json:"issue_date"`
-		DueDate       string                   `json:"due_date"`
-		Currency          string                   `json:"currency"`
-		OperationTypeCode string                   `json:"operation_type_code"`
-		ExchangeRate      *float64                 `json:"exchange_rate"`
-		PaymentMethod     string                   `json:"payment_method"`
-		Payments      []service.PaymentInput   `json:"payments"`
-		PaymentConditionCode string             `json:"payment_condition_code"`
+		BranchID             uint                             `json:"branch_id"`
+		ContactID            *uint                            `json:"contact_id"`
+		CashSessionID        *uint                            `json:"cash_session_id"`
+		SeriesID             uint                             `json:"series_id"`
+		DocType              string                           `json:"doc_type"`
+		IssueDate            string                           `json:"issue_date"`
+		DueDate              string                           `json:"due_date"`
+		Currency             string                           `json:"currency"`
+		OperationTypeCode    string                           `json:"operation_type_code"`
+		ExchangeRate         *float64                         `json:"exchange_rate"`
+		PaymentMethod        string                           `json:"payment_method"`
+		Payments             []service.PaymentInput           `json:"payments"`
+		PaymentConditionCode string                           `json:"payment_condition_code"`
 		CreditInstallments   []service.CreditInstallmentInput `json:"credit_installments"`
-		Notes         string                   `json:"notes"`
-		Items         []service.SaleItemInput  `json:"items"`
-		GlobalDiscountMode  string             `json:"global_discount_mode"`
-		GlobalDiscountValue float64            `json:"global_discount_value"`
-		FiscalContext *salecontext.FiscalContextInput `json:"fiscal_context"`
-		Detraccion    *detraccionsvc.SaleInput        `json:"detraccion"`
-		Prepayment    *prepaymentsvc.SaleInput        `json:"prepayment"`
-		FromQuotationID *uint                         `json:"from_quotation_id"`
+		Notes                string                           `json:"notes"`
+		Items                []service.SaleItemInput          `json:"items"`
+		GlobalDiscountMode   string                           `json:"global_discount_mode"`
+		GlobalDiscountValue  float64                          `json:"global_discount_value"`
+		FiscalContext        *salecontext.FiscalContextInput  `json:"fiscal_context"`
+		Detraccion           *detraccionsvc.SaleInput         `json:"detraccion"`
+		Prepayment           *prepaymentsvc.SaleInput         `json:"prepayment"`
+		FromQuotationID      *uint                            `json:"from_quotation_id"`
 	}
 
 	if err := c.Bind().Body(&body); err != nil {
@@ -182,31 +182,31 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 		issuedFromQuotationID = &qid
 	}
 	sale, err := svc.Create(service.CreateSaleInput{
-		BranchID:        branchID,
-		ContactID:       body.ContactID,
-		UserID:          userID(c),
-		CashSessionID:   body.CashSessionID,
-		SeriesID:        body.SeriesID,
-		DocType:         body.DocType,
-		IssueDate:       issueDate,
-		DueDate:         dueDate,
-		Currency:          body.Currency,
-		OperationTypeCode: body.OperationTypeCode,
-		ExchangeRate:      body.ExchangeRate,
-		PaymentMethod:     body.PaymentMethod,
-		Payments:        body.Payments,
-		PaymentConditionCode: body.PaymentConditionCode,
-		CreditInstallments:   body.CreditInstallments,
-		Notes:           body.Notes,
-		Items:           body.Items,
-		GlobalDiscountMode:  body.GlobalDiscountMode,
-		GlobalDiscountValue: body.GlobalDiscountValue,
-		TaxConfig:       taxCfg,
-		CentralTenantID: centralTenantID,
-		FiscalContext:           body.FiscalContext,
-		Detraccion:              body.Detraccion,
-		Prepayment:              body.Prepayment,
-		IssuedFromQuotationID:   issuedFromQuotationID,
+		BranchID:              branchID,
+		ContactID:             body.ContactID,
+		UserID:                userID(c),
+		CashSessionID:         body.CashSessionID,
+		SeriesID:              body.SeriesID,
+		DocType:               body.DocType,
+		IssueDate:             issueDate,
+		DueDate:               dueDate,
+		Currency:              body.Currency,
+		OperationTypeCode:     body.OperationTypeCode,
+		ExchangeRate:          body.ExchangeRate,
+		PaymentMethod:         body.PaymentMethod,
+		Payments:              body.Payments,
+		PaymentConditionCode:  body.PaymentConditionCode,
+		CreditInstallments:    body.CreditInstallments,
+		Notes:                 body.Notes,
+		Items:                 body.Items,
+		GlobalDiscountMode:    body.GlobalDiscountMode,
+		GlobalDiscountValue:   body.GlobalDiscountValue,
+		TaxConfig:             taxCfg,
+		CentralTenantID:       centralTenantID,
+		FiscalContext:         body.FiscalContext,
+		Detraccion:            body.Detraccion,
+		Prepayment:            body.Prepayment,
+		IssuedFromQuotationID: issuedFromQuotationID,
 	})
 	if err != nil {
 		return saleCreateErrorResponse(c, err)
@@ -443,10 +443,12 @@ func (h *SaleHandler) ListByProductAPI(c fiber.Ctx) error {
 		}
 	}
 	params := service.SalesByProductParams{
-		DateFrom:   dateFrom,
-		DateTo:     dateTo,
-		BranchID:   uint(branchID),
-		CategoryID: uint(catID),
+		DateFrom:    dateFrom,
+		DateTo:      dateTo,
+		BranchID:    uint(branchID),
+		CategoryID:  uint(catID),
+		Q:           c.Query("q"),
+		ProductType: c.Query("product_type"),
 	}
 	rows, summary, err := svc.SalesByProduct(params)
 	if err != nil {
@@ -482,12 +484,17 @@ func (h *SaleHandler) GetAPI(c fiber.Ctx) error {
 		var contact database.TenantContact
 		if db(c).First(&contact, *sale.ContactID).Error == nil {
 			out["contact"] = fiber.Map{
-				"id":             contact.ID,
-				"doc_type":       contact.DocType,
-				"doc_number":     contact.DocNumber,
-				"business_name":  contact.BusinessName,
-				"trade_name":     contact.TradeName,
-				"phone":          strings.TrimSpace(contact.Phone),
+				"id":            contact.ID,
+				"doc_type":      contact.DocType,
+				"doc_number":    contact.DocNumber,
+				"business_name": contact.BusinessName,
+				"trade_name":    contact.TradeName,
+				"phone":         strings.TrimSpace(contact.Phone),
+				// address/ubigeo: los necesita DespatchFormModal.tsx al armar la guía de remisión
+				// "desde esta venta" (buildDespatchPrefillFromSaleDetail) — sin esto, el destinatario
+				// siempre quedaba con ubigeo vacío aunque el contacto lo tuviera bien guardado.
+				"address": strings.TrimSpace(contact.Address),
+				"ubigeo":  strings.TrimSpace(contact.Ubigeo),
 			}
 		}
 	}
@@ -692,6 +699,30 @@ func (h *SaleHandler) ApplyPendingRefundAPI(c fiber.Ctx) error {
 	}
 	err := service.NewSaleService(db(c)).ApplyPendingRefund(
 		body.CashMovementID, body.CashSessionID, userID(c), strings.TrimSpace(body.Reason),
+	)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "Devolución registrada en caja"})
+}
+
+// ApplyPendingNoteRefundAPI registra en caja la devolución del monto de una nota de crédito
+// parcial (Fase 2) — contraparte de ApplyPendingRefundAPI para devoluciones que no vienen de
+// anular una venta completa. Ver PendingRefund.Source en PendingRefundsAPI.
+func (h *SaleHandler) ApplyPendingNoteRefundAPI(c fiber.Ctx) error {
+	var body struct {
+		NoteSaleID    uint   `json:"note_sale_id"`
+		CashSessionID uint   `json:"cash_session_id"`
+		Reason        string `json:"reason"`
+	}
+	if err := c.Bind().Body(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
+	}
+	if body.NoteSaleID == 0 || body.CashSessionID == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "nota y caja son requeridas"})
+	}
+	err := service.NewSaleService(db(c)).ApplyPendingNoteRefund(
+		body.NoteSaleID, body.CashSessionID, userID(c), strings.TrimSpace(body.Reason),
 	)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})

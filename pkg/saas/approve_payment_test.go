@@ -23,6 +23,7 @@ func setupApprovePaymentDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&database.Tenant{},
 		&database.SaasPlan{},
+		&database.SaasPlanCycle{},
 		&database.SaasPlanModule{},
 		&database.TenantModule{},
 		&database.SaasSubscription{},
@@ -36,7 +37,7 @@ func setupApprovePaymentDB(t *testing.T) *gorm.DB {
 	}
 	for _, tbl := range []string{
 		"saas_payments", "saas_billing_cycles", "saas_subscriptions",
-		"saas_plans", "tenants", "saas_subscription_events", "tenant_modules",
+		"saas_plans", "saas_plan_cycles", "tenants", "saas_subscription_events", "tenant_modules",
 	} {
 		db.Exec("DELETE FROM " + tbl)
 	}

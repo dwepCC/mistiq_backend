@@ -9,6 +9,7 @@ import (
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/facturador"
+	"tukifac/pkg/sunatnote"
 )
 
 // emitFiscalDocumentBySale enruta emisión según tipo SUNAT de la venta.
@@ -177,17 +178,30 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 	if hasOrig {
 		tipDocAfectado = affectedDocumentSunatType(&orig, getSeriesSunatCode(s.db, orig.SeriesID))
 		numDocAfectado = formatAffectedDocumentNumber(&orig)
+	} else {
+		// Nota independiente (Fase 3): no hay venta local que referenciar — el documento
+		// afectado se declaró a mano al crear la nota (ver CreateIndependentNote) y quedó
+		// en estos dos campos, igual que data_affected_document en el sistema legado.
+		tipDocAfectado = strings.TrimSpace(noteSale.ManualAffectedDocType)
+		numDocAfectado = strings.TrimSpace(noteSale.ManualAffectedDocNumber)
 	}
-	if tipoDoc == "07" && (!hasOrig || tipDocAfectado == "" || numDocAfectado == "") {
+	if tipoDoc == "07" && (tipDocAfectado == "" || numDocAfectado == "") {
 		return nil, errors.New("la nota de crédito debe referenciar la factura o boleta que anula (tipDocAfectado y numDocfectado)")
 	}
-	if tipoDoc == "07" && hasOrig {
-		wantPrefix := docseries.CreditNoteSeriesPrefixForAffected(orig.DocType, getSeriesSunatCode(s.db, orig.SeriesID))
+	if tipoDoc == "07" && tipDocAfectado != "" {
+		affectedDocType := "BOLETA"
+		if tipDocAfectado == "01" {
+			affectedDocType = "FACTURA"
+		}
+		if hasOrig {
+			affectedDocType = orig.DocType
+		}
+		wantPrefix := docseries.CreditNoteSeriesPrefixForAffected(affectedDocType, tipDocAfectado)
 		if !docseries.SeriesMatchesCreditNotePrefix(noteSale.Series, wantPrefix) {
 			return nil, fmt.Errorf(
 				"la serie %s no anula %ss: use %s## (ej. %s01) según SUNAT",
 				noteSale.Series,
-				docseries.AffectedDocLabel(orig.DocType, getSeriesSunatCode(s.db, orig.SeriesID)),
+				docseries.AffectedDocLabel(affectedDocType, tipDocAfectado),
 				wantPrefix,
 				wantPrefix,
 			)
@@ -219,11 +233,20 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 	if tipoMoneda == "" {
 		tipoMoneda = "PEN"
 	}
-	codMotivo := "01"
-	if tipoDoc == "08" {
-		codMotivo = "02"
+	// codMotivo: el que eligió el usuario al emitir (persistido en note_reason_code desde la
+	// Fase 1 del rediseño de NC/ND). Vacío = notas emitidas antes de este campo, donde el
+	// sistema solo podía emitir "01" (NC) o "02" (ND) — mismo default de siempre.
+	codMotivo := strings.TrimSpace(noteSale.NoteReasonCode)
+	if codMotivo == "" {
+		codMotivo = "01"
+		if tipoDoc == "08" {
+			codMotivo = "02"
+		}
 	}
-	desMotivo := strings.TrimSpace(noteSale.Notes)
+	desMotivo := facturador.SanitizeFreeText(noteSale.Notes)
+	if desMotivo == "" {
+		desMotivo = sunatnote.ReasonLabel(tipoDoc, codMotivo)
+	}
 	if desMotivo == "" {
 		if tipoDoc == "08" {
 			desMotivo = "Aumento en el valor"
@@ -234,24 +257,25 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 	var legends []facturador.InvoiceLegend
 	facturador.SetSUNATLegend1000(&legends, sunatTotals.MtoImpVenta, tipoMoneda)
 	return &facturador.NotePayload{
-		UBLVersion:        "2.1",
-		TipoDoc:           tipoDoc,
-		Serie:             noteSale.Series,
-		Correlativo:       fmt.Sprintf("%d", noteSale.Correlative),
+		UBLVersion:   "2.1",
+		TipoDoc:      tipoDoc,
+		Serie:        noteSale.Series,
+		Correlativo:  fmt.Sprintf("%d", noteSale.Correlative),
 		FechaEmision: facturador.FormatFiscalDateTime(noteSale.IssueDate),
 		// Sin formaPago: SUNAT 3246 rechaza PaymentTerms/PaymentMeansID "Contado" en NC/ND (07/08).
-		Company:      facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
-		Client:            facturador.InvoiceClient{TipoDoc: clientTipoDoc, NumDoc: clientNumDoc, RznSocial: clientRazon, Address: clientAddr},
-		TipoMoneda:        tipoMoneda,
-		CodMotivo:         codMotivo,
-		DesMotivo:         desMotivo,
-		TipDocAfectado:  tipDocAfectado,
-		NumDocfectado:   numDocAfectado,
+		Company:        facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
+		Client:         facturador.InvoiceClient{TipoDoc: clientTipoDoc, NumDoc: clientNumDoc, RznSocial: clientRazon, Address: clientAddr},
+		TipoMoneda:     tipoMoneda,
+		CodMotivo:      codMotivo,
+		DesMotivo:      desMotivo,
+		TipDocAfectado: tipDocAfectado,
+		NumDocfectado:  numDocAfectado,
 		// Sin relDocs duplicando el comprobante afectado: va a AdditionalDocumentReference (cat. 12)
 		// y SUNAT observa 4009 si se repite 01/03 del cat. 01 ya presente en BillingReference.
 		MtoOperGravadas:   sunatTotals.MtoOperGravadas,
 		MtoOperExoneradas: sunatTotals.MtoOperExoneradas,
 		MtoOperInafectas:  sunatTotals.MtoOperInafectas,
+		MtoOperExportacion: sunatTotals.MtoOperExportacion,
 		MtoOperGratuitas:  sunatTotals.MtoOperGratuitas,
 		MtoIGVGratuitas:   sunatTotals.MtoIGVGratuitas,
 		MtoIGV:            sunatTotals.MtoIGV,

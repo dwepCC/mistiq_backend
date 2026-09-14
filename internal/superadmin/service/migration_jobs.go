@@ -23,9 +23,13 @@ func (s *MigrationFleetService) StartBulkRepairSelected(p BulkRepairParams, saUs
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("sin tenants seleccionados")
 	}
-	return s.startMigrationJob(database.MigrationJobKindRepairSelected, len(rows), saUserID, p, func(jobID uint) {
+	job, err := s.startMigrationJob(database.MigrationJobKindRepairSelected, len(rows), saUserID, p, func(jobID uint) {
 		s.runRepairJob(jobID, rows, saUserID, ip)
 	})
+	if err == nil {
+		logMigrationBulkAudit("migration.bulk_repair_selected", saUserID, ip, "selected", len(rows), job.ID)
+	}
+	return job, err
 }
 
 // StartBulkRepairDrifted repara tenants en estado drifted.
@@ -37,9 +41,13 @@ func (s *MigrationFleetService) StartBulkRepairDrifted(limit int, saUserID uint,
 	if err != nil {
 		return nil, err
 	}
-	return s.startMigrationJob(database.MigrationJobKindRepairDrifted, len(rows), saUserID, map[string]int{"limit": limit}, func(jobID uint) {
+	job, err := s.startMigrationJob(database.MigrationJobKindRepairDrifted, len(rows), saUserID, map[string]int{"limit": limit}, func(jobID uint) {
 		s.runRepairJob(jobID, rows, saUserID, ip)
 	})
+	if err == nil {
+		logMigrationBulkAudit("migration.bulk_repair_drifted", saUserID, ip, fmt.Sprintf("drifted,limit=%d", limit), len(rows), job.ID)
+	}
+	return job, err
 }
 
 // StartBulkRetryFailed reintenta tenants fallidos.
@@ -51,8 +59,30 @@ func (s *MigrationFleetService) StartBulkRetryFailed(limit int, saUserID uint, i
 	if err != nil {
 		return nil, err
 	}
-	return s.startMigrationJob(database.MigrationJobKindRetryFailed, len(rows), saUserID, map[string]int{"limit": limit}, func(jobID uint) {
+	job, err := s.startMigrationJob(database.MigrationJobKindRetryFailed, len(rows), saUserID, map[string]int{"limit": limit}, func(jobID uint) {
 		s.runRetryJob(jobID, rows, saUserID, ip)
+	})
+	if err == nil {
+		logMigrationBulkAudit("migration.bulk_retry_failed", saUserID, ip, fmt.Sprintf("failed,limit=%d", limit), len(rows), job.ID)
+	}
+	return job, err
+}
+
+// logMigrationBulkAudit registra el INICIO de una operación masiva (actor, alcance, cantidad de
+// tenants encolados, job creado) — cada tenant tocado dentro del job además genera su propio
+// AuditLog individual vía logMigrationAudit (reutiliza RepairTenant/Retry sin cambios). Fase 5
+// etapa 3, Grupo 4: antes de esto no existía un registro del "quién lanzó la operación masiva".
+func logMigrationBulkAudit(action string, saUserID uint, ip, scope string, tenantCount int, jobID uint) {
+	if database.CentralDB == nil {
+		return
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    action,
+		Entity:    "migration_batch_job",
+		EntityID:  jobID,
+		Payload:   fmt.Sprintf(`{"scope":%q,"tenant_count":%d,"job_id":%d}`, scope, tenantCount, jobID),
+		IPAddress: ip,
 	})
 }
 

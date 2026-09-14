@@ -105,6 +105,18 @@ func (s *QuotationService) buildItems(inputItems []QuotationItemInput, taxCfg ta
 	var subtotal, taxAmount, total float64
 	out := make([]database.TenantQuotationItem, 0, len(inputItems))
 	for _, item := range inputItems {
+		// Precio real obligatorio: si no se corrige aquí, la cotización se guarda igual y el
+		// error solo aparece tarde, al convertirla a venta (SaleService.Create lo rechaza).
+		if !(item.UnitPrice > 0) {
+			label := strings.TrimSpace(item.Description)
+			if label == "" {
+				label = strings.TrimSpace(item.Code)
+			}
+			if label == "" {
+				label = "un ítem de la cotización"
+			}
+			return nil, 0, 0, 0, fmt.Errorf("'%s' no tiene un precio de venta válido (S/ 0.00)", label)
+		}
 		affType := strings.TrimSpace(item.IgvAffectationType)
 		if affType == "" {
 			affType = "10"

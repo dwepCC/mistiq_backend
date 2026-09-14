@@ -185,6 +185,30 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 	if status == "" {
 		status = "received"
 	}
+
+	// Resolver sesión de caja: se exige SIEMPRE, para TODA compra, sin importar el método —
+	// incluida una compra 100% a crédito sin pago inmediato (Fase 2 / decisión A). Simétrico a
+	// ResolveCashSessionForSale en ventas: hasta una venta puramente a crédito exige caja abierta
+	// del usuario para registrarse; una compra debe comportarse igual, porque
+	// TenantPurchase.CashSessionID representa "dónde se registró el documento", no "dónde se
+	// pagó" — esa segunda pregunta la responde TenantPurchasePayment.CashSessionID (Fase 2),
+	// nunca este campo.
+	//
+	// ResolveCashSessionForPurchase ya resuelve esto correctamente aunque PaymentMethod esté
+	// vacío: el método "" nunca activa la rama needsCash de ResolveCashSessionForPayments (no
+	// coincide con ningún código de efectivo ni con IsCreditCode(""), que es false para cadena
+	// vacía), así que esa función devuelve nil de inmediato y resolveCashSessionRequired cae en
+	// su última rama — GetOpenSession del usuario, exigida sin importar el método — exactamente
+	// el mismo camino que ya usa una compra al contado.
+	cbSvcResolve := cashbanksvc.NewCashBankService(s.db)
+	cashSessionID, err := cbSvcResolve.ResolveCashSessionForPurchase(
+		input.BranchID, input.UserID, nil,
+		[]cashbanksvc.PaymentLineInput{{Method: input.PaymentMethod, Amount: total}},
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	purchase := &database.TenantPurchase{
 		BranchID:         input.BranchID,
 		ContactID:        input.ContactID,
@@ -202,6 +226,7 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 		Notes:            input.Notes,
 		PriceIncludesIgv: input.PriceIncludesIgv,
 		Status:           status,
+		CashSessionID:    cashSessionID,
 	}
 	docNumber := input.Series + "-" + input.Number
 
@@ -215,10 +240,26 @@ func (s *PurchaseService) Create(input CreatePurchaseInput) (*database.TenantPur
 		if err := tx.Create(&purchaseItems).Error; err != nil {
 			return err
 		}
-		// Descontar de la cuenta asociada al método de pago (egreso), dentro de la misma tx.
+		// Egreso por el método de pago: a caja física (efectivo) o a la cuenta bancaria/
+		// billetera correspondiente — mismo enrutamiento que ventas, en sentido egreso.
 		if input.PaymentMethod != "" {
 			cbSvc := cashbanksvc.NewCashBankService(tx)
-			if err := cbSvc.RecordPaymentToAccount(tx, input.PaymentMethod, total, false, docNumber, "Compra "+docNumber, input.UserID); err != nil {
+			purchaseID := purchase.ID
+			if err := cbSvc.RecordExpensePayment(tx, input.PaymentMethod, total, cashSessionID, docNumber, "Compra "+docNumber, &purchaseID, input.UserID); err != nil {
+				return err
+			}
+		} else if total > 0 {
+			// Compra a crédito (Fase 2 — CxP): sin pago inmediato, se registra la obligación
+			// pendiente. Un pago inicial ("adelanto"), si lo hay, se aplica después con
+			// PayableService.Pay — misma llamada que un pago posterior cualquiera, exactamente
+			// igual que un cobro inmediato de una venta a crédito no se distingue de uno
+			// posterior desde receivables.Collect.
+			if err := tx.Create(&database.TenantPurchasePayable{
+				PurchaseID:     purchase.ID,
+				OriginalAmount: total,
+				PaidAmount:     0,
+				Status:         "pending",
+			}).Error; err != nil {
 				return err
 			}
 		}
@@ -376,9 +417,45 @@ func (s *PurchaseService) Void(purchaseID, userID uint) error {
 	docNumber := p.Series + "-" + p.Number
 
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if strings.TrimSpace(p.PaymentMethod) != "" && p.Total > 0 {
+		// p.Total > 0 basta como condición (ya no se exige PaymentMethod != "" aquí): una compra
+		// a crédito (Fase 2 — CxP) no tiene pago al registrarse, pero puede tener uno o más pagos
+		// a proveedor posteriores (TenantPurchasePayment vía PayableService.Pay), cada uno con la
+		// MISMA referencia docNumber que ya usa el pago inmediato — así que las mismas consultas
+		// de abajo (por purchase_id para efectivo, por reference para banco) ya encuentran esos
+		// pagos también, sin necesitar un mecanismo de reversión distinto. Si la compra a crédito
+		// nunca recibió ningún pago, ambas consultas no encuentran nada y no pasa nada (idéntico
+		// a antes). El saldo de CxP pendiente de una compra anulada se excluye por estado en las
+		// consultas de PayableService (no se actualiza aquí la fila de tenant_purchase_payables).
+		if p.Total > 0 {
 			cbSvc := cashbanksvc.NewCashBankService(tx)
 			desc := "Reversión por anulación de compra"
+
+			// Efectivo (Fase 3): revertir el egreso de tenant_cash_movements de esta compra,
+			// si la sesión donde se registró sigue abierta — mismo criterio que usa la
+			// reversión de ventas (CreateCashReversal no reabre ni reasigna sesión). Revertir
+			// en una sesión ya cerrada necesitaría el mismo mecanismo de "devolución
+			// pendiente" que ya existe para ventas (sale_cancel_cash.go) — deliberadamente
+			// fuera de esta fase; si se da el caso, se avisa en vez de fallar en silencio y
+			// dejar la compra anulada sin haber revertido el efectivo.
+			var cashMovs []database.TenantCashMovement
+			if err := tx.Where("purchase_id = ? AND type = ?", purchaseID, "expense").Find(&cashMovs).Error; err != nil {
+				return err
+			}
+			for _, cm := range cashMovs {
+				var sess database.TenantCashSession
+				if err := tx.First(&sess, cm.CashSessionID).Error; err != nil {
+					return err
+				}
+				if sess.Status != "open" {
+					return fmt.Errorf("no se puede anular: la sesión de caja donde se registró el pago en efectivo de esta compra ya está cerrada (sesión %d)", sess.ID)
+				}
+				if err := cbSvc.CreateCashReversal(tx, cm, "Anulación compra", ref, desc, userID); err != nil {
+					return err
+				}
+			}
+
+			// Yape/Plin/transferencia/tarjeta: no dependen de ninguna sesión, se revierten
+			// siempre (igual que en ventas).
 			if err := cbSvc.ReverseBankMovementsByReference(tx, docNumber, "debit", desc, ref, userID); err != nil {
 				return err
 			}

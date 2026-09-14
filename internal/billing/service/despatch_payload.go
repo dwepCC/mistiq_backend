@@ -62,8 +62,18 @@ func buildDespatchShipment(input CreateDespatchInput, sunatCode, fechaEmision, e
 	if choferTipo == "" {
 		choferTipo = "1"
 	}
+	driver := buildDespatchDriver(input, choferTipo, choferDoc)
 
 	needsVehicle := sunatCode == "31" || (sunatCode == "09" && modTraslado == greModTrasladoPrivado) || placa != ""
+	// GRE remitente + transporte público: SUNAT solo acepta que el remitente declare el
+	// vehículo si TAMBIÉN declara el conductor (exención "flota del transportista", el
+	// indicador que se agrega más abajo) — declarar el vehículo solo, sin conductor, es
+	// justo lo que SUNAT rechaza con el código 3354 "No debe ingresar información de
+	// vehículo principal". Bug real en producción (tenant RUC 20611288710): 3 guías
+	// rechazadas por completar la placa sin conductor en modalidad pública.
+	if sunatCode == "09" && modTraslado == greModTrasladoPublico && driver == nil {
+		needsVehicle = false
+	}
 	if needsVehicle && placa != "" {
 		shipment.Vehiculo = buildDespatchVehicle(
 			placa,
@@ -71,7 +81,7 @@ func buildDespatchShipment(input CreateDespatchInput, sunatCode, fechaEmision, e
 			input.Envio.VehiculoCodEmisor,
 		)
 	}
-	if driver := buildDespatchDriver(input, choferTipo, choferDoc); driver != nil {
+	if driver != nil {
 		shipment.Choferes = []facturador.DespatchDriver{*driver}
 	}
 
@@ -278,9 +288,16 @@ func validateDespatchBusinessRules(input CreateDespatchInput, sunatCode, emisorR
 	}
 
 	// Si se informa placa + conductor en transporte público (indicador GRE-T), validar licencia real.
+	// Y si se informa placa SIN conductor, rechazar en el formulario: enviarlo así a SUNAT
+	// termina en el código 3354 "No debe ingresar información de vehículo principal" (bug real
+	// visto en producción, tenant RUC 20611288710: 3 guías rechazadas por completar la placa sin
+	// el conductor en modalidad pública).
 	if sunatCode == "09" && modTraslado == greModTrasladoPublico {
 		hasDriverData := strings.TrimSpace(input.Envio.ChoferDoc) != "" || strings.TrimSpace(input.Envio.ChoferLicencia) != ""
 		hasPlaca := strings.TrimSpace(input.Envio.TransportistaPlaca) != ""
+		if hasPlaca && !hasDriverData {
+			return fmt.Errorf("si declara la placa del vehículo en transporte público, también debe declarar el conductor (documento y licencia); si no, SUNAT rechaza la guía (código 3354). Elimine la placa o complete los datos del conductor")
+		}
 		if hasPlaca && hasDriverData {
 			if err := validateDespatchDriverFields(input.Envio, true); err != nil {
 				return err
@@ -360,6 +377,13 @@ func enrichDespatchPayloadMap(m map[string]interface{}) {
 		}
 		if modFinal == greModTrasladoPublico && hasVeh && hasChofer {
 			envio["indicadores"] = []interface{}{greIndVehCondTransport}
+		}
+		// Vehículo sin conductor en modalidad pública: SUNAT lo rechaza (código 3354, "No debe
+		// ingresar información de vehículo principal"). Si esta pasada de enriquecimiento se
+		// aplica sobre un payload ya construido (p.ej. reenvío) que quedó con un vehículo
+		// huérfano, se quita en vez de dejarlo pasar de nuevo con el mismo rechazo asegurado.
+		if modFinal == greModTrasladoPublico && hasVeh && !hasChofer {
+			delete(envio, "vehiculo")
 		}
 	}
 

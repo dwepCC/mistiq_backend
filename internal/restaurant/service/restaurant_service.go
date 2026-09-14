@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -580,10 +581,12 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 			resolvedStaff = sess.StaffID
 		}
 
-		var lastOrder database.TenantTableOrder
-		nextNum := 1
-		if tx.Where("session_id = ?", sessionID).Order("order_number DESC").First(&lastOrder).Error == nil {
-			nextNum = lastOrder.OrderNumber + 1
+		// "Pedido #N" por sucursal+día (no por sesión de mesa): antes se reiniciaba en 1 cada
+		// vez que la mesa se cerraba y volvía a abrirse, permitiendo varios "Pedido #1"
+		// simultáneos el mismo día. Ver reserveDailyComandaNumber.
+		nextNum, err := reserveDailyComandaNumber(tx, sess.BranchID, time.Now())
+		if err != nil {
+			return err
 		}
 
 		order = database.TenantTableOrder{
@@ -749,6 +752,9 @@ func (s *RestaurantService) cancelComandaTx(tx *gorm.DB, c *database.TenantComan
 	if c.Status == "entregada" {
 		return errors.New("no se puede anular una comanda ya entregada")
 	}
+	if c.BilledAt != nil {
+		return errors.New("no se puede anular una comanda ya facturada (cobro parcial)")
+	}
 	now := time.Now()
 	if err := tx.Model(c).Updates(map[string]interface{}{
 		"cancelled_at":    now,
@@ -758,13 +764,57 @@ func (s *RestaurantService) cancelComandaTx(tx *gorm.DB, c *database.TenantComan
 	}).Error; err != nil {
 		return err
 	}
+
 	taxCfg := tax.LoadFromDB(tx)
-	affType, priceIncludes := comandaIgvForCalc(tx, c)
-	_, _, deduct := tax.CalcItem(c.UnitPrice, c.Quantity, 0, affType, priceIncludes, taxCfg)
-	deduct = money.RoundSunat(deduct)
-	if err := tx.Model(&database.TenantTableSession{}).Where("id = ?", c.SessionID).
-		UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", deduct)).Error; err != nil {
-		return err
+	var deduct float64
+	if c.ComboParentKey != "" {
+		// Comanda de componente de combo: su UnitPrice propio es 0 (el precio real, el fijo del
+		// combo, se sumó UNA sola vez a total_amount al agregar el pedido — ver AddOrder). Si se
+		// descontara acá con CalcItem(c.UnitPrice=0, ...) nunca se restaría nada, y ese sobrante
+		// se queda pegado en la mesa para siempre aunque se anule todo. Solo se descuenta el
+		// precio del combo cuando se anula su ÚLTIMO componente todavía activo, para no
+		// descontarlo ni de más (una vez por componente) ni de menos (nunca).
+		var stillActive int64
+		if err := tx.Model(&database.TenantComanda{}).
+			Where("combo_parent_key = ? AND id != ? AND cancelled_at IS NULL", c.ComboParentKey, c.ID).
+			Count(&stillActive).Error; err != nil {
+			return err
+		}
+		if stillActive == 0 {
+			var payload comboPayload
+			if err := json.Unmarshal([]byte(c.ComboJSON), &payload); err == nil {
+				affType := strings.TrimSpace(payload.IgvAffectationType)
+				if affType == "" {
+					affType = "10"
+				}
+				deduct = money.RoundSunat(tax.CalcItemPayableTotal(
+					payload.ComboPrice, payload.ComboQuantity, 0, affType, payload.PriceIncludesIgv, taxCfg,
+				))
+			}
+		}
+	} else {
+		affType, priceIncludes := comandaIgvForCalc(tx, c)
+		// CalcItemPayableTotal, no CalcItem: debe ser el mismo cálculo que usó AddOrder al sumar
+		// (bonificación código 15 suma 0), si no la anulación de un ítem en bonificación
+		// descontaría de más.
+		deduct = money.RoundSunat(tax.CalcItemPayableTotal(c.UnitPrice, c.Quantity, 0, affType, priceIncludes, taxCfg))
+	}
+
+	if deduct > 0 {
+		// GREATEST() no es portable (no existe en SQLite, sí en MySQL/MariaDB) — se calcula el
+		// piso en Go para no depender del motor.
+		var curSess database.TenantTableSession
+		if err := tx.Select("id", "total_amount").First(&curSess, c.SessionID).Error; err != nil {
+			return err
+		}
+		newTotal := money.RoundSunat(curSess.TotalAmount - deduct)
+		if newTotal < 0 {
+			newTotal = 0
+		}
+		if err := tx.Model(&database.TenantTableSession{}).Where("id = ?", c.SessionID).
+			UpdateColumn("total_amount", newTotal).Error; err != nil {
+			return err
+		}
 	}
 	return s.syncSessionOrderStatus(tx, c.SessionID)
 }
@@ -796,7 +846,7 @@ func (s *RestaurantService) CancelAllComandas(sessionID uint, orderID *uint, pin
 	}
 
 	q := s.db.Where(
-		"session_id = ? AND cancelled_at IS NULL AND status != ?",
+		"session_id = ? AND cancelled_at IS NULL AND billed_at IS NULL AND status != ?",
 		sessionID, "entregada",
 	)
 	if orderID != nil && *orderID > 0 {
@@ -1036,6 +1086,13 @@ type BillInput struct {
 	DiscountMode    string  // "percent" | "amount" (opcional; recalcula descuento en servidor)
 	DiscountValue   float64 // valor del descuento (% o monto según DiscountMode)
 	CentralTenantID uint    // tenant SaaS (cupo documentos electrónicos)
+	// ComandaIDs: dividir cuenta — factura solo estas comandas (deben estar pendientes de cobro
+	// en la sesión) en vez de todo lo pendiente. Vacío = comportamiento clásico (todo lo
+	// pendiente, respeta CloseSession tal cual llega). No vacío: CloseSession se recalcula en
+	// servidor según si la selección cubre o no todo lo que quedaba pendiente — el valor que
+	// mande el cliente en ese caso se ignora, para que el cierre de mesa no dependa de que el
+	// cliente cuente bien lo que queda.
+	ComandaIDs []uint
 }
 
 type PaymentInput struct {
@@ -1076,19 +1133,64 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		return nil, errors.New("la sesión ya está cerrada o facturada")
 	}
 
-	// Comandas a facturar.
-	// Cierre total (POS / mesa): incluye todos los estados de cocina; "entregada" = servido, no facturado aún.
-	// Cobro parcial (mesa sigue abierta): solo ítems aún no facturados en un cobro anterior.
-	q := s.db.Where("session_id = ? AND cancelled_at IS NULL", input.SessionID)
-	if !input.CloseSession {
-		q = q.Where("status != ?", "entregada")
-	}
-	var comandas []database.TenantComanda
-	if err := q.Find(&comandas).Error; err != nil {
+	// Comandas candidatas: activas de la sesión, aún no facturadas. billed_at (no status, que es
+	// 100% de cocina) es lo único que marca "ya incluida en un cobro anterior" — ver
+	// V112ComandaBilledAt.
+	var allPending []database.TenantComanda
+	if err := s.db.Where("session_id = ? AND cancelled_at IS NULL AND billed_at IS NULL", input.SessionID).
+		Find(&allPending).Error; err != nil {
 		return nil, err
 	}
-	if len(comandas) == 0 {
+	if len(allPending) == 0 {
 		return nil, errors.New("no hay ítems para facturar en esta sesión")
+	}
+
+	var comandas []database.TenantComanda
+	splitBilling := len(input.ComandaIDs) > 0
+	if !splitBilling {
+		// Camino clásico: todo lo pendiente, respeta el CloseSession que mandó el caller (POS de
+		// venta directa, cierre normal de mesa).
+		comandas = allPending
+	} else {
+		wanted := make(map[uint]bool, len(input.ComandaIDs))
+		for _, id := range input.ComandaIDs {
+			wanted[id] = true
+		}
+		found := make(map[uint]bool, len(input.ComandaIDs))
+		for _, c := range allPending {
+			if wanted[c.ID] {
+				comandas = append(comandas, c)
+				found[c.ID] = true
+			}
+		}
+		for _, id := range input.ComandaIDs {
+			if !found[id] {
+				return nil, fmt.Errorf("la comanda %d no existe, ya fue cancelada o ya fue facturada", id)
+			}
+		}
+		// Un combo no se puede partir entre dos cobros: si se eligió cualquiera de sus
+		// componentes, deben venir TODOS los pendientes de ese ComboParentKey.
+		comboGroups := make(map[string][]database.TenantComanda)
+		for _, c := range allPending {
+			if c.ComboParentKey != "" {
+				comboGroups[c.ComboParentKey] = append(comboGroups[c.ComboParentKey], c)
+			}
+		}
+		for _, group := range comboGroups {
+			selectedInGroup := 0
+			for _, c := range group {
+				if wanted[c.ID] {
+					selectedInGroup++
+				}
+			}
+			if selectedInGroup > 0 && selectedInGroup != len(group) {
+				return nil, fmt.Errorf("el combo '%s' debe cobrarse completo, no se puede dividir entre distintos pagos", group[0].ProductName)
+			}
+		}
+		// El cierre de mesa depende de si esto cubre TODO lo pendiente, no de lo que mande el
+		// cliente — evita que la mesa quede "abierta" con todo ya cobrado, o "cerrada" con algo
+		// pendiente, por un desfase de conteo en el frontend.
+		input.CloseSession = len(comandas) == len(allPending)
 	}
 
 	resolvedCash, err := s.resolveCashSessionForSale(sess.BranchID, input.UserID, input.EmployeeType, input.CashSessionID, input.Payments)
@@ -1355,11 +1457,12 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		recordIdx := 0
 		for _, p := range input.Payments {
 			tx.Create(&database.TenantSalePayment{
-				SaleID:    sale.ID,
-				Method:    p.Method,
-				Amount:    p.Amount,
-				Reference: p.Reference,
-				Notes:     p.Notes,
+				SaleID:        sale.ID,
+				Method:        p.Method,
+				Amount:        p.Amount,
+				Reference:     p.Reference,
+				Notes:         p.Notes,
+				CashSessionID: input.CashSessionID,
 			})
 			desc := "Venta " + sale.Number
 			recordAmt := p.Amount
@@ -1397,14 +1500,15 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 				return err
 			}
 			tx.Model(&lockedSess).UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", total))
-			// Marcar solo las comandas facturadas en este cobro (evita doble facturación en cobros parciales)
+			// Marcar solo las comandas facturadas en este cobro (evita doble facturación en cobros
+			// parciales); billed_at, no status — status sigue siendo 100% de cocina.
 			billedIDs := make([]uint, 0, len(comandas))
 			for _, c := range comandas {
 				billedIDs = append(billedIDs, c.ID)
 			}
 			if len(billedIDs) > 0 {
 				tx.Model(&database.TenantComanda{}).Where("id IN ?", billedIDs).
-					Update("status", "entregada")
+					Update("billed_at", now)
 			}
 		}
 
@@ -1524,11 +1628,12 @@ func (s *RestaurantService) RegisterPayments(saleID uint, payments []PaymentInpu
 		recordIdx := 0
 		for _, p := range payments {
 			tx.Create(&database.TenantSalePayment{
-				SaleID:    saleID,
-				Method:    p.Method,
-				Amount:    p.Amount,
-				Reference: p.Reference,
-				Notes:     p.Notes,
+				SaleID:        saleID,
+				Method:        p.Method,
+				Amount:        p.Amount,
+				Reference:     p.Reference,
+				Notes:         p.Notes,
+				CashSessionID: sale.CashSessionID,
 			})
 			desc := "Venta " + sale.Number
 			recordAmt := p.Amount

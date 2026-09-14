@@ -25,6 +25,7 @@ func setupPrintDataFiscalTestDB(t *testing.T) *gorm.DB {
 		&database.TenantSaleFiscalObligation{},
 		&database.TenantCompanyConfig{},
 		&database.TenantUser{},
+		&database.TenantSaleDetraccion{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {
@@ -73,6 +74,40 @@ func TestEnrichFiscalPrintData_retentionAndGuia(t *testing.T) {
 	}
 	if pd.Fiscal.PurchaseOrderNumber != "OC-55" || len(pd.Fiscal.Guias) != 1 {
 		t.Fatalf("fiscal meta: %+v", pd.Fiscal)
+	}
+}
+
+// Bug reportado: el PDF local (Tukifac) no mostraba la misma "Información Adicional" que el
+// PDF del facturador para una factura con detracción — le faltaba la leyenda SUNAT (catálogo
+// 2006) y la descripción del medio de pago (el bien/servicio sí se resolvía, el medio de pago
+// solo traía el código crudo "001" sin su etiqueta "Depósito en cuenta").
+func TestEnrichFiscalPrintData_detraccionLegendAndPaymentMethodLabel(t *testing.T) {
+	db := setupPrintDataFiscalTestDB(t)
+	det := database.TenantSaleDetraccion{
+		SaleID: 323, GoodCode: "022", PaymentMethodCode: "001", BankAccount: "00046080866",
+		RatePercent: 12, BaseAmountPen: 2498.05, DetractionAmountPen: 353.72,
+		InvoiceTotalPen: 2947.70, NetPayablePen: 2593.98, BnConfirmationStatus: "pending",
+	}
+	if err := db.Create(&det).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	pd := &PrintData{Total: 2947.70, Currency: "PEN"}
+	enrichFiscalPrintData(db, 323, 2947.70, pd)
+	if pd.Fiscal == nil || !pd.Fiscal.HasDetraccion {
+		t.Fatalf("expected has_detraccion=true, got %+v", pd.Fiscal)
+	}
+	if pd.Fiscal.DetraccionGoodCode != "022" || pd.Fiscal.DetraccionGoodLabel == "" || pd.Fiscal.DetraccionGoodLabel == "022" {
+		t.Fatalf("bien/servicio sin resolver: %+v", pd.Fiscal)
+	}
+	if pd.Fiscal.DetraccionPaymentMethodCode != "001" {
+		t.Fatalf("payment method code: %q", pd.Fiscal.DetraccionPaymentMethodCode)
+	}
+	if pd.Fiscal.DetraccionPaymentMethodLabel != "Depósito en cuenta" {
+		t.Fatalf("medio de pago sin resolver: %q", pd.Fiscal.DetraccionPaymentMethodLabel)
+	}
+	if pd.Fiscal.DetraccionLegendText != "Operación sujeta a detracción" {
+		t.Fatalf("leyenda SUNAT 2006 ausente: %q", pd.Fiscal.DetraccionLegendText)
 	}
 }
 

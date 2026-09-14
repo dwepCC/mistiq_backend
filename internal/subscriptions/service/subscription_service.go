@@ -33,10 +33,23 @@ type SubscriptionDetail struct {
 }
 
 type SubscriptionListParams struct {
-	Status  string
-	Query   string
-	Page    int
-	PerPage int
+	Status string
+	// BilledMonths: filtro por ciclo (1 mensual, 3 trimestral, 6 semestral, 12 anual...).
+	// Se filtra por billed_months, NO por billing_cycle: ese último solo copia el
+	// billing_cycle ESTÁTICO del plan (casi siempre "monthly" en el catálogo actual) y no
+	// cambia según cuántos meses se contrataron en esta suscripción/renovación puntual —
+	// billed_months sí, es el campo que el propio modelo documenta como "meses VENDIDOS en
+	// esta suscripción, que es lo que se cobra" (ver database.SaasSubscription.BilledMonths).
+	BilledMonths int
+	Query        string
+	// EndDateFrom/EndDateTo: filtro por vencimiento (YYYY-MM-DD, inclusive en ambos extremos)
+	// sobre saas_subscriptions.end_date. Cubre los tres casos de uso del panel: "por vencer"
+	// (EndDateTo = hoy + N días), "vence en tal mes" (primer/último día del mes) y "ya
+	// vencieron" (EndDateTo = ayer, o combinado con Status=expired).
+	EndDateFrom string
+	EndDateTo   string
+	Page        int
+	PerPage     int
 }
 
 func (s *SubscriptionService) List(params SubscriptionListParams) ([]SubscriptionDetail, int64, error) {
@@ -44,6 +57,15 @@ func (s *SubscriptionService) List(params SubscriptionListParams) ([]Subscriptio
 	q := database.CentralDB.Model(&database.SaasSubscription{})
 	if params.Status != "" {
 		q = q.Where("saas_subscriptions.status = ?", params.Status)
+	}
+	if params.BilledMonths > 0 {
+		q = q.Where("saas_subscriptions.billed_months = ?", params.BilledMonths)
+	}
+	if from, err := time.Parse("2006-01-02", params.EndDateFrom); err == nil {
+		q = q.Where("saas_subscriptions.end_date >= ?", from)
+	}
+	if to, err := time.Parse("2006-01-02", params.EndDateTo); err == nil {
+		q = q.Where("saas_subscriptions.end_date < ?", to.AddDate(0, 0, 1))
 	}
 	if strings.TrimSpace(params.Query) != "" {
 		like := "%" + strings.TrimSpace(params.Query) + "%"
@@ -143,6 +165,11 @@ type CreateSubscriptionInput struct {
 	PlanID   uint   `json:"plan_id"`
 	Months   int    `json:"months"`
 	Notes    string `json:"notes"`
+	// StartDate opcional (YYYY-MM-DD): igual que en el alta de tenant, para cuando la
+	// suscripción real arranca unos días después de crearla. Vacío = arranca hoy. Solo tiene
+	// efecto si el tenant NO tiene ya una suscripción vigente con este mismo plan (ese caso
+	// siempre encadena en sitio desde el fin de la vigente, sin importar StartDate).
+	StartDate string `json:"start_date"`
 	// Descuento opcional sobre el cobro (precio del plan × meses). Pensado para contratos
 	// largos: 6 meses o anual a cambio de un porcentaje o un monto fijo menos.
 	DiscountType  string  `json:"discount_type"`
@@ -150,7 +177,15 @@ type CreateSubscriptionInput struct {
 }
 
 func (s *SubscriptionService) Create(input CreateSubscriptionInput) (*database.SaasSubscription, error) {
-	sub, err := saas.ExtendSubscription(input.TenantID, input.PlanID, input.Months, input.Notes,
+	var startDate *time.Time
+	if sd := strings.TrimSpace(input.StartDate); sd != "" {
+		t, parseErr := time.ParseInLocation("2006-01-02", sd, saas.LimaLocation())
+		if parseErr != nil {
+			return nil, errors.New("fecha de inicio inválida (formato esperado AAAA-MM-DD)")
+		}
+		startDate = &t
+	}
+	sub, err := saas.ExtendSubscription(input.TenantID, input.PlanID, input.Months, input.Notes, startDate,
 		saas.Discount{Type: input.DiscountType, Value: input.DiscountValue})
 	if err != nil {
 		return nil, err
@@ -206,7 +241,7 @@ func (s *SubscriptionService) Reactivate(id uint, extraMonths int) error {
 	if err := requireCurrentSubscription(&sub); err != nil {
 		return err
 	}
-	_, err := saas.ExtendSubscription(sub.TenantID, sub.PlanID, extraMonths, "reactivación manual")
+	_, err := saas.ExtendSubscription(sub.TenantID, sub.PlanID, extraMonths, "reactivación manual", nil)
 	if err != nil {
 		return err
 	}
@@ -241,11 +276,26 @@ func (s *SubscriptionService) Cancel(id uint, reason string) error {
 		}).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&database.SaasBillingCycle{}).
-			Where("subscription_id = ? AND status IN ?", sub.ID,
-				[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue}).
-			Update("status", database.SaasInvoiceRejected).Error; err != nil {
+		var cycles []database.SaasBillingCycle
+		if err := tx.Where("subscription_id = ? AND status IN ?", sub.ID,
+			[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue, database.SaasInvoicePendingReview}).
+			Find(&cycles).Error; err != nil {
 			return err
+		}
+		for i := range cycles {
+			c := &cycles[i]
+			// Igual que al anular un cobro individual: un comprobante en revisión sobre un ciclo
+			// que la cancelación de la suscripción va a anular se rechaza en cascada, no se deja
+			// huérfano "en revisión" para siempre.
+			if c.Status == database.SaasInvoicePendingReview {
+				if err := saas.CascadeRejectPendingPaymentsForCycleTx(tx, c.ID, "admin", nil,
+					fmt.Sprintf("Rechazado automáticamente: la suscripción #%d fue anulada (%s)", sub.ID, reason)); err != nil {
+					return err
+				}
+			}
+			if err := tx.Model(c).Update("status", database.SaasInvoiceRejected).Error; err != nil {
+				return err
+			}
 		}
 		return tx.Model(&database.Tenant{}).Where("id = ?", sub.TenantID).
 			Update("status", database.TenantStatusSuspended).Error
@@ -332,6 +382,18 @@ func (s *SubscriptionService) AdjustValidity(id, saUserID uint, clientIP string,
 		return nil, errors.New("tenant no encontrado")
 	}
 
+	// Bloquear si hay un comprobante en revisión: mover la vigencia ahora dejaría el ciclo que
+	// el admin está a punto de aprobar/rechazar desalineado con el nuevo vencimiento (o, peor,
+	// realignCurrentBillingCycle lo saltearía en silencio por no calzar con pending/overdue).
+	// Resolver primero el pago; ajustar vigencia después.
+	var reviewCount int64
+	database.CentralDB.Model(&database.SaasBillingCycle{}).
+		Where("subscription_id = ? AND status = ?", sub.ID, database.SaasInvoicePendingReview).
+		Count(&reviewCount)
+	if reviewCount > 0 {
+		return nil, errors.New("hay un comprobante en revisión para esta suscripción; apruébalo o recházalo antes de ajustar la vigencia")
+	}
+
 	manuallySuspended := sub.Status == database.SaasSubSuspended
 	oldEndStr := sub.EndDate.In(saas.LimaLocation()).Format("2006-01-02")
 	newEndStr := newEnd.In(saas.LimaLocation()).Format("2006-01-02")
@@ -387,7 +449,7 @@ func (s *SubscriptionService) AdjustValidity(id, saUserID uint, clientIP string,
 		"reason":            reason,
 		"effective_status":  effective,
 	})
-	_ = database.CentralDB.Create(&database.AuditLog{
+	database.WriteAuditLog(&database.AuditLog{
 		TenantID:  sub.TenantID,
 		UserID:    saUserID,
 		Action:    "subscription_validity_adjusted",
@@ -395,7 +457,7 @@ func (s *SubscriptionService) AdjustValidity(id, saUserID uint, clientIP string,
 		EntityID:  sub.ID,
 		Payload:   string(payload),
 		IPAddress: clientIP,
-	}).Error
+	})
 
 	return &sub, nil
 }
@@ -414,21 +476,35 @@ func realignCurrentBillingCycle(tx *gorm.DB, subID uint, oldEnd, newEnd time.Tim
 		return err
 	}
 
-	// El ciclo del período vigente es el que terminaba justo en el vencimiento anterior. Si las
-	// fechas ya venían desalineadas, se usa el impago más próximo a vencer.
+	// El ciclo del período vigente es el que terminaba justo en el vencimiento anterior, y el
+	// índice único (subscription_id, period_end) garantiza que sea uno solo. Se realinea aunque
+	// esté PAGADO: EnsureBillingCycle decide si falta cobro comparando period_end == end_date
+	// por igualdad exacta, así que dejar atrás el ciclo pagado hacía que el siguiente tick del
+	// cron lo diera por inexistente y emitiera un cobro nuevo por un período ya cobrado —mover
+	// la vigencia un día bastaba para facturar dos veces.
+	//
+	// Si las fechas ya venían desalineadas (ningún ciclo cierra en oldEnd) se cae al impago más
+	// próximo a vencer, como antes. No hay que contemplar pending_review acá: AdjustValidity ya
+	// bloqueó antes de llegar a esta función si la suscripción tiene algún ciclo en revisión
+	// (ver el check al inicio de AdjustValidity).
 	var target *database.SaasBillingCycle
+	var fallback *database.SaasBillingCycle
 	for i := range cycles {
 		c := &cycles[i]
-		if c.Status != database.SaasInvoicePending && c.Status != database.SaasInvoiceOverdue {
+		// Los rechazados son cancelaciones administrativas: no cubren período alguno.
+		if c.Status == database.SaasInvoiceRejected {
 			continue
 		}
 		if c.PeriodEnd.Equal(oldEnd) {
 			target = c
 			break
 		}
-		if target == nil {
-			target = c
+		if fallback == nil && (c.Status == database.SaasInvoicePending || c.Status == database.SaasInvoiceOverdue) {
+			fallback = c
 		}
+	}
+	if target == nil {
+		target = fallback
 	}
 	if target == nil || target.PeriodEnd.Equal(newEnd) {
 		return nil
@@ -445,8 +521,14 @@ func realignCurrentBillingCycle(tx *gorm.DB, subID uint, oldEnd, newEnd time.Tim
 		}
 	}
 
+	// En un ciclo ya pagado el due_date es historia —cuándo venció la deuda que el tenant saldó—,
+	// así que solo se corrige el cierre del período. En los impagos ambos se mueven, como antes.
+	fields := map[string]interface{}{"period_end": newEnd}
+	if target.Status != database.SaasInvoicePaid {
+		fields["due_date"] = newEnd
+	}
 	return tx.Model(&database.SaasBillingCycle{}).Where("id = ?", target.ID).
-		Updates(map[string]interface{}{"period_end": newEnd, "due_date": newEnd}).Error
+		Updates(fields).Error
 }
 
 func parseEndDateLima(raw string) (time.Time, error) {

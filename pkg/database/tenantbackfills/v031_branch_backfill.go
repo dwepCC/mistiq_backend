@@ -12,6 +12,14 @@ type V031BranchBackfill struct{}
 func (V031BranchBackfill) Version() int { return 31 }
 func (V031BranchBackfill) Name() string { return "multi_branch_backfill" }
 
+// Repeatable: ver tenantbackfills.Repeatable. Igual que V036, depende de schema (columna
+// tenant_users.home_branch_id) desplegado de forma incremental/asíncrona por el cron de
+// migración — una corrida puede fallar con "esquema no listo" mientras ese schema aún se
+// despliega para ese tenant, y sin esto quedaría trabada para siempre por el candado run-once.
+// Todos sus UPDATE llevan guarda propia (IS NULL OR = 0 / rol específico), así que repetirla no
+// duplica ni corrompe nada ya resuelto.
+func (V031BranchBackfill) Repeatable() bool { return true }
+
 func (V031BranchBackfill) Run(db *gorm.DB) error {
 	if !hasColumn(db, "tenant_users", "home_branch_id") {
 		return fmt.Errorf("backfill: esquema multi-sucursal no listo")

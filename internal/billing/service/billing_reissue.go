@@ -188,7 +188,7 @@ func (s *BillingService) auditReissue(in ReissueInput, sale *database.TenantSale
 		payload["observation"] = strings.TrimSpace(in.Observation)
 	}
 
-	_ = database.CentralDB.Create(&database.AuditLog{
+	database.WriteAuditLog(&database.AuditLog{
 		TenantID:  s.centralTenantID,
 		UserID:    in.ActorID,
 		Action:    "sale_fiscal_reissue",
@@ -196,5 +196,5 @@ func (s *BillingService) auditReissue(in ReissueInput, sale *database.TenantSale
 		EntityID:  in.SaleID,
 		Payload:   saas.MetaJSON(payload),
 		IPAddress: in.ClientIP,
-	}).Error
+	})
 }

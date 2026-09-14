@@ -20,6 +20,7 @@ func setupComboTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&database.TenantProduct{},
+		&database.TenantUnit{},
 		&database.TenantCategory{},
 		&database.TenantPreparationArea{},
 		&database.TenantComboGroup{},

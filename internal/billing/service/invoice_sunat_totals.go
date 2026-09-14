@@ -12,6 +12,7 @@ type InvoiceSunatTotals struct {
 	MtoOperGravadas   float64
 	MtoOperExoneradas float64
 	MtoOperInafectas  float64
+	MtoOperExportacion float64
 	MtoIGV            float64
 	MtoOperGratuitas  float64
 	MtoIGVGratuitas   float64
@@ -46,6 +47,11 @@ func ComputeInvoiceSunatTotals(items []database.TenantSaleItem, saleTotal float6
 			out.MtoOperExoneradas = round2(out.MtoOperExoneradas + sub)
 		case "30":
 			out.MtoOperInafectas = round2(out.MtoOperInafectas + sub)
+		case "40":
+			// Exportación: sin IGV (tasa 0). Tributo 9995/EXP — mismo tratamiento que exonerado/
+			// inafecto (TaxSubtotal por línea vía getTributoAfect en Greenter, ya soportado sin
+			// cambios; ver lineIgvRateForPayload/linePorcentajeIgvForPayload).
+			out.MtoOperExportacion = round2(out.MtoOperExportacion + sub)
 		default:
 			if tax.IsGravado(aff) {
 				out.MtoOperGravadas = round2(out.MtoOperGravadas + sub)
@@ -54,7 +60,9 @@ func ComputeInvoiceSunatTotals(items []database.TenantSaleItem, saleTotal float6
 		}
 	}
 	// SUNAT UBL 2.1: LegalMonetaryTotal/LineExtensionAmount (valorVenta) no incluye gratuitas.
-	out.ValorVenta = round2(out.MtoOperGravadas + out.MtoOperExoneradas + out.MtoOperInafectas)
+	// Exportación (40) sí es parte del valor de venta —no está exenta de la operación, solo
+	// del IGV— así que suma aquí igual que gravadas/exoneradas/inafectas.
+	out.ValorVenta = round2(out.MtoOperGravadas + out.MtoOperExoneradas + out.MtoOperInafectas + out.MtoOperExportacion)
 	// Guía SUNAT numeral 27 (Sumatoria IGV → TaxSubtotal tributo 1000): no incluye IGV de
 	// transferencias gratuitas. El IGV referencial de bonificación 15 va en mtoIGVGratuitas
 	// (tributo 9996) y no debe sumarse al TaxTotal/cbc:TaxAmount global (error 4301).

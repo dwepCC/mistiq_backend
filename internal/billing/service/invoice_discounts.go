@@ -38,11 +38,15 @@ func BuildInvoiceDetailsFromSaleItems(items []database.TenantSaleItem, companyTa
 		hasGlobal := item.GlobalDiscountSubtotal > 0
 		mtoValorVenta := preGlobal
 
+		// round10, no round2: SUNAT recalcula cantidad × mtoValorUnitario y lo compara contra
+		// mtoValorVenta/mtoBaseIgv (error 3271 si difieren). Con cantidades grandes, redondear el
+		// unitario a solo 2 decimales desvía ese recálculo mucho más de lo que tolera SUNAT — ver
+		// el comentario de round10 en billing_service.go para el caso real que lo disparó.
 		var mtoValorUnitario float64
 		if item.LineDiscountSubtotal > 0 {
-			mtoValorUnitario = round2((preGlobal + item.LineDiscountSubtotal) / cantidad)
+			mtoValorUnitario = round10((preGlobal + item.LineDiscountSubtotal) / cantidad)
 		} else {
-			mtoValorUnitario = round2(preGlobal / cantidad)
+			mtoValorUnitario = round10(preGlobal / cantidad)
 		}
 
 		rate := lineIgvRateForPayload(aff, item.TaxRate, companyTaxRate)
@@ -53,15 +57,15 @@ func BuildInvoiceDetailsFromSaleItems(items []database.TenantSaleItem, companyTa
 			mtoBaseIgv = preGlobal
 			if rate > 0 {
 				igv = round2(preGlobal * (rate / 100))
-				mtoPrecioUnitario = round2((preGlobal + igv) / cantidad)
+				mtoPrecioUnitario = round10((preGlobal + igv) / cantidad)
 			} else {
 				igv = 0
-				mtoPrecioUnitario = round2(preGlobal / cantidad)
+				mtoPrecioUnitario = round10(preGlobal / cantidad)
 			}
 		} else {
 			mtoBaseIgv = round2(item.Subtotal)
 			igv = round2(item.TaxAmount)
-			mtoPrecioUnitario = round2((mtoBaseIgv + igv) / cantidad)
+			mtoPrecioUnitario = round10((mtoBaseIgv + igv) / cantidad)
 		}
 
 		var lineDescuentos []facturador.InvoiceCharge
@@ -79,7 +83,7 @@ func BuildInvoiceDetailsFromSaleItems(items []database.TenantSaleItem, companyTa
 			// - cac:PricingReference PriceTypeCode 02 → mtoValorGratuito (ref. unitario con IGV).
 			// - LineExtensionAmount (mtoValorVenta) y TaxTotal conservan base/IGV referencial.
 			// - tipAfeIgv 15; Greenter stock mapea 15 → tributo 9996 (default).
-			mtoValorGratuito = round2(mtoValorVenta / cantidad)
+			mtoValorGratuito = round10(mtoValorVenta / cantidad)
 			mtoPrecioUnitario = 0
 			mtoValorUnitario = 0
 		}

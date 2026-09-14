@@ -21,7 +21,10 @@ func TestShouldShowRenewalBanner(t *testing.T) {
 	}
 }
 
-func TestBillingDebtApplies_farDueDate(t *testing.T) {
+// El estado real del ciclo manda, no la cercanía del vencimiento: un tenant recién dado de
+// alta, sin pagar, con vencimiento a más de un año, SÍ tiene deuda real — antes esto se ocultaba
+// (el panel del tenant mostraba "al día" con una deuda de verdad detrás; ver billing_ux.go).
+func TestBillingDebtApplies_farDueDateIsStillRealDebt(t *testing.T) {
 	cfg := PlatformSettings{ReminderDays: []int{7, 5, 3, 1}}
 	sub := TenantSubscriptionView{
 		Status:          database.SaasSubActive,
@@ -34,8 +37,24 @@ func TestBillingDebtApplies_farDueDate(t *testing.T) {
 		DueDate: due,
 		Amount:  99,
 	}
+	if !billingDebtApplies(cycle, sub, cfg) {
+		t.Fatal("un ciclo 'pending' es deuda real sin importar qué tan lejos esté el vencimiento")
+	}
+}
+
+// pending_review NO cuenta como deuda urgente: ya hay un comprobante subido esperando
+// aprobación — mostrarlo como "deuda a pagar" contradiría el aviso de "pago en revisión"
+// (resolvePaymentUX, rama "review", que de todos modos tiene precedencia sobre esto).
+func TestBillingDebtApplies_pendingReviewIsNotUrgentDebt(t *testing.T) {
+	cfg := PlatformSettings{ReminderDays: []int{7, 5, 3, 1}}
+	sub := TenantSubscriptionView{Status: database.SaasSubActive, DaysUntilExpiry: 365}
+	cycle := &database.SaasBillingCycle{
+		Status:  database.SaasInvoicePendingReview,
+		DueDate: time.Now().In(lima()),
+		Amount:  99,
+	}
 	if billingDebtApplies(cycle, sub, cfg) {
-		t.Fatal("pending invoice far in future is not real debt")
+		t.Fatal("un ciclo en pending_review no debe mostrarse como deuda urgente")
 	}
 }
 

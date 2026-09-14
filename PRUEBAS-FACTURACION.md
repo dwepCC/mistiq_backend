@@ -63,6 +63,15 @@ Desde el **panel central** (Empresas → SUNAT/Facturador) puedes:
 
 Si solo envías el certificado público (sin clave privada), Lycet devolverá `openssl_sign(): Supplied key param cannot be coerced into a private key` al intentar firmar el XML.
 
+### PFX / P12 (panel central)
+
+El backend convierte el archivo a PEM antes de enviarlo a Lycet (`pkg/facturador/cert_pfx.go`):
+
+1. Parser Go (`go-pkcs12`).
+2. Si falla (certificados SUNAT en formato legacy/BER) → **OpenSSL** `pkcs12 -legacy`.
+
+La imagen Docker de producción incluye el paquete `openssl` en Alpine. Tras cambiar el `dockerfile`, hay que **reconstruir y redesplegar** la imagen en el VPS (push a `main` o workflow manual).
+
 ---
 
 ## Flujo de una venta (factura/boleta) hasta SUNAT

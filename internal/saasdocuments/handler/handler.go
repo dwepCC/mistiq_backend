@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"strconv"
 
 	"tukifac/pkg/database"
@@ -29,19 +30,47 @@ func (h *Handler) UpsertCatalogAPI(c fiber.Ctx) error {
 	if id, err := strconv.ParseUint(c.Params("id"), 10, 32); err == nil && id > 0 {
 		in.ID = uint(id)
 	}
+	creating := in.ID == 0
 	row, err := docusage.UpsertCatalogPackage(in)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	action := "document_package_catalog_updated"
+	if creating {
+		action = "document_package_catalog_created"
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    action,
+		Entity:    "saas_document_package",
+		EntityID:  row.ID,
+		Payload:   fmt.Sprintf(`{"name":%q,"documents_qty":%d,"price":%v}`, row.Name, row.DocumentsQty, row.Price),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(row)
 }
 
+// DeleteCatalogAPI desactiva un paquete del catálogo (is_active=false) — no es un borrado físico,
+// no hay ninguna fila destructiva que eliminar en este flujo.
 func (h *Handler) DeleteCatalogAPI(c fiber.Ctx) error {
 	id, _ := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err := database.CentralDB.Model(&database.SaasDocumentPackage{}).Where("id = ?", id).
 		Update("is_active", false).Error; err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    "document_package_catalog_deactivated",
+		Entity:    "saas_document_package",
+		EntityID:  uint(id),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -71,30 +100,59 @@ func (h *Handler) ListPendingAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"requests": out})
 }
 
+// ApproveAPI aprueba una solicitud de compra de paquete de documentos — efecto financiero real:
+// acredita los documentos comprados (ver docusage.ApproveTenantPackage). La validación de negocio
+// existente (la solicitud debe seguir en pending_review) sigue intacta, RBAC no la reemplaza.
 func (h *Handler) ApproveAPI(c fiber.Ctx) error {
 	id, _ := strconv.ParseUint(c.Params("id"), 10, 32)
-	adminID, _ := c.Locals("superadmin_id").(uint)
+	// Corregido: leía "superadmin_id", una clave que SuperAdminAuthAPI nunca setea (el middleware
+	// deja "sa_user_id") — el actor auditado quedaba siempre en 0. Mismo patrón que el resto del
+	// panel central.
+	saUserID, _ := c.Locals("sa_user_id").(uint)
 	var body struct {
 		Notes string `json:"notes"`
 	}
 	_ = c.Bind().Body(&body)
-	if err := docusage.ApproveTenantPackage(uint(id), adminID, body.Notes); err != nil {
+	if err := docusage.ApproveTenantPackage(uint(id), saUserID, body.Notes); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    "document_package_purchase_approved",
+		Entity:    "saas_tenant_document_package",
+		EntityID:  uint(id),
+		Payload:   fmt.Sprintf(`{"to":%q}`, database.SaasDocPkgApproved),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }
 
+// RejectAPI rechaza una solicitud de compra — requiere documentos.approve_purchase (decisión
+// confirmada con el usuario: aprobar/rechazar son las dos caras de la misma revisión; el catálogo
+// no tiene un permiso de rechazo separado).
 func (h *Handler) RejectAPI(c fiber.Ctx) error {
 	id, _ := strconv.ParseUint(c.Params("id"), 10, 32)
-	adminID, _ := c.Locals("superadmin_id").(uint)
+	saUserID, _ := c.Locals("sa_user_id").(uint)
 	var body struct {
 		Reason string `json:"reason"`
 	}
 	if err := c.Bind().Body(&body); err != nil || body.Reason == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "motivo requerido"})
 	}
-	if err := docusage.RejectTenantPackage(uint(id), adminID, body.Reason); err != nil {
+	if err := docusage.RejectTenantPackage(uint(id), saUserID, body.Reason); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    "document_package_purchase_rejected",
+		Entity:    "saas_tenant_document_package",
+		EntityID:  uint(id),
+		Payload:   fmt.Sprintf(`{"to":%q,"reason":%q}`, database.SaasDocPkgRejected, body.Reason),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }

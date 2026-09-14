@@ -204,6 +204,35 @@ func (s *InventoryService) GetPresentationStockByBranch(presentationID, branchID
 	return qty
 }
 
+// PresentationStockRow saldo de UNA presentación en UNA sucursal — a diferencia de
+// GetStockByBranch (que colapsa todas las presentaciones de un producto en un solo total por
+// sucursal), esto conserva la identidad de cada presentación para poder mostrarla desglosada.
+type PresentationStockRow struct {
+	ProductID        uint    `json:"product_id"`
+	BranchID         uint    `json:"branch_id"`
+	PresentationID   uint    `json:"presentation_id"`
+	PresentationName string  `json:"presentation_name"`
+	Quantity         float64 `json:"quantity"`
+}
+
+// GetPresentationStockByProduct stock de un producto CON presentaciones, una fila por cada
+// (presentación, sucursal) — branchID=0 trae todas las sucursales. SUM por si alguna vez hay
+// más de una fila para el mismo (presentación, sucursal); en el uso normal ya es 1:1.
+func (s *InventoryService) GetPresentationStockByProduct(productID, branchID uint) []PresentationStockRow {
+	var rows []PresentationStockRow
+	q := s.db.Table("tenant_product_presentation_stocks AS ps").
+		Select("pr.product_id AS product_id, ps.branch_id AS branch_id, pr.id AS presentation_id, pr.name AS presentation_name, SUM(ps.quantity) AS quantity").
+		Joins("JOIN tenant_product_presentations pr ON pr.id = ps.presentation_id AND pr.deleted_at IS NULL").
+		Where("pr.product_id = ?", productID).
+		Group("pr.product_id, ps.branch_id, pr.id, pr.sort_order, pr.name").
+		Order("ps.branch_id, pr.sort_order, pr.id")
+	if branchID > 0 {
+		q = q.Where("ps.branch_id = ?", branchID)
+	}
+	_ = q.Scan(&rows).Error
+	return rows
+}
+
 // RecordMovement registra un movimiento de inventario y actualiza el stock (fuera de una
 // transacción existente). Envuelve RecordMovementTx en su propia transacción.
 func (s *InventoryService) RecordMovement(input MovementInput) error {

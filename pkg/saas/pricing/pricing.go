@@ -58,6 +58,22 @@ const (
 	DiscountFixed   = "fixed"
 )
 
+// FixedPlanCycleMonths ciclos fijos que un tenant puede elegir al renovar por autoservicio
+// (Tukifac/Tukichef): 1, 3, 6 y 12 meses, cada uno con su propio descuento configurable por
+// plan (ver database.SaasPlanCycle). Deliberadamente fijo, no configurable — el "ciclo libre"
+// (cualquier cantidad de meses) sigue existiendo, pero solo desde el panel central.
+var FixedPlanCycleMonths = []int{1, 3, 6, 12}
+
+// IsFixedPlanCycleMonths true si months es uno de los 4 ciclos fijos.
+func IsFixedPlanCycleMonths(months int) bool {
+	for _, m := range FixedPlanCycleMonths {
+		if m == months {
+			return true
+		}
+	}
+	return false
+}
+
 // Discount descuento pactado con el cliente (típicamente por contratar varios meses).
 type Discount struct {
 	Type  string  `json:"discount_type"`

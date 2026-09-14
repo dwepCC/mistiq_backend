@@ -83,7 +83,14 @@ func (s *BillingService) persistInvoiceAfterEmit(saleID uint, documentUUID, payl
 	}
 	_ = s.db.Where("sale_id = ?", saleID).First(invoice).Error
 
-	if billingstate.HasFinalSunatOutcome(invoice) {
+	// HasFinalSunatOutcome protege contra que un envío atrasado/duplicado pise un resultado ya
+	// resuelto (típicamente "accepted") — correcto para el flujo normal. Pero en una REEMISIÓN
+	// (s.reissueMode, ver ReissueSale) el documento YA está en un estado final ("rejected", por
+	// diseño: es justamente lo que se está corrigiendo) y ese mismo guard bloqueaba el reset:
+	// sunat_status/payload_json se quedaban con el mensaje y el payload del intento VIEJO para
+	// siempre, sin importar si la corrección se envió bien — waitForFacturadorOutcome() lee este
+	// mismo registro apenas después y devolvía ese error viejo sin haber consultado nada nuevo.
+	if billingstate.HasFinalSunatOutcome(invoice) && !s.reissueMode {
 		return s.patchInvoiceMetadata(invoice, documentUUID, payloadJSON)
 	}
 

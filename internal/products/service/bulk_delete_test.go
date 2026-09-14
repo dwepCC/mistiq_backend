@@ -19,6 +19,7 @@ func setupBulkDeleteTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&database.TenantProduct{},
+		&database.TenantUnit{},
 		&database.TenantProductPresentation{},
 		&database.TenantProductModifierGroup{},
 		&database.TenantProductStock{},

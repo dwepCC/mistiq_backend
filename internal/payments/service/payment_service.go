@@ -3,8 +3,11 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/pagination"
 	"tukifac/pkg/saas"
 )
 
@@ -16,29 +19,83 @@ type PaymentDetail struct {
 	database.SaasPayment
 	TenantName string `json:"tenant_name"`
 	TenantSlug string `json:"tenant_slug"`
+	TenantRUC  string `json:"tenant_ruc"`
 }
 
-func (s *PaymentService) List(status string) ([]PaymentDetail, error) {
-	result := make([]PaymentDetail, 0)
-	query := database.CentralDB.Model(&database.SaasPayment{}).Order("created_at desc")
-	if status == "pending" {
-		query = query.Where("status IN ?", []string{database.SaasPayPending, database.SaasPayPendingReview})
-	} else if status != "" {
-		query = query.Where("status = ?", status)
+// PaymentListParams filtros de /superadmin/payments — mismo patrón que
+// subscriptions.SubscriptionListParams: status exacto, búsqueda por empresa/RUC (join a
+// tenants), rango de fechas sobre created_at (cuándo se registró/envió el pago) y paginación.
+type PaymentListParams struct {
+	Status   string
+	Query    string
+	DateFrom string // AAAA-MM-DD, inclusive
+	DateTo   string // AAAA-MM-DD, inclusive
+	Page     int
+	PerPage  int
+}
+
+func (s *PaymentService) List(params PaymentListParams) ([]PaymentDetail, int64, error) {
+	page, perPage := pagination.Normalize(params.Page, params.PerPage)
+	q := database.CentralDB.Model(&database.SaasPayment{})
+	// Columna calificada: al unirse con tenants (búsqueda por empresa/RUC) "status" queda
+	// ambiguo, porque tenants también tiene su propia columna status.
+	if params.Status == "pending" {
+		q = q.Where("saas_payments.status IN ?", []string{database.SaasPayPending, database.SaasPayPendingReview})
+	} else if params.Status != "" {
+		q = q.Where("saas_payments.status = ?", params.Status)
 	}
+	if strings.TrimSpace(params.Query) != "" {
+		like := "%" + strings.TrimSpace(params.Query) + "%"
+		q = q.Joins("JOIN tenants ON tenants.id = saas_payments.tenant_id").
+			Where("tenants.name LIKE ? OR tenants.ruc LIKE ? OR tenants.slug LIKE ?", like, like, like)
+	}
+	if from, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(params.DateFrom), saas.LimaLocation()); err == nil {
+		q = q.Where("saas_payments.created_at >= ?", from)
+	}
+	if to, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(params.DateTo), saas.LimaLocation()); err == nil {
+		q = q.Where("saas_payments.created_at <= ?", saas.EndOfDayLima(to))
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
 	var payments []database.SaasPayment
-	if err := query.Find(&payments).Error; err != nil {
-		return nil, err
+	if err := q.Order("saas_payments.created_at desc").
+		Limit(perPage).Offset(pagination.Offset(page, perPage)).
+		Find(&payments).Error; err != nil {
+		return nil, 0, err
 	}
+
+	tenantIDs := make([]uint, 0, len(payments))
+	seen := map[uint]bool{}
+	for _, p := range payments {
+		if !seen[p.TenantID] {
+			seen[p.TenantID] = true
+			tenantIDs = append(tenantIDs, p.TenantID)
+		}
+	}
+	tenantsByID := map[uint]database.Tenant{}
+	if len(tenantIDs) > 0 {
+		var tenants []database.Tenant
+		database.CentralDB.Select("id", "name", "slug", "ruc").Where("id IN ?", tenantIDs).Find(&tenants)
+		for _, t := range tenants {
+			tenantsByID[t.ID] = t
+		}
+	}
+
+	result := make([]PaymentDetail, 0, len(payments))
 	for _, p := range payments {
 		d := PaymentDetail{SaasPayment: p}
-		var tenant database.Tenant
-		database.CentralDB.First(&tenant, p.TenantID)
-		d.TenantName = tenant.Name
-		d.TenantSlug = tenant.Slug
+		if t, ok := tenantsByID[p.TenantID]; ok {
+			d.TenantName = t.Name
+			d.TenantSlug = t.Slug
+			d.TenantRUC = t.RUC
+		}
 		result = append(result, d)
 	}
-	return result, nil
+	return result, total, nil
 }
 
 func (s *PaymentService) GetByID(id uint) (*PaymentDetail, error) {
@@ -107,15 +164,24 @@ func (s *PaymentService) Create(input CreatePaymentInput) (*database.SaasPayment
 type ApproveInput struct {
 	PlanID     uint   `json:"plan_id"`
 	AdminNotes string `json:"admin_notes"`
-	ReviewerID uint
+	// PeriodMonths opcional: 0 deja que ApprovePayment use payment.PeriodMonths (lo que pidió
+	// el tenant), no fuerza 1 mes.
+	PeriodMonths int
+	ReviewerID   uint
 }
 
 func (s *PaymentService) Approve(paymentID uint, input ApproveInput) error {
-	return saas.ApprovePayment(paymentID, input.PlanID, 0, input.AdminNotes, input.ReviewerID)
+	return saas.ApprovePayment(paymentID, input.PlanID, input.PeriodMonths, input.AdminNotes, input.ReviewerID)
 }
 
 func (s *PaymentService) Reject(paymentID uint, adminNotes string, reviewerID uint) error {
 	return saas.RejectPayment(paymentID, adminNotes, reviewerID)
+}
+
+// Revert anula un pago ya aprobado y deshace la extensión de suscripción/ciclo que produjo, para
+// que el tenant pueda repetir la renovación desde cero. Ver saas.RevertApprovedPayment.
+func (s *PaymentService) Revert(paymentID uint, reason string, actorID uint) error {
+	return saas.RevertApprovedPayment(paymentID, reason, actorID)
 }
 
 // PendingCount para dashboard.

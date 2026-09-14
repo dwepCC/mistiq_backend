@@ -308,3 +308,55 @@ func TestBuildGlobalInvoiceDiscounts_NoSumOtrosDescuentosInJSON(t *testing.T) {
 		t.Fatalf("JSON should omit sumOtrosDescuentos: %s", string(b))
 	}
 }
+
+// Regresión del rechazo SUNAT 3271 ("El valor de venta por ítem difiere de los importes
+// consignados") en la factura F001-12 de RUC 20611749733: SUNAT recalcula cantidad ×
+// mtoValorUnitario y lo compara contra mtoValorVenta. Con round2 el unitario perdía demasiada
+// precisión en cantidades grandes — 400×round2(389.83/400)=400×0.97=388.00 frente a un
+// mtoValorVenta real de 389.83 (descuadre de S/1.83). Con round10 el recálculo debe cuadrar
+// dentro del centavo, la tolerancia real de SUNAT.
+func TestBuildInvoiceDetails_CantidadGrande_ValorUnitarioNoDescuadraElRecalculoSunat(t *testing.T) {
+	// Datos reales: 400 unidades a S/1.15 (IGV incluido) = S/460 total.
+	items := []database.TenantSaleItem{{
+		Code: "P001", Description: "Ladrillo 18kk Pirámide", Unit: "NIU", Quantity: 400,
+		IgvAffectationType: "10", TaxRate: 18,
+		Subtotal: 389.830508, TaxAmount: 70.169492, Total: 460,
+	}}
+	details, err := BuildInvoiceDetailsFromSaleItems(items, 18, testNormUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := details[0]
+	if d.MtoValorVenta != 389.83 {
+		t.Fatalf("mtoValorVenta=%v want 389.83 (sigue en 2 decimales, sin cambios)", d.MtoValorVenta)
+	}
+	recalculado := d.MtoValorUnitario * d.Cantidad
+	diff := math.Abs(recalculado - d.MtoValorVenta)
+	if diff > 0.01 {
+		t.Fatalf("descuadre SUNAT 3271: cantidad(%v)×mtoValorUnitario(%v)=%v vs mtoValorVenta=%v, diff=%v (>0.01)",
+			d.Cantidad, d.MtoValorUnitario, recalculado, d.MtoValorVenta, diff)
+	}
+	// El unitario redondeado a 2 decimales (0.97) es justamente el valor que causaba el bug —
+	// confirma que el fix realmente cambió el número enviado, no solo que el recálculo cuadre
+	// por casualidad.
+	if round2(d.MtoValorUnitario) == d.MtoValorUnitario {
+		t.Fatalf("mtoValorUnitario=%v parece seguir redondeado a 2 decimales, no a 10", d.MtoValorUnitario)
+	}
+
+	// Primer ítem real de la misma factura (100 unidades, S/0.80 c/u con IGV) — mismo patrón,
+	// para confirmar que el fix no es específico de un solo ítem de la venta.
+	items2 := []database.TenantSaleItem{{
+		Code: "P002", Description: "Curvas luz 3/4 sel pavco", Unit: "NIU", Quantity: 100,
+		IgvAffectationType: "10", TaxRate: 18,
+		Subtotal: 67.796610, TaxAmount: 12.203390, Total: 80,
+	}}
+	details2, err := BuildInvoiceDetailsFromSaleItems(items2, 18, testNormUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2 := details2[0]
+	diff2 := math.Abs(d2.MtoValorUnitario*d2.Cantidad - d2.MtoValorVenta)
+	if diff2 > 0.01 {
+		t.Fatalf("descuadre SUNAT 3271 en el ítem 1 de la misma factura: diff=%v (>0.01)", diff2)
+	}
+}

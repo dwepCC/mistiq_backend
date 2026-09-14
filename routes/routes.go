@@ -22,6 +22,7 @@ import (
 	"tukifac/internal/inventory"
 	"tukifac/internal/memberships"
 	"tukifac/internal/modules"
+	"tukifac/internal/payables"
 	"tukifac/internal/paymentcatalog"
 	"tukifac/internal/prepayment"
 	"tukifac/internal/products"
@@ -94,7 +95,10 @@ func Setup(app *fiber.App) {
 
 	// Archivos subidos por tenant (uploads/tenants/{RUC}/...)
 	app.All("/uploads/*", tenantstorage.UploadsHandler)
-	app.Get("/storage/*", func(c fiber.Ctx) error {
+	// GET y HEAD: un cliente que primero comprueba con HEAD si el archivo existe (o algún proxy/
+	// herramienta que use HEAD) recibía 404 aunque el archivo existiera, porque esta ruta solo
+	// estaba registrada para GET — Fiber no alía HEAD a GET automáticamente como otros frameworks.
+	storageFileHandler := func(c fiber.Ctx) error {
 		p := c.Params("*")
 		if p == "" {
 			return c.Status(fiber.StatusNotFound).SendString("not found")
@@ -112,7 +116,9 @@ func Setup(app *fiber.App) {
 			c.Set("Pragma", "no-cache")
 		}
 		return c.SendFile(path)
-	})
+	}
+	app.Get("/storage/*", storageFileHandler)
+	app.Head("/storage/*", storageFileHandler)
 
 	// Middleware global de resolución de tenant por subdominio / header
 	app.Use(middleware.TenantResolver())
@@ -234,6 +240,7 @@ func Setup(app *fiber.App) {
 	cashbank.RegisterRoutes(tenantAPI)
 	paymentcatalog.RegisterRoutes(tenantAPI)
 	receivables.RegisterRoutes(tenantAPI)
+	payables.RegisterRoutes(tenantAPI)
 	restaurant.RegisterRoutes(tenantAPI)
 	restaurant.RegisterSalePaymentRoutes(tenantAPI)
 	modules.RegisterRoutes(tenantAPI)

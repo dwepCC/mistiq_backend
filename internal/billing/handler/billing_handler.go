@@ -217,11 +217,13 @@ func (h *BillingHandler) VoidWithCreditNoteAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	var body struct {
-		Reason string `json:"reason"`
+		Reason     string                      `json:"reason"`
+		ReasonCode string                      `json:"reason_code"`
+		Items      []service.NoteItemSelection `json:"items"`
 	}
 	_ = c.Bind().Body(&body)
 	svc := billingSvc(c)
-	ncSale, ncInvoice, err := svc.CreateCreditNoteAndVoidSale(uint(saleID), strings.TrimSpace(body.Reason))
+	ncSale, ncInvoice, err := svc.CreateCreditNoteAndVoidSale(uint(saleID), strings.TrimSpace(body.Reason), strings.TrimSpace(body.ReasonCode), body.Items)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error":   err.Error(),
@@ -229,9 +231,18 @@ func (h *BillingHandler) VoidWithCreditNoteAPI(c fiber.Ctx) error {
 			"invoice": ncInvoice,
 		})
 	}
+	// Solo el motivo "01" anula la venta al aceptarse (ver PostFiscalAcceptSideEffects) — el
+	// mensaje no puede decir siempre "se anulará" ahora que hay otros motivos disponibles.
+	message := "Nota de crédito encolada"
+	if ncSale != nil {
+		code := strings.TrimSpace(ncSale.NoteReasonCode)
+		if code == "" || code == "01" {
+			message = "Nota de crédito encolada; la venta original se anulará al aceptar SUNAT"
+		}
+	}
 	return c.JSON(fiber.Map{
 		"success": true,
-		"message": "Nota de crédito encolada; la venta original se anulará al aceptar SUNAT",
+		"message": message,
 		"async":   true,
 		"nc_sale": ncSale,
 		"invoice": ncInvoice,
@@ -243,8 +254,13 @@ func (h *BillingHandler) CreateDebitNoteAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	var body struct {
+		Reason     string `json:"reason"`
+		ReasonCode string `json:"reason_code"`
+	}
+	_ = c.Bind().Body(&body)
 	svc := billingSvc(c)
-	ndSale, ndInvoice, err := svc.CreateDebitNoteForSale(uint(saleID))
+	ndSale, ndInvoice, err := svc.CreateDebitNoteForSale(uint(saleID), strings.TrimSpace(body.Reason), strings.TrimSpace(body.ReasonCode))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error":   err.Error(),
@@ -258,6 +274,31 @@ func (h *BillingHandler) CreateDebitNoteAPI(c fiber.Ctx) error {
 		"async":   true,
 		"nd_sale": ndSale,
 		"invoice": ndInvoice,
+	})
+}
+
+// CreateIndependentNoteAPI emite una NC/ND que no nace de una venta de Tukifac (Fase 3) — el
+// comprobante afectado se declara a mano (tipo, serie, número).
+func (h *BillingHandler) CreateIndependentNoteAPI(c fiber.Ctx) error {
+	var body service.IndependentNoteInput
+	if err := c.Bind().Body(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
+	}
+	svc := billingSvc(c)
+	noteSale, invoice, err := svc.CreateIndependentNote(body)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":   err.Error(),
+			"nc_sale": noteSale,
+			"invoice": invoice,
+		})
+	}
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Nota encolada para emisión SUNAT",
+		"async":   true,
+		"nc_sale": noteSale,
+		"invoice": invoice,
 	})
 }
 

@@ -32,6 +32,7 @@ func setupAdjustValidityDB(t *testing.T) *gorm.DB {
 		&database.SaasPlan{},
 		&database.SaasSubscription{},
 		&database.SaasBillingCycle{},
+		&database.SaasPayment{},
 		&database.SaasPlatformSettings{},
 		&database.SaasSubscriptionEvent{},
 		&database.AuditLog{},
@@ -138,6 +139,29 @@ func TestAdjustValidityRechazaColisionConOtroCiclo(t *testing.T) {
 	}
 }
 
+// Con un comprobante en revisión, AdjustValidity debe bloquearse por completo (ni siquiera
+// mueve end_date): resolver primero el pago, ajustar vigencia después.
+func TestAdjustValidityBloqueadaConCicloEnRevision(t *testing.T) {
+	db := setupAdjustValidityDB(t)
+	oldEnd := lima(2026, 9, 30)
+	sub := seedSubscriptionWithCycles(t, db, oldEnd, oldEnd)
+	db.Model(&database.SaasBillingCycle{}).Where("subscription_id = ?", sub.ID).
+		Update("status", database.SaasInvoicePendingReview)
+
+	_, err := NewSubscriptionService().AdjustValidity(sub.ID, 1, "127.0.0.1", AdjustValidityInput{
+		EndDate: "2026-08-05", Reason: "corrección",
+	})
+	if err == nil {
+		t.Fatal("se esperaba error: hay un comprobante en revisión")
+	}
+
+	var updated database.SaasSubscription
+	db.First(&updated, sub.ID)
+	if !updated.EndDate.Equal(oldEnd) {
+		t.Errorf("end_date cambió pese al bloqueo: %v (debía seguir en %v)", updated.EndDate, oldEnd)
+	}
+}
+
 // Caso corriente (un solo ciclo abierto): sigue realineándose como antes.
 func TestAdjustValidityConUnSoloCiclo(t *testing.T) {
 	db := setupAdjustValidityDB(t)
@@ -155,6 +179,42 @@ func TestAdjustValidityConUnSoloCiclo(t *testing.T) {
 	db.Where("subscription_id = ?", sub.ID).First(&cycle)
 	if !cycle.PeriodEnd.Equal(newEnd) || !cycle.DueDate.Equal(newEnd) {
 		t.Errorf("ciclo no realineado: period_end=%v due_date=%v, se esperaba %v", cycle.PeriodEnd, cycle.DueDate, newEnd)
+	}
+}
+
+// Caso DAMAFRED: el tenant paga, se le emite el ciclo del período nuevo (pagado) y recién
+// después el admin corrige la vigencia un día. El realineo ignoraba los ciclos pagados, así que
+// el pagado quedaba cerrando en la fecha vieja; EnsureBillingCycle busca el ciclo vigente por
+// period_end == end_date exacto, no lo encontraba y emitía un cobro nuevo por un período ya
+// cobrado. Corregir la fecha no debe generar deuda.
+func TestAdjustValidityRealineaCicloPagado(t *testing.T) {
+	db := setupAdjustValidityDB(t)
+	oldEnd := lima(2026, 10, 7)
+	sub := seedSubscriptionWithCycles(t, db, oldEnd, oldEnd)
+	db.Model(&database.SaasBillingCycle{}).Where("subscription_id = ?", sub.ID).
+		Update("status", database.SaasInvoicePaid)
+
+	newEnd := lima(2026, 10, 6)
+	if _, err := NewSubscriptionService().AdjustValidity(sub.ID, 1, "127.0.0.1", AdjustValidityInput{
+		EndDate: "2026-10-06", Reason: "MIGRACION Y FECHA CORRECTA ES 06",
+	}); err != nil {
+		t.Fatalf("AdjustValidity devolvió error: %v", err)
+	}
+
+	var cycles []database.SaasBillingCycle
+	db.Where("subscription_id = ?", sub.ID).Find(&cycles)
+	if len(cycles) != 1 {
+		t.Fatalf("se esperaba 1 ciclo, hay %d (se emitió un cobro duplicado)", len(cycles))
+	}
+	if !cycles[0].PeriodEnd.Equal(newEnd) {
+		t.Errorf("el ciclo pagado no se realineó: period_end=%v, se esperaba %v", cycles[0].PeriodEnd, newEnd)
+	}
+	// El due_date de un ciclo pagado es historia: no se toca.
+	if !cycles[0].DueDate.Equal(oldEnd) {
+		t.Errorf("due_date del ciclo pagado cambió: %v, debía seguir en %v", cycles[0].DueDate, oldEnd)
+	}
+	if cycles[0].Status != database.SaasInvoicePaid {
+		t.Errorf("el ciclo dejó de estar pagado: %s", cycles[0].Status)
 	}
 }
 
@@ -468,5 +528,53 @@ func TestCambioDePlanAnulaSoloCobrosSolapados(t *testing.T) {
 		Where("tenant_id = ? AND event_type = ?", tenant.ID, saas.EventInvoiceSuperseded).Count(&ev)
 	if ev != 1 {
 		t.Errorf("se registraron %d eventos de anulación, se esperaba 1", ev)
+	}
+}
+
+// Si el cobro solapado que el cambio de plan anula tenía un comprobante en revisión, ese pago
+// se rechaza en cascada como parte de la misma operación — no queda huérfano "en revisión"
+// sobre un cobro que la nueva suscripción ya dejó sin efecto.
+func TestCambioDePlanCascadeRechazaPagoEnRevisionDelCicloSolapado(t *testing.T) {
+	db := setupAdjustValidityDB(t)
+	tenant := database.Tenant{Name: "ACME", Slug: "acme", Status: database.TenantStatusActive}
+	db.Create(&tenant)
+	basico := database.SaasPlan{Name: "EMPRENDEDOR", Price: 49, BillingCycle: "monthly", Active: true}
+	premium := database.SaasPlan{Name: "PREMIUM", Price: 99, BillingCycle: "monthly", Active: true}
+	db.Create(&basico)
+	db.Create(&premium)
+
+	vieja := database.SaasSubscription{
+		TenantID: tenant.ID, PlanID: basico.ID, BillingCycle: "monthly",
+		StartDate: time.Date(2026, 5, 1, 0, 0, 0, 0, saas.LimaLocation()),
+		EndDate:   lima(2026, 12, 31), Status: database.SaasSubActive,
+	}
+	db.Create(&vieja)
+	corriendo := database.SaasBillingCycle{
+		TenantID: tenant.ID, SubscriptionID: vieja.ID, PlanID: basico.ID,
+		PeriodStart: time.Date(2026, 5, 1, 0, 0, 0, 0, saas.LimaLocation()), PeriodEnd: lima(2026, 12, 31),
+		DueDate: time.Date(2026, 5, 1, 0, 0, 0, 0, saas.LimaLocation()),
+		Amount:  49, Currency: "PEN", Status: database.SaasInvoicePendingReview,
+	}
+	db.Create(&corriendo)
+	pago := database.SaasPayment{
+		TenantID: tenant.ID, BillingCycleID: &corriendo.ID, Amount: 49, Status: database.SaasPayPendingReview,
+	}
+	db.Create(&pago)
+
+	if _, err := NewSubscriptionService().Create(CreateSubscriptionInput{
+		TenantID: tenant.ID, PlanID: premium.ID, Months: 1,
+	}); err != nil {
+		t.Fatalf("cambio de plan: %v", err)
+	}
+
+	var c database.SaasBillingCycle
+	db.First(&c, corriendo.ID)
+	if c.Status != database.SaasInvoiceRejected {
+		t.Errorf("ciclo solapado = %q, se esperaba rejected", c.Status)
+	}
+	var p database.SaasPayment
+	db.First(&p, pago.ID)
+	if p.Status != database.SaasPayRejected {
+		t.Errorf("pago en revisión = %q, se esperaba rejected (rechazado en cascada)", p.Status)
 	}
 }

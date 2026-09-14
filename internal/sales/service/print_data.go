@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	detraccionsvc "tukifac/internal/detraccion"
 	"tukifac/internal/fiscal/salecontext"
 	prepaymentsvc "tukifac/internal/prepayment"
 	"tukifac/pkg/database"
 	"tukifac/pkg/datespe"
+	"tukifac/pkg/facturador"
 	"tukifac/pkg/money"
 	"tukifac/pkg/numeroletras"
 	"tukifac/pkg/paymentcondition"
@@ -90,34 +92,96 @@ type PrintData struct {
 	// Cotización (pre venta): vigencia y observaciones comerciales.
 	ValidUntil string `json:"valid_until,omitempty"`
 	Notes      string `json:"notes,omitempty"`
+
+	// Guía de remisión (09/31): la representación impresa es un documento de traslado, no un
+	// comprobante de cobro — no tiene sentido de negocio mostrarle método de pago, cuentas
+	// bancarias o total a pagar. Estos datos viven en tenant_despatches.payload_json, no en
+	// la venta-guía sintética, por eso van aparte en vez de reusar los campos de arriba.
+	Despatch *PrintDespatch `json:"despatch,omitempty"`
+}
+
+// PrintDespatch datos propios de una guía de remisión, para su representación impresa.
+type PrintDespatch struct {
+	Destinatario   PrintDespatchParty    `json:"destinatario"`
+	MotivoTraslado string                `json:"motivo_traslado"`
+	Modalidad      string                `json:"modalidad"` // "Transporte público" | "Transporte privado"
+	FechaTraslado  string                `json:"fecha_traslado,omitempty"`
+	PesoTotal      float64               `json:"peso_total"`
+	UndPeso        string                `json:"und_peso,omitempty"`
+	NumBultos      int                   `json:"num_bultos,omitempty"`
+	Partida        PrintDespatchAddress  `json:"partida"`
+	Llegada        PrintDespatchAddress  `json:"llegada"`
+	Vehiculo       *PrintDespatchVehicle `json:"vehiculo,omitempty"`
+	Choferes       []PrintDespatchDriver `json:"choferes,omitempty"`
+	Transportista  *PrintDespatchParty   `json:"transportista,omitempty"`
+	// Documento relacionado (p. ej. la factura/boleta que dio origen a la guía).
+	RelatedDocLabel  string `json:"related_doc_label,omitempty"`  // "Factura" | "Boleta de Venta"
+	RelatedDocNumber string `json:"related_doc_number,omitempty"` // "F001-3"
+}
+
+type PrintDespatchParty struct {
+	DocType   string `json:"doc_type,omitempty"`
+	DocNumber string `json:"doc_number,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Address   string `json:"address,omitempty"`
+}
+
+type PrintDespatchAddress struct {
+	Ubigueo string `json:"ubigueo,omitempty"`
+	Address string `json:"address,omitempty"`
+}
+
+type PrintDespatchVehicle struct {
+	Placa string `json:"placa"`
+}
+
+type PrintDespatchDriver struct {
+	DocType   string `json:"doc_type,omitempty"`
+	DocNumber string `json:"doc_number,omitempty"`
+	Name      string `json:"name,omitempty"` // nombres + apellidos
+	Licencia  string `json:"licencia,omitempty"`
 }
 
 // PrintFiscalContext datos adicionales para impresión/PDF.
 type PrintFiscalContext struct {
-	PurchaseOrderNumber         string                     `json:"purchase_order_number,omitempty"`
-	FiscalObservations          string                     `json:"fiscal_observations,omitempty"`
-	Guias                       []PrintGuiaRef             `json:"guias,omitempty"`
-	HasIgvRetention             bool                       `json:"has_igv_retention,omitempty"`
-	IgvRetentionAmount          float64                    `json:"igv_retention_amount,omitempty"`
-	NetCollectible              float64                    `json:"net_collectible,omitempty"`
-	RetentionApplied            bool                       `json:"retention_applied,omitempty"`
-	HasDetraccion               bool                       `json:"has_detraccion,omitempty"`
-	DetraccionGoodCode          string                     `json:"detraccion_good_code,omitempty"`
-	DetraccionGoodLabel         string                     `json:"detraccion_good_label,omitempty"`
-	DetraccionRatePercent       float64                    `json:"detraccion_rate_percent,omitempty"`
-	DetraccionAmount            float64                    `json:"detraccion_amount,omitempty"`
-	DetraccionBankAccount       string                     `json:"detraccion_bank_account,omitempty"`
-	DetraccionPaymentMethodCode string                     `json:"detraccion_payment_method_code,omitempty"`
-	DetraccionNetPayable        float64                    `json:"detraccion_net_payable,omitempty"`
-	HasPrepaymentEmit           bool                       `json:"has_prepayment_emit,omitempty"`
-	PrepaymentLabel             string                     `json:"prepayment_label,omitempty"`
-	PrepaymentAffectationGroup  string                     `json:"prepayment_affectation_group,omitempty"`
-	PrepaymentRelatedDocType    string                     `json:"prepayment_related_doc_type,omitempty"`
-	HasPrepaymentDeduction      bool                       `json:"has_prepayment_deduction,omitempty"`
-	PrepaymentDeductionTotal    float64                    `json:"prepayment_deduction_total,omitempty"`
-	PrepaymentDeductions        []PrintPrepaymentDeduction `json:"prepayment_deductions,omitempty"`
-	ShowTermsConditions         bool                       `json:"show_terms_conditions,omitempty"`
-	TermsText                   string                     `json:"terms_text,omitempty"`
+	PurchaseOrderNumber          string         `json:"purchase_order_number,omitempty"`
+	FiscalObservations           string         `json:"fiscal_observations,omitempty"`
+	Guias                        []PrintGuiaRef `json:"guias,omitempty"`
+	HasIgvRetention              bool           `json:"has_igv_retention,omitempty"`
+	IgvRetentionAmount           float64        `json:"igv_retention_amount,omitempty"`
+	NetCollectible               float64        `json:"net_collectible,omitempty"`
+	RetentionApplied             bool           `json:"retention_applied,omitempty"`
+	HasDetraccion                bool           `json:"has_detraccion,omitempty"`
+	DetraccionGoodCode           string         `json:"detraccion_good_code,omitempty"`
+	DetraccionGoodLabel          string         `json:"detraccion_good_label,omitempty"`
+	DetraccionRatePercent        float64        `json:"detraccion_rate_percent,omitempty"`
+	DetraccionAmount             float64        `json:"detraccion_amount,omitempty"`
+	DetraccionBankAccount        string         `json:"detraccion_bank_account,omitempty"`
+	DetraccionPaymentMethodCode  string         `json:"detraccion_payment_method_code,omitempty"`
+	DetraccionPaymentMethodLabel string         `json:"detraccion_payment_method_label,omitempty"`
+	DetraccionNetPayable         float64        `json:"detraccion_net_payable,omitempty"`
+	// DetraccionLegendText es la leyenda SUNAT (catálogo 2006) que debe figurar en todo
+	// comprobante sujeto a detracción — mismo texto que se envía en el XML vía
+	// pkg/facturador/legend.go, pero el PDF local no lo mostraba (bug reportado: la
+	// factura no muestra la misma "Información Adicional" que el PDF del facturador).
+	DetraccionLegendText       string                     `json:"detraccion_legend_text,omitempty"`
+	// Campos exclusivos de 1004 (transporte de carga), vacíos en 1001.
+	DetraccionValorReferencial float64 `json:"detraccion_valor_referencial,omitempty"`
+	DetraccionMtcRegistro      string  `json:"detraccion_mtc_registro,omitempty"`
+	DetraccionConfigVehicular  string  `json:"detraccion_config_vehicular,omitempty"`
+	DetraccionPuntoOrigen      string  `json:"detraccion_punto_origen,omitempty"`
+	DetraccionPuntoDestino     string  `json:"detraccion_punto_destino,omitempty"`
+	DetraccionCargaEfectivaTm  float64 `json:"detraccion_carga_efectiva_tm,omitempty"`
+	DetraccionCargaUtilTm      float64 `json:"detraccion_carga_util_tm,omitempty"`
+	HasPrepaymentEmit          bool                       `json:"has_prepayment_emit,omitempty"`
+	PrepaymentLabel            string                     `json:"prepayment_label,omitempty"`
+	PrepaymentAffectationGroup string                     `json:"prepayment_affectation_group,omitempty"`
+	PrepaymentRelatedDocType   string                     `json:"prepayment_related_doc_type,omitempty"`
+	HasPrepaymentDeduction     bool                       `json:"has_prepayment_deduction,omitempty"`
+	PrepaymentDeductionTotal   float64                    `json:"prepayment_deduction_total,omitempty"`
+	PrepaymentDeductions       []PrintPrepaymentDeduction `json:"prepayment_deductions,omitempty"`
+	ShowTermsConditions        bool                       `json:"show_terms_conditions,omitempty"`
+	TermsText                  string                     `json:"terms_text,omitempty"`
 }
 
 type PrintGuiaRef struct {
@@ -243,6 +307,16 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		pd.PaymentCondition = paymentcondition.NameCredit
 	} else if paymentcondition.IsCashCode(sale.PaymentConditionCode) {
 		pd.PaymentCondition = paymentcondition.NameCash
+	}
+	// ValidUntil alimenta "Fecha Vencimiento" en el PDF (receiptPdfA4.ts resolveDueDate cae a
+	// issue_date si viene vacío). Antes solo lo llenaba quotations/service/print_data.go — acá
+	// nunca se asignaba, así que toda factura/boleta (a crédito o no) mostraba la fecha de
+	// emisión disfrazada de vencimiento. Con contado no se notaba (son iguales); con crédito
+	// quedaba en evidencia junto a la tabla de CUOTAS, que sí trae la fecha real: bug reportado
+	// con el tenant RUC 20548414424 (F001-86: "Fecha Vencimiento: 2026-08-31" en la cabecera vs.
+	// "VENCIMIENTO: 2026-09-20" en CUOTAS, ambas de la misma venta).
+	if sale.DueDate != nil {
+		pd.ValidUntil = sale.DueDate.Format("02/01/2006")
 	}
 
 	var creditRows []database.TenantSaleCreditInstallment
@@ -453,7 +527,114 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 
 	pd.QRData = pd.buildQRData()
 	enrichCreditNotePrintData(db, sale, pd)
+	enrichDespatchPrintData(db, sale, pd)
 	return pd, nil
+}
+
+// enrichDespatchPrintData puebla pd.Despatch para guías (09/31) desde tenant_despatches.payload_json
+// — el mismo payload que se envió al facturador, así el PDF del panel muestra los mismos datos de
+// traslado que el PDF del facturador, en vez del recibo genérico de boleta/factura.
+func enrichDespatchPrintData(db *gorm.DB, sale *database.TenantSale, pd *PrintData) {
+	if pd == nil || sale == nil {
+		return
+	}
+	dt := strings.ToUpper(strings.TrimSpace(sale.DocType))
+	if dt != "GUIA_REMISION" && dt != "GUIA_TRANSPORTISTA" {
+		return
+	}
+	var despatch database.TenantDespatch
+	if err := db.Where("sale_id = ?", sale.ID).First(&despatch).Error; err != nil {
+		return
+	}
+	if strings.TrimSpace(despatch.PayloadJSON) == "" {
+		return
+	}
+	var payload facturador.DespatchPayload
+	if json.Unmarshal([]byte(despatch.PayloadJSON), &payload) != nil {
+		return
+	}
+
+	out := &PrintDespatch{
+		Destinatario: PrintDespatchParty{
+			DocType:   payload.Destinatario.TipoDoc,
+			DocNumber: payload.Destinatario.NumDoc,
+			Name:      payload.Destinatario.RznSocial,
+			Address:   payload.Destinatario.Address.Direccion,
+		},
+		MotivoTraslado: strings.TrimSpace(payload.Envio.DesTraslado),
+		Modalidad:      despatchModalidadLabel(payload.Envio.ModTraslado),
+		FechaTraslado:  despatchDateOnly(payload.Envio.FecTraslado),
+		PesoTotal:      payload.Envio.PesoTotal,
+		UndPeso:        payload.Envio.UndPesoTotal,
+		NumBultos:      payload.Envio.NumBultos,
+		Partida: PrintDespatchAddress{
+			Ubigueo: payload.Envio.Partida.Ubigueo,
+			Address: payload.Envio.Partida.Direccion,
+		},
+		Llegada: PrintDespatchAddress{
+			Ubigueo: payload.Envio.Llegada.Ubigueo,
+			Address: payload.Envio.Llegada.Direccion,
+		},
+	}
+	if payload.Envio.Vehiculo != nil && strings.TrimSpace(payload.Envio.Vehiculo.Placa) != "" {
+		out.Vehiculo = &PrintDespatchVehicle{Placa: payload.Envio.Vehiculo.Placa}
+	}
+	for _, ch := range payload.Envio.Choferes {
+		name := strings.TrimSpace(strings.TrimSpace(ch.Nombres) + " " + strings.TrimSpace(ch.Apellidos))
+		out.Choferes = append(out.Choferes, PrintDespatchDriver{
+			DocType:   ch.TipoDoc,
+			DocNumber: ch.NroDoc,
+			Name:      name,
+			Licencia:  ch.Licencia,
+		})
+	}
+	if payload.Envio.Transportista != nil {
+		out.Transportista = &PrintDespatchParty{
+			DocType:   payload.Envio.Transportista.TipoDoc,
+			DocNumber: payload.Envio.Transportista.NumDoc,
+			Name:      payload.Envio.Transportista.RznSocial,
+		}
+	} else if payload.Tercero != nil {
+		// GRE transportista (31): el remitente va en Tercero.
+		out.Transportista = &PrintDespatchParty{
+			DocType:   payload.Tercero.TipoDoc,
+			DocNumber: payload.Tercero.NumDoc,
+			Name:      payload.Tercero.RznSocial,
+			Address:   payload.Tercero.Address.Direccion,
+		}
+	}
+	if len(payload.AddDocs) > 0 {
+		doc := payload.AddDocs[0]
+		out.RelatedDocLabel = doc.TipoDesc
+		out.RelatedDocNumber = doc.Nro
+	}
+
+	pd.Despatch = out
+}
+
+// despatchDateOnly extrae dd/mm/yyyy de un datetime ISO fiscal (misma capa de formato que
+// sale.IssueDate.Format("02/01/2006") usa en el resto de print_data). Si no parsea, devuelve
+// el valor tal cual llegó en vez de esconder el dato.
+func despatchDateOnly(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t.Format("02/01/2006")
+	}
+	return value
+}
+
+func despatchModalidadLabel(code string) string {
+	switch strings.TrimSpace(code) {
+	case "01":
+		return "Transporte público"
+	case "02":
+		return "Transporte privado"
+	default:
+		return ""
+	}
 }
 
 func affectDesc(code string) string {
@@ -633,9 +814,13 @@ func enrichFiscalPrintData(db *gorm.DB, saleID uint, saleTotal float64, pd *Prin
 		}
 		cat, _ := detraccionpkg.DefaultCatalog()
 		label := det.GoodCode
+		paymentMethodLabel := det.PaymentMethodCode
 		if cat != nil {
 			if g, ok := cat.GoodByCode(det.GoodCode); ok {
 				label = g.Description
+			}
+			if pm, ok := cat.PaymentMethodByCode(det.PaymentMethodCode); ok {
+				paymentMethodLabel = pm.Description
 			}
 		}
 		fc.HasDetraccion = true
@@ -644,8 +829,27 @@ func enrichFiscalPrintData(db *gorm.DB, saleID uint, saleTotal float64, pd *Prin
 		fc.DetraccionRatePercent = det.RatePercent
 		fc.DetraccionAmount = money.RoundSunat(det.DetractionAmountPen)
 		fc.DetraccionBankAccount = det.BankAccount
+		fc.DetraccionPaymentMethodLabel = paymentMethodLabel
 		fc.DetraccionPaymentMethodCode = det.PaymentMethodCode
 		fc.DetraccionNetPayable = money.RoundSunat(det.NetPayablePen)
+		if strings.TrimSpace(det.OperationTypeCode) == detraccionpkg.OpDetraccionTransporte {
+			fc.DetraccionLegendText = detraccionpkg.Legend2006TextTransporte
+			if det.ValorReferencialPen != nil {
+				fc.DetraccionValorReferencial = money.RoundSunat(*det.ValorReferencialPen)
+			}
+			fc.DetraccionMtcRegistro = det.MtcRegistro
+			fc.DetraccionConfigVehicular = det.ConfiguracionVehicular
+			fc.DetraccionPuntoOrigen = det.PuntoOrigen
+			fc.DetraccionPuntoDestino = det.PuntoDestino
+			if det.CargaEfectivaTm != nil {
+				fc.DetraccionCargaEfectivaTm = *det.CargaEfectivaTm
+			}
+			if det.CargaUtilTm != nil {
+				fc.DetraccionCargaUtilTm = *det.CargaUtilTm
+			}
+		} else {
+			fc.DetraccionLegendText = detraccionpkg.Legend2006Text
+		}
 	}
 
 	if voucher, err := prepaymentsvc.NewService(db).LoadBySaleID(saleID); err == nil && prepaymentsvc.IsEmitVoucher(voucher) {

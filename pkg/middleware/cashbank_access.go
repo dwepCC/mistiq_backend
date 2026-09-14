@@ -19,6 +19,10 @@ func cashbankTenantPerm(action string) string {
 	case "manage", "delete_session":
 		// Borrar una caja es administración, no operación del turno.
 		return "cashbank.manage"
+	case "arqueo":
+		// Guardar/editar el arqueo (conteo de efectivo) es una acción de escritura sobre el
+		// dinero contado; antes solo exigía "view" (cashbank_view), ver internal/cashbank/routes.go.
+		return "cashbank.arqueo"
 	default:
 		return "cashbank.view"
 	}

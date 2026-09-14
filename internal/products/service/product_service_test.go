@@ -17,7 +17,10 @@ func setupProductServiceTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&database.TenantProduct{}, &database.TenantCategory{}, &database.TenantPreparationArea{}); err != nil {
+	if err := db.AutoMigrate(
+		&database.TenantProduct{}, &database.TenantCategory{}, &database.TenantBrand{}, &database.TenantPreparationArea{},
+		&database.TenantProductPresentation{}, &database.TenantUnit{},
+	); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -328,6 +331,99 @@ func TestCategoryCRUD_sortOrderAndDeleteGuard(t *testing.T) {
 	}
 }
 
+func TestBrandCRUD_sortOrderAndDeleteGuard(t *testing.T) {
+	db := setupProductServiceTestDB(t)
+	svc := NewProductService(db)
+
+	order1 := 10
+	b1, err := svc.CreateBrand("Samsung", "", &order1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := svc.CreateBrand("LG", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2.SortOrder <= b1.SortOrder {
+		t.Fatalf("auto sort_order got %d want > %d", b2.SortOrder, b1.SortOrder)
+	}
+
+	brands, err := svc.ListBrands()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(brands) != 2 || brands[0].Name != "Samsung" {
+		t.Fatalf("list order: %#v", brands)
+	}
+
+	order5 := 5
+	if _, err := svc.UpdateBrand(b2.ID, "LG Electronics", "desc", order5); err != nil {
+		t.Fatal(err)
+	}
+	brands, _ = svc.ListBrands()
+	if brands[0].Name != "LG Electronics" {
+		t.Fatalf("after update order: %#v", brands)
+	}
+
+	if err := svc.DeleteBrand(b1.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	bid := b2.ID
+	if _, _, err := svc.Create(ProductInput{
+		Code: "P1", Name: "Prod", Type: "product", Unit: "NIU",
+		SalePrice: 10, TaxRate: 18, IgvAffectationType: "10",
+		BrandID: &bid, Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteBrand(b2.ID); err == nil {
+		t.Fatal("expected delete blocked with linked product")
+	}
+
+	items, err := svc.ListBrandsWithCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range items {
+		if it.ID == b2.ID {
+			found = true
+			if it.ProductCount != 1 {
+				t.Fatalf("product_count: got %d want 1", it.ProductCount)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("marca b2 no encontrada en ListBrandsWithCounts")
+	}
+}
+
+// La marca de un producto debe resolverse en brand_name igual que category_name.
+func TestAttachCategoryNames_alsoResolvesBrandName(t *testing.T) {
+	db := setupProductServiceTestDB(t)
+	svc := NewProductService(db)
+
+	b, err := svc.CreateBrand("Sony", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bid := b.ID
+	p, _, err := svc.Create(ProductInput{
+		Code: "P2", Name: "Televisor", Type: "product", Unit: "NIU",
+		SalePrice: 10, TaxRate: 18, IgvAffectationType: "10",
+		BrandID: &bid, Active: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	item := svc.ProductListItemFrom(*p)
+	if item.BrandName != "Sony" {
+		t.Fatalf("brand_name: got %q want %q", item.BrandName, "Sony")
+	}
+}
+
 func TestPreparationAreaCRUD_linksProductByID(t *testing.T) {
 	db := setupProductServiceTestDB(t)
 	svc := NewProductService(db)
@@ -358,5 +454,59 @@ func TestPreparationAreaCRUD_linksProductByID(t *testing.T) {
 	}
 	if err := svc.DeletePreparationArea(aid); err == nil {
 		t.Fatal("expected delete blocked with linked products")
+	}
+}
+
+// Un servicio SÍ puede tener presentaciones (ej. "Corte simple" / "Corte + barba") — solo lo
+// que modela inventario físico (stock, series, vencimiento) sigue forzado a apagado.
+func TestProductCreate_ServiceCanHavePresentations(t *testing.T) {
+	db := setupProductServiceTestDB(t)
+	svc := NewProductService(db)
+
+	presentations := []ProductPresentationInput{
+		{Name: "Corte simple", SalePrice: 25},
+		{Name: "Corte + barba", SalePrice: 35},
+	}
+	p, _, err := svc.Create(ProductInput{
+		Code: "SRV-CORTE", Name: "Corte de cabello", Type: "service", Unit: "NIU",
+		SalePrice: 25, TaxRate: 18, IgvAffectationType: "10",
+		ManageStock: true, // debe ignorarse igual que antes: un servicio nunca maneja stock
+		Active:      true,
+		Presentations: &presentations,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if p.Type != "service" {
+		t.Fatalf("type = %q, se esperaba service", p.Type)
+	}
+	if p.ManageStock {
+		t.Fatalf("ManageStock = true, un servicio nunca debe manejar stock")
+	}
+	if !p.HasVariants {
+		t.Fatalf("HasVariants = false, se esperaba true (tiene 2 presentaciones)")
+	}
+
+	var rows []database.TenantProductPresentation
+	if err := db.Where("product_id = ?", p.ID).Order("id asc").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("presentaciones guardadas = %d, se esperaban 2", len(rows))
+	}
+	if rows[0].Name != "Corte simple" || rows[0].SalePrice != 25 {
+		t.Errorf("presentación 0 = %+v, no coincide con lo enviado", rows[0])
+	}
+	if rows[1].Name != "Corte + barba" || rows[1].SalePrice != 35 {
+		t.Errorf("presentación 1 = %+v, no coincide con lo enviado", rows[1])
+	}
+
+	var loaded database.TenantProduct
+	db.First(&loaded, p.ID)
+	if !loaded.HasVariants {
+		t.Errorf("has_variants en BD = false, se esperaba true")
+	}
+	if loaded.ManageStock {
+		t.Errorf("manage_stock en BD = true, se esperaba false")
 	}
 }

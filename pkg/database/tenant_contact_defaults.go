@@ -2,7 +2,10 @@ package database
 
 import (
 	"errors"
+	"log/slog"
 	"strings"
+
+	"tukifac/pkg/logger"
 
 	"gorm.io/gorm"
 )
@@ -14,7 +17,11 @@ const (
 	DefaultTenantContactUbigeo  = "040101"
 )
 
-// NormalizeTenantContactAddressUbigeo rellena dirección y ubigeo vacíos con los valores por defecto del tenant.
+// NormalizeTenantContactAddressUbigeo rellena dirección y ubigeo vacíos con los valores por
+// defecto del tenant. El cliente walk-in del POS (EnsureDefaultSaleContact) pasa por acá siempre
+// vacío a propósito —nunca declara domicilio propio—, así que esta función no loguea nada: quien
+// necesita saber si el default se aplicó a algo que SÍ debería tener domicilio real (el
+// fiscal de la empresa) es EnsureCompanyFiscalDomicile, más abajo.
 func NormalizeTenantContactAddressUbigeo(addr, ubigeo string) (string, string) {
 	a := strings.TrimSpace(addr)
 	u := strings.TrimSpace(ubigeo)
@@ -57,7 +64,11 @@ func EnsureDefaultSaleContact(db *gorm.DB) error {
 	return nil
 }
 
-// EnsureCompanyFiscalDomicile rellena domicilio fiscal vacío (ubigeo/dirección) para emisión SUNAT.
+// EnsureCompanyFiscalDomicile rellena domicilio fiscal vacío (ubigeo/dirección) para emisión
+// SUNAT. Corre en la migración v072 como backfill de tenants viejos (previos a exigir dirección/
+// ubigeo en el alta) — si dispara para un tenant nuevo, es señal de que algo se coló sin pasar
+// por la validación de TenantService.Create, por eso queda logueado en vez de aplicarse en
+// silencio.
 func EnsureCompanyFiscalDomicile(db *gorm.DB) error {
 	var cfg TenantCompanyConfig
 	if err := db.First(&cfg).Error; err != nil {
@@ -66,9 +77,15 @@ func EnsureCompanyFiscalDomicile(db *gorm.DB) error {
 		}
 		return err
 	}
+	wasEmpty := strings.TrimSpace(cfg.Address) == "" || strings.TrimSpace(cfg.Ubigeo) == ""
 	addr, ubi := NormalizeTenantContactAddressUbigeo(cfg.Address, cfg.Ubigeo)
 	if strings.TrimSpace(cfg.Address) == addr && strings.TrimSpace(cfg.Ubigeo) == ubi {
 		return nil
+	}
+	if wasEmpty {
+		logger.L.Warn("tenant_fiscal_domicile_default_applied",
+			slog.Uint64("company_config_id", uint64(cfg.ID)),
+		)
 	}
 	return db.Model(&cfg).Updates(map[string]interface{}{
 		"address": addr,

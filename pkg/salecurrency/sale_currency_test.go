@@ -24,6 +24,17 @@ func TestNormalizeOperationType(t *testing.T) {
 	if err != nil || code2 != OpDetraccion {
 		t.Fatalf("expected 1001, got %q err=%v", code2, err)
 	}
+	code3, err := NormalizeOperationType("0401")
+	if err != nil || code3 != OpVentasNoDomiciliados {
+		t.Fatalf("expected 0401, got %q err=%v", code3, err)
+	}
+	// 0201/2001 vecinos que siguen fuera de alcance (no forman parte de este esfuerzo).
+	if _, err := NormalizeOperationType("0201"); err == nil {
+		t.Fatal("export de servicios (0201) debe seguir rechazado")
+	}
+	if _, err := NormalizeOperationType("2001"); err == nil {
+		t.Fatal("percepción (2001) debe seguir rechazada")
+	}
 }
 
 func TestTotalInPEN(t *testing.T) {

@@ -89,6 +89,30 @@ func TestBulkImportContacts_ActualizaSiElDocumentoYaExiste(t *testing.T) {
 	}
 }
 
+// TestBulkImportContacts_MismoDocumentoClienteYProveedorNoSeMezclan: un mismo RUC puede
+// importarse como cliente y como proveedor en filas separadas — la segunda fila no debe
+// pisar/actualizar a la primera, porque son roles distintos (antes se buscaba solo por
+// doc_number, ignorando el tipo).
+func TestBulkImportContacts_MismoDocumentoClienteYProveedorNoSeMezclan(t *testing.T) {
+	db := setupContactImportDB(t)
+	res, err := NewContactService(db).BulkImportContacts([]BulkImportContactItem{
+		{RowNumber: 2, DocType: "RUC", DocNumber: "20123456789", BusinessName: "Acme Cliente", Type: "cliente"},
+		{RowNumber: 3, DocType: "RUC", DocNumber: "20123456789", BusinessName: "Acme Proveedor", Type: "proveedor"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Created != 2 || res.Updated != 0 || len(res.Failed) != 0 {
+		t.Fatalf("esperaba 2 creados (cliente + proveedor) y 0 actualizados/fallos, got %+v", res)
+	}
+
+	var count int64
+	db.Model(&database.TenantContact{}).Where("doc_number = ?", "20123456789").Count(&count)
+	if count != 2 {
+		t.Errorf("esperaba 2 filas separadas, got %d", count)
+	}
+}
+
 // TestBulkImportContacts_NoTocaElClientePorDefecto: el «Clientes Varios» que crea el alta
 // del tenant no debe poder modificarse desde una importación.
 func TestBulkImportContacts_NoTocaElClientePorDefecto(t *testing.T) {

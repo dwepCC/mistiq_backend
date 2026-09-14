@@ -35,6 +35,7 @@ func setupTableSessionTestDB(t *testing.T) (*gorm.DB, *database.TenantRestaurant
 		&database.TenantUser{},
 		&database.TenantCashSession{},
 		&database.TenantPaymentMethod{},
+		&database.TenantBranchDailyComandaCounter{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {

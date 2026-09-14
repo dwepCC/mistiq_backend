@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"fmt"
 	"strconv"
 
 	"tukifac/internal/plans/service"
+	"tukifac/pkg/database"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -48,6 +50,17 @@ func (h *PlanHandler) CreateAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    "plan_created",
+		Entity:    "saas_plan",
+		EntityID:  plan.ID,
+		Payload:   fmt.Sprintf(`{"name":%q,"price":%v}`, plan.Name, plan.Price),
+		IPAddress: c.IP(),
+	})
+
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "data": plan})
 }
 
@@ -64,6 +77,17 @@ func (h *PlanHandler) UpdateAPI(c fiber.Ctx) error {
 	if err := h.svc.Update(uint(id), input); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    "plan_updated",
+		Entity:    "saas_plan",
+		EntityID:  uint(id),
+		Payload:   fmt.Sprintf(`{"name":%q,"price":%v}`, input.Name, input.Price),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -73,9 +97,26 @@ func (h *PlanHandler) ToggleAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	previous, _ := h.svc.GetByID(uint(id))
 	if err := h.svc.ToggleActive(uint(id)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	oldActive, newActive := false, true
+	if previous != nil {
+		oldActive = previous.Active
+		newActive = !previous.Active
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    "plan_status_changed",
+		Entity:    "saas_plan",
+		EntityID:  uint(id),
+		Payload:   fmt.Sprintf(`{"from":%v,"to":%v}`, oldActive, newActive),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -85,9 +126,27 @@ func (h *PlanHandler) DeleteAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	// Captura antes de borrar — la validación de negocio existente (no eliminar un plan con
+	// suscripciones asociadas) sigue intacta dentro de h.svc.Delete, RBAC no la reemplaza.
+	previous, _ := h.svc.GetByID(uint(id))
 	if err := h.svc.Delete(uint(id)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	saUserID, _ := c.Locals("sa_user_id").(uint)
+	name := ""
+	if previous != nil {
+		name = previous.Name
+	}
+	database.WriteAuditLog(&database.AuditLog{
+		UserID:    saUserID,
+		Action:    "plan_deleted",
+		Entity:    "saas_plan",
+		EntityID:  uint(id),
+		Payload:   fmt.Sprintf(`{"name":%q}`, name),
+		IPAddress: c.IP(),
+	})
+
 	return c.JSON(fiber.Map{"success": true})
 }
 

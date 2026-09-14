@@ -24,7 +24,7 @@ func setupCancelDB(t *testing.T) *gorm.DB {
 		&database.TenantCashSession{}, &database.TenantCashMovement{}, &database.TenantPaymentMethod{},
 		&database.TenantProduct{}, &database.TenantBranch{}, &database.TenantProductStock{},
 		&database.TenantStockMovement{}, &database.TenantInventoryOperationType{},
-		&database.TenantBankMovement{}, &database.TenantProductSerial{},
+		&database.TenantBankMovement{}, &database.TenantBankAccount{}, &database.TenantProductSerial{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {
@@ -102,6 +102,79 @@ func TestAnulacionDevuelveStockDeComponentesDeCombo(t *testing.T) {
 	}
 	if got := countStockIn(db, 9, ref); got != 1 {
 		t.Errorf("componente 9: devueltos %.0f, se esperaba 1", got)
+	}
+}
+
+// Verificación puntual pedida por el usuario: confirma con un test real (no solo lectura de
+// código) que Cancel() SIEMPRE revierte el movimiento bancario de una venta anulada — el bug
+// encontrado en 15 tenants de producción (ventas ancladas de ANTES del 25/08, cuando este
+// mecanismo de reversión bancaria todavía no existía) no puede volver a ocurrir con el código
+// actual, porque reverseSaleCashTx() se llama sin condición alguna desde Cancel() (ver
+// sale_service.go:1640) y busca el movimiento bancario por sale_id U por reference — cubre tanto
+// ventas nuevas (sale_id poblado) como el patrón legado encontrado en producción (reference
+// como único vínculo, sale_id NULL).
+//
+// Replica el caso EXACTO de producción (doriconta, venta B001-00000155): pago mixto
+// efectivo+banco, con el movimiento bancario vinculado SOLO por reference (sale_id NULL, el
+// patrón legado — así se prueba el caso más frágil, no el más fácil).
+func TestAnulacionRevierteMovimientoBancario_VinculadoPorReference(t *testing.T) {
+	db := setupCancelDB(t)
+	sale := seedSaleWithStockOut(t, db, "open", map[uint]float64{7: 1})
+	// Pago mixto: la caja ya se sembró en seedSaleWithStockOut (100 en efectivo) — se agrega
+	// además el cobro bancario, vinculado SOLO por reference (sale_id NULL), igual que en
+	// producción.
+	bankAcc := database.TenantBankAccount{Name: "BBVA", PaymentMethod: "transferencia", Balance: 500, Active: true}
+	if err := db.Create(&bankAcc).Error; err != nil {
+		t.Fatal(err)
+	}
+	bankCredit := database.TenantBankMovement{
+		BankAccountID: bankAcc.ID, Type: "credit", Amount: 40,
+		Description: "Venta " + sale.Number, Reference: sale.Number, Date: time.Now(), UserID: 1,
+	}
+	if err := db.Create(&bankCredit).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewSaleService(db).Cancel(sale.ID, 1, "NC aceptada"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	var reversal database.TenantBankMovement
+	if err := db.Where("reversal_of_id = ?", bankCredit.ID).First(&reversal).Error; err != nil {
+		t.Fatalf("no se registró la reversión del movimiento bancario (vinculado por reference): %v", err)
+	}
+	if reversal.Type != "debit" || reversal.Amount != 40 {
+		t.Errorf("reversión = {type:%s amount:%.2f}, se esperaba {debit, 40.00}", reversal.Type, reversal.Amount)
+	}
+}
+
+// Mismo escenario pero con el movimiento bancario vinculado por sale_id (el patrón actual desde
+// el 25/08) — confirma que ambos caminos de búsqueda de reverseSaleCashTx funcionan.
+func TestAnulacionRevierteMovimientoBancario_VinculadoPorSaleID(t *testing.T) {
+	db := setupCancelDB(t)
+	sale := seedSaleWithStockOut(t, db, "open", map[uint]float64{7: 1})
+	bankAcc := database.TenantBankAccount{Name: "BCP", PaymentMethod: "transferencia", Balance: 500, Active: true}
+	if err := db.Create(&bankAcc).Error; err != nil {
+		t.Fatal(err)
+	}
+	bankCredit := database.TenantBankMovement{
+		BankAccountID: bankAcc.ID, Type: "credit", Amount: 65,
+		Description: "Venta " + sale.Number, Reference: sale.Number, SaleID: &sale.ID, Date: time.Now(), UserID: 1,
+	}
+	if err := db.Create(&bankCredit).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewSaleService(db).Cancel(sale.ID, 1, "NC aceptada"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	var reversal database.TenantBankMovement
+	if err := db.Where("reversal_of_id = ?", bankCredit.ID).First(&reversal).Error; err != nil {
+		t.Fatalf("no se registró la reversión del movimiento bancario (vinculado por sale_id): %v", err)
+	}
+	if reversal.Type != "debit" || reversal.Amount != 65 {
+		t.Errorf("reversión = {type:%s amount:%.2f}, se esperaba {debit, 65.00}", reversal.Type, reversal.Amount)
 	}
 }
 

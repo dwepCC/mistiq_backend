@@ -151,9 +151,13 @@ func computeTenantView(tenantID uint) (TenantSubscriptionView, error) {
 		tenant.Status == database.TenantStatusSuspended ||
 		(effective == database.SaasSubOverdue && tenant.Status != database.TenantStatusActive)
 
+	// Incluye pending_review a propósito: el monto sigue sin pagarse mientras se revisa el
+	// comprobante, solo cambia cómo se lo comunica el UX (ver billingDebtApplies/resolvePaymentUX,
+	// que sí distinguen "en revisión" de "hay que pagar ya"). Si se excluyera acá, un tenant
+	// suspendido que acaba de subir su comprobante vería "deuda: S/ 0" mientras espera revisión.
 	var pending database.SaasBillingCycle
 	if database.CentralDB.Where("tenant_id = ? AND status IN ?", tenantID,
-		[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue}).
+		[]string{database.SaasInvoicePending, database.SaasInvoiceOverdue, database.SaasInvoicePendingReview}).
 		Order("due_date asc").First(&pending).Error == nil {
 		v.PendingAmount = BillingCycleAmountDue(&pending, &tenant, &sub)
 		v.PendingInvoiceID = pending.ID

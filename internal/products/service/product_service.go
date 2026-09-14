@@ -27,6 +27,7 @@ func NewProductService(db *gorm.DB) *ProductService {
 type ProductListParams struct {
 	Query                    string
 	CategoryID               uint
+	BrandID                  uint
 	Type                     string
 	ActiveOnly               bool
 	InactiveOnly             bool   // solo productos inactivos (panel restaurante)
@@ -57,10 +58,11 @@ type BranchStockRow struct {
 	Quantity   float64 `json:"quantity"`
 }
 
-// ProductListItem producto en listados API con nombre de categoría.
+// ProductListItem producto en listados API con nombre de categoría/marca.
 type ProductListItem struct {
 	database.TenantProduct
 	CategoryName string `json:"category_name,omitempty"`
+	BrandName    string `json:"brand_name,omitempty"`
 }
 
 // ProductReportItem extiende el producto con totales, stock por sucursal y series.
@@ -82,6 +84,9 @@ func (s *ProductService) buildListQuery(params ProductListParams) *gorm.DB {
 	}
 	if params.CategoryID > 0 {
 		q = q.Where(p+"category_id = ?", params.CategoryID)
+	}
+	if params.BrandID > 0 {
+		q = q.Where(p+"brand_id = ?", params.BrandID)
 	}
 	t := strings.ToLower(strings.TrimSpace(params.Type))
 	if t != "" {
@@ -130,10 +135,17 @@ func (s *ProductService) buildListQuery(params ProductListParams) *gorm.DB {
 	}
 	if params.BranchID > 0 {
 		bid := params.BranchID
-		if params.RestaurantOnly {
-			// Carta Tukichef: catálogo exclusivo por sucursal (branch_id en el producto).
-			q = q.Where(p+"branch_id = ?", bid)
-		} else {
+		// Un producto con branch_id propio (>0) queda exclusivo de esa sucursal en CUALQUIER
+		// listado filtrado por sucursal — antes esto solo se respetaba con RestaurantOnly
+		// (carta Tukichef); POS/inventario/listado general de Tukifac ignoraban por completo
+		// el branch_id del producto y mostraban todo sin importar la sucursal activa, aunque
+		// el tenant hubiera asignado sus productos a una sucursal específica. branch_id vacío/0
+		// sigue significando "disponible en todas las sucursales" (comportamiento de siempre
+		// para el comercio general, que no asigna productos por sucursal).
+		q = q.Where(p+"branch_id IS NULL OR "+p+"branch_id = 0 OR "+p+"branch_id = ?", bid)
+		if !params.RestaurantOnly {
+			// Fuera de la carta, además hay que respetar el stock por sucursal para productos
+			// que sí lo gestionan (comportamiento sin cambios).
 			// Productos con variantes: el stock vive en tenant_product_presentation_stocks, no en
 			// tenant_product_stocks — sin este OR, un producto con variantes nunca tiene fila en
 			// la tabla vieja y quedaría invisible en cualquier listado filtrado por sucursal
@@ -249,14 +261,23 @@ func (s *ProductService) attachCategoryNames(products []database.TenantProduct) 
 	catName := map[uint]string{}
 	seenCat := map[uint]struct{}{}
 	var catIDs []uint
+	brandName := map[uint]string{}
+	seenBrand := map[uint]struct{}{}
+	var brandIDs []uint
 	for _, p := range products {
 		if p.CategoryID != nil {
 			cid := *p.CategoryID
-			if _, ok := seenCat[cid]; ok {
-				continue
+			if _, ok := seenCat[cid]; !ok {
+				seenCat[cid] = struct{}{}
+				catIDs = append(catIDs, cid)
 			}
-			seenCat[cid] = struct{}{}
-			catIDs = append(catIDs, cid)
+		}
+		if p.BrandID != nil {
+			bid := *p.BrandID
+			if _, ok := seenBrand[bid]; !ok {
+				seenBrand[bid] = struct{}{}
+				brandIDs = append(brandIDs, bid)
+			}
 		}
 	}
 	if len(catIDs) > 0 {
@@ -266,11 +287,21 @@ func (s *ProductService) attachCategoryNames(products []database.TenantProduct) 
 			catName[c.ID] = c.Name
 		}
 	}
+	if len(brandIDs) > 0 {
+		var brands []database.TenantBrand
+		s.db.Where("id IN ?", brandIDs).Find(&brands)
+		for _, b := range brands {
+			brandName[b.ID] = b.Name
+		}
+	}
 	out := make([]ProductListItem, len(products))
 	for i, p := range products {
 		item := ProductListItem{TenantProduct: p}
 		if p.CategoryID != nil {
 			item.CategoryName = catName[*p.CategoryID]
+		}
+		if p.BrandID != nil {
+			item.BrandName = brandName[*p.BrandID]
 		}
 		out[i] = item
 	}
@@ -503,9 +534,13 @@ func (s *ProductService) GetByCodeInBranch(code string, branchID uint) (*databas
 	return &p, err
 }
 
-// EnsureRestaurantBranchAccess valida que un plato pertenezca a la sucursal activa.
+// EnsureRestaurantBranchAccess valida que un producto asignado a una sucursal específica
+// (branch_id > 0) pertenezca a la sucursal activa. Antes solo se exigía para platos de
+// restaurante (IsRestaurant) — igual que el filtro de listado (ver buildListQuery), un
+// producto de comercio general asignado a una sucursal también debe quedar exclusivo de
+// ella, no solo la carta de Tukichef.
 func (s *ProductService) EnsureRestaurantBranchAccess(p *database.TenantProduct, branchID uint) error {
-	if p == nil || !p.IsRestaurant || branchID == 0 {
+	if p == nil || branchID == 0 {
 		return nil
 	}
 	if p.BranchID == 0 {
@@ -519,11 +554,16 @@ func (s *ProductService) EnsureRestaurantBranchAccess(p *database.TenantProduct,
 
 type ProductInput struct {
 	CategoryID           *uint
+	BrandID              *uint
 	Code                 string
 	Name                 string
 	Description          string
 	Type                 string
 	Unit                 string
+	// UnitID: si viene, manda sobre Unit (el catálogo por ID es la fuente de verdad para altas/
+	// ediciones desde la UI). Si viene nil, se resuelve/crea a partir de Unit (compatibilidad con
+	// importación masiva y clientes de API que todavía mandan solo texto) — ver resolveUnitReference.
+	UnitID               *uint
 	SalePrice            float64
 	PurchasePrice        float64
 	TaxRate              float64
@@ -574,10 +614,36 @@ type PresentationSyncResult struct {
 	InitialStock float64
 }
 
+// resolveUnitReference determina el código SUNAT y el ID de catálogo (tenant_units) para un
+// producto. Si unitID viene informado, el catálogo manda: se usa su Code tal cual (permite que el
+// tenant use unidades propias fuera del catálogo 03 estándar, sin que NormalizeUnit las pise).
+// Si no viene, se resuelve a partir del texto libre (alta antigua / importación masiva) pasando
+// por sunat.NormalizeUnit como siempre, y se materializa (o reutiliza) la fila de catálogo
+// correspondiente — así ningún producto queda con unit_id nulo.
+func (s *ProductService) resolveUnitReference(rawUnit, itemType string, unitID *uint) (code string, id uint, err error) {
+	if unitID != nil && *unitID > 0 {
+		var u database.TenantUnit
+		if err := s.db.First(&u, *unitID).Error; err != nil {
+			return "", 0, errors.New("unidad de medida no encontrada")
+		}
+		return u.Code, u.ID, nil
+	}
+	code = sunat.NormalizeUnit(rawUnit, itemType)
+	id, err = database.EnsureUnitByCode(s.db, code)
+	if err != nil {
+		return "", 0, err
+	}
+	return code, id, nil
+}
+
 func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, []PresentationSyncResult, error) {
 	if input.Name == "" {
 		return nil, nil, errors.New("nombre es requerido")
 	}
+	// No se exige sale_price > 0 aquí a propósito: se permite crear un producto "base" sin
+	// precio (contenedor pendiente de presentaciones, o combo que se configura después) y
+	// terminarlo de armar en una edición posterior. Lo que nunca se permite es VENDERLO en 0 —
+	// esa barrera está en SaleService.Create (validateSaleItemPrices), no aquí.
 	// Sin código el producto no se puede facturar (SUNAT lo exige por línea) y el error
 	// aparecía recién al emitir. Se completa aquí para que nunca nazca uno inutilizable.
 	if err := s.ensureProductCode(&input); err != nil {
@@ -615,6 +681,7 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, []
 
 	p := &database.TenantProduct{
 		CategoryID:           input.CategoryID,
+		BrandID:              input.BrandID,
 		Code:                 input.Code,
 		Name:                 input.Name,
 		Description:          input.Description,
@@ -651,7 +718,12 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, []
 	if err := s.resolvePreparationAreaFields(p); err != nil {
 		return nil, nil, err
 	}
-	p.Unit = sunat.NormalizeUnit(p.Unit, p.Type)
+	unitCode, unitID, err := s.resolveUnitReference(p.Unit, p.Type, input.UnitID)
+	if err != nil {
+		return nil, nil, err
+	}
+	p.Unit = unitCode
+	p.UnitID = &unitID
 	if strings.EqualFold(strings.TrimSpace(p.Type), "product") && strings.EqualFold(strings.TrimSpace(p.Unit), "ZZ") {
 		return nil, nil, errors.New("la unidad ZZ es solo para servicios: use Inventario → Servicios")
 	}
@@ -663,10 +735,15 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, []
 		return nil, nil, err
 	}
 	p.PriceIncludesIgv = input.PriceIncludesIgv
-	if err := gormutil.PersistBoolWithDefault(s.db, p, "manage_stock", input.ManageStock); err != nil {
+	// p.ManageStock (no input.ManageStock): para un servicio, normalizeProductServiceFields ya
+	// lo forzó a false — reforzar con el input crudo aquí lo desharía en el struct que se
+	// devuelve (y lo serializa el handler), aunque la fila en BD sí hubiera quedado bien (este
+	// helper no escribe nada cuando value=true, así que dependía en silencio de que el INSERT
+	// de arriba ya lo hubiera hecho bien). Con p.ManageStock queda correcto en los dos lados
+	// siempre, no solo cuando el caller no manda manage_stock=true para un servicio.
+	if err := gormutil.PersistBoolWithDefault(s.db, p, "manage_stock", p.ManageStock); err != nil {
 		return nil, nil, err
 	}
-	p.ManageStock = input.ManageStock
 
 	if input.ModifierGroupIDs != nil {
 		s.syncModifierGroups(p.ID, *input.ModifierGroupIDs)
@@ -678,6 +755,11 @@ func (s *ProductService) Create(input ProductInput) (*database.TenantProduct, []
 			return nil, nil, err
 		}
 		presResults = res
+		// syncPresentations ya escribió has_variants en la fila (según haya o no presentaciones)
+		// con un UPDATE aparte — reflejarlo también en el struct que se devuelve, para que la
+		// respuesta del alta no diga has_variants=false justo después de crear un producto o
+		// servicio CON presentaciones.
+		p.HasVariants = len(presResults) > 0
 	}
 	if input.ComboGroups != nil {
 		if err := s.syncComboGroups(p, *input.ComboGroups); err != nil {
@@ -746,6 +828,12 @@ func (s *ProductService) reactivateProductFromInput(id uint, input ProductInput)
 }
 
 // normalizeProductServiceFields fuerza reglas SUNAT/ERP para filas type=service.
+//
+// HasVariants NO se fuerza a false: un servicio puede tener presentaciones (ej. "Corte simple"
+// / "Corte + barba", "Consulta 30min" / "Consulta 1h"), igual que un producto — syncPresentations
+// ya recalcula has_variants según haya o no filas en tenant_product_presentations, sin importar
+// el type (ver product_service.go, syncPresentations). Lo que sí sigue sin aplicar a servicios es
+// todo lo que modela inventario físico: stock, series, vencimiento, área de preparación.
 func normalizeProductServiceFields(p *database.TenantProduct) {
 	if !strings.EqualFold(strings.TrimSpace(p.Type), "service") {
 		return
@@ -754,7 +842,6 @@ func normalizeProductServiceFields(p *database.TenantProduct) {
 	p.Unit = "ZZ"
 	p.ManageStock = false
 	p.ManageSeries = false
-	p.HasVariants = false
 	p.HasModifiers = false
 	p.IsRestaurant = false
 	p.MinStock = 0
@@ -804,11 +891,14 @@ func (s *ProductService) Update(id uint, input ProductInput) ([]PresentationSync
 		effType = "product"
 	}
 
-	unit := strings.TrimSpace(input.Unit)
-	if unit == "" {
-		unit = existing.Unit
+	rawUnit := strings.TrimSpace(input.Unit)
+	if rawUnit == "" && input.UnitID == nil {
+		rawUnit = existing.Unit
 	}
-	unit = sunat.NormalizeUnit(unit, effType)
+	unit, unitID, err := s.resolveUnitReference(rawUnit, effType, input.UnitID)
+	if err != nil {
+		return nil, err
+	}
 	if !strings.EqualFold(effType, "service") && strings.EqualFold(unit, "ZZ") {
 		return nil, errors.New("la unidad ZZ es solo para servicios: use Inventario → Servicios")
 	}
@@ -836,17 +926,24 @@ func (s *ProductService) Update(id uint, input ProductInput) ([]PresentationSync
 	if err := s.resolvePreparationAreaFields(draft); err != nil {
 		return nil, err
 	}
-	if strings.EqualFold(draft.Type, "service") {
+	if strings.EqualFold(draft.Type, "service") && !strings.EqualFold(unit, draft.Unit) {
+		// normalizeProductServiceFields fuerza Unit="ZZ" para servicios — si el catálogo había
+		// resuelto otra cosa (p. ej. el tenant no marcó unit_id de servicio), re-resolver contra ZZ.
 		unit = draft.Unit
+		if zid, zerr := database.EnsureUnitByCode(s.db, "ZZ"); zerr == nil {
+			unitID = zid
+		}
 	}
 
 	upd := map[string]interface{}{
 		"category_id":             input.CategoryID,
+		"brand_id":                input.BrandID,
 		"code":                    input.Code,
 		"name":                    input.Name,
 		"description":             input.Description,
 		"type":                    draft.Type,
 		"unit":                    unit,
+		"unit_id":                 unitID,
 		"sale_price":              input.SalePrice,
 		"purchase_price":          input.PurchasePrice,
 		"tax_rate":                taxRate,
@@ -872,7 +969,7 @@ func (s *ProductService) Update(id uint, input ProductInput) ([]PresentationSync
 	if input.ActiveSet {
 		upd["active"] = input.Active
 	}
-	err := s.db.Model(&database.TenantProduct{}).Where("id = ?", id).Updates(upd).Error
+	err = s.db.Model(&database.TenantProduct{}).Where("id = ?", id).Updates(upd).Error
 	if err != nil {
 		return nil, err
 	}
@@ -928,6 +1025,19 @@ func (s *ProductService) filterExtraModifierGroupIDs(groupIDs []uint) []uint {
 // recreaba TODO en cada guardado — inofensivo cuando la presentación solo tenía precio, pero
 // destructivo ahora que puede tener stock e historial de movimientos ligados a su ID.
 func (s *ProductService) syncPresentations(productID uint, inputs []ProductPresentationInput) ([]PresentationSyncResult, error) {
+	// Validar todas antes de escribir nada: la presentación reemplaza el precio base en el POS
+	// (ver TenantProductPresentation), así que un precio en 0 dejaría vender esa variante gratis
+	// sin ser una bonificación real.
+	for _, in := range inputs {
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			continue
+		}
+		if in.SalePrice <= 0 {
+			return nil, fmt.Errorf("la presentación '%s' debe tener un precio de venta mayor a S/ 0", name)
+		}
+	}
+
 	var existing []database.TenantProductPresentation
 	if err := s.db.Where("product_id = ?", productID).Find(&existing).Error; err != nil {
 		return nil, err
@@ -1169,6 +1279,236 @@ func (s *ProductService) DeleteCategory(id uint) error {
 		return fmt.Errorf("no se puede eliminar: hay %d producto(s) vinculados", linked)
 	}
 	return s.db.Delete(&cat).Error
+}
+
+// ========= Marcas =========
+
+// BrandListItem marca con conteo de productos.
+type BrandListItem struct {
+	database.TenantBrand
+	ProductCount int64 `json:"product_count"`
+}
+
+func (s *ProductService) nextBrandSortOrder() (int, error) {
+	var maxOrder *int
+	err := s.db.Model(&database.TenantBrand{}).Select("MAX(sort_order)").Scan(&maxOrder).Error
+	if err != nil {
+		return 0, err
+	}
+	if maxOrder == nil {
+		return 1, nil
+	}
+	return *maxOrder + 1, nil
+}
+
+func (s *ProductService) ListBrands() ([]database.TenantBrand, error) {
+	var brands []database.TenantBrand
+	err := s.db.Where("active = ?", true).Order("sort_order ASC, name ASC").Find(&brands).Error
+	return brands, err
+}
+
+func (s *ProductService) ListBrandsWithCounts() ([]BrandListItem, error) {
+	var brands []database.TenantBrand
+	if err := s.db.Order("sort_order ASC, name ASC").Find(&brands).Error; err != nil {
+		return nil, err
+	}
+	if len(brands) == 0 {
+		return nil, nil
+	}
+	ids := make([]uint, len(brands))
+	for i, b := range brands {
+		ids[i] = b.ID
+	}
+	type countRow struct {
+		BrandID uint
+		Count   int64
+	}
+	var counts []countRow
+	if err := s.db.Model(&database.TenantProduct{}).
+		Select("brand_id, COUNT(*) AS count").
+		Where("brand_id IN ?", ids).
+		Group("brand_id").
+		Scan(&counts).Error; err != nil {
+		return nil, err
+	}
+	countMap := make(map[uint]int64, len(counts))
+	for _, r := range counts {
+		countMap[r.BrandID] = r.Count
+	}
+	out := make([]BrandListItem, len(brands))
+	for i, b := range brands {
+		out[i] = BrandListItem{TenantBrand: b, ProductCount: countMap[b.ID]}
+	}
+	return out, nil
+}
+
+func (s *ProductService) GetBrand(id uint) (*database.TenantBrand, error) {
+	var b database.TenantBrand
+	if err := s.db.First(&b, id).Error; err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (s *ProductService) CreateBrand(name, description string, sortOrder *int) (*database.TenantBrand, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("nombre de marca requerido")
+	}
+	order := 0
+	if sortOrder != nil {
+		order = *sortOrder
+	} else {
+		next, err := s.nextBrandSortOrder()
+		if err != nil {
+			return nil, err
+		}
+		order = next
+	}
+	b := &database.TenantBrand{Name: name, Description: strings.TrimSpace(description), SortOrder: order, Active: true}
+	err := s.db.Create(b).Error
+	return b, err
+}
+
+func (s *ProductService) UpdateBrand(id uint, name, description string, sortOrder int) (*database.TenantBrand, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("nombre de marca requerido")
+	}
+	var b database.TenantBrand
+	if err := s.db.First(&b, id).Error; err != nil {
+		return nil, errors.New("marca no encontrada")
+	}
+	b.Name = name
+	b.Description = strings.TrimSpace(description)
+	b.SortOrder = sortOrder
+	if err := s.db.Save(&b).Error; err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (s *ProductService) DeleteBrand(id uint) error {
+	var b database.TenantBrand
+	if err := s.db.First(&b, id).Error; err != nil {
+		return errors.New("marca no encontrada")
+	}
+	var linked int64
+	if err := s.db.Model(&database.TenantProduct{}).Where("brand_id = ?", id).Count(&linked).Error; err != nil {
+		return err
+	}
+	if linked > 0 {
+		return fmt.Errorf("no se puede eliminar: hay %d producto(s) vinculados", linked)
+	}
+	return s.db.Delete(&b).Error
+}
+
+// ── Unidades de medida (catálogo SUNAT N°03, gestionable desde Tukifac) ─────────────────────────
+
+func (s *ProductService) ListUnits() ([]database.TenantUnit, error) {
+	var units []database.TenantUnit
+	err := s.db.Where("active = ?", true).Order("sort_order ASC, name ASC").Find(&units).Error
+	return units, err
+}
+
+// ListAllUnits incluye inactivas — usado por la pantalla de gestión en Tukifac.
+func (s *ProductService) ListAllUnits() ([]database.TenantUnit, error) {
+	var units []database.TenantUnit
+	err := s.db.Order("sort_order ASC, name ASC").Find(&units).Error
+	return units, err
+}
+
+func (s *ProductService) GetUnit(id uint) (*database.TenantUnit, error) {
+	var u database.TenantUnit
+	if err := s.db.First(&u, id).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// CreateUnit agrega una unidad propia del tenant — libre, no restringida al catálogo SUNAT 03
+// (si el código no es válido para SUNAT, NormalizeUnit la reconducirá a NIU solo al facturar,
+// nunca al guardar el producto: la unidad elegida siempre se ve tal cual en el ERP).
+func (s *ProductService) CreateUnit(code, name, symbol string) (*database.TenantUnit, error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	name = strings.TrimSpace(name)
+	if code == "" || name == "" {
+		return nil, errors.New("código y nombre de la unidad son requeridos")
+	}
+	var existing database.TenantUnit
+	err := s.db.Where("code = ?", code).First(&existing).Error
+	if err == nil {
+		return nil, fmt.Errorf("ya existe una unidad con código '%s'", code)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	next, err := s.nextUnitSortOrder()
+	if err != nil {
+		return nil, err
+	}
+	u := &database.TenantUnit{Code: code, Name: name, Symbol: strings.TrimSpace(symbol), SortOrder: next, Active: true}
+	return u, s.db.Create(u).Error
+}
+
+// UpdateUnit no permite cambiar el código de una fila del catálogo del sistema (IsSystem=true) —
+// mismo candado que TenantPaymentMethod, para no desincronizar lo que ya factura como ese código.
+func (s *ProductService) UpdateUnit(id uint, code, name, symbol string, active bool) (*database.TenantUnit, error) {
+	var u database.TenantUnit
+	if err := s.db.First(&u, id).Error; err != nil {
+		return nil, errors.New("unidad no encontrada")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("nombre de la unidad requerido")
+	}
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code != "" && code != u.Code {
+		if u.IsSystem {
+			return nil, errors.New("no se puede cambiar el código de una unidad del sistema")
+		}
+		var dup database.TenantUnit
+		if err := s.db.Where("code = ? AND id <> ?", code, id).First(&dup).Error; err == nil {
+			return nil, fmt.Errorf("ya existe una unidad con código '%s'", code)
+		}
+		u.Code = code
+	}
+	u.Name = name
+	u.Symbol = strings.TrimSpace(symbol)
+	u.Active = active
+	if err := s.db.Save(&u).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// DeleteUnit solo permite borrar unidades propias del tenant (no del sistema) sin productos
+// vinculados — igual criterio que categorías/marcas. Una del sistema en desuso se desactiva, no se
+// elimina (evita romper ventas/facturas históricas que aún la referencian por código).
+func (s *ProductService) DeleteUnit(id uint) error {
+	var u database.TenantUnit
+	if err := s.db.First(&u, id).Error; err != nil {
+		return errors.New("unidad no encontrada")
+	}
+	if u.IsSystem {
+		return errors.New("las unidades del sistema no se eliminan; desactívala en su lugar")
+	}
+	var linked int64
+	if err := s.db.Model(&database.TenantProduct{}).Where("unit_id = ?", id).Count(&linked).Error; err != nil {
+		return err
+	}
+	if linked > 0 {
+		return fmt.Errorf("no se puede eliminar: hay %d producto(s) vinculados", linked)
+	}
+	return s.db.Delete(&u).Error
+}
+
+func (s *ProductService) nextUnitSortOrder() (int, error) {
+	var max int
+	if err := s.db.Model(&database.TenantUnit{}).Select("COALESCE(MAX(sort_order), 0)").Scan(&max).Error; err != nil {
+		return 0, err
+	}
+	return max + 1, nil
 }
 
 func (s *ProductService) resolvePreparationAreaFields(p *database.TenantProduct) error {

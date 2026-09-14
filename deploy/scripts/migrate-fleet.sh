@@ -12,6 +12,10 @@ LOG_DIR="${MIGRATE_LOG_DIR:-/opt/tukifac/logs}"
 LOG_FILE="${LOG_DIR}/migrate-fleet.log"
 WORKERS="${MIGRATE_WORKERS:-4}"
 LIMIT="${MIGRATE_LIMIT:-100}"
+# false: también migra tenants no-activos (suspendidos/bloqueados) — evita la ventana de hasta
+# 5 min de "Unknown column ..." cuando un tenant se reactiva justo antes del siguiente ciclo del
+# cron (incidente 2026-09-09, V129 contact_id). Sobreescribible por env var sin tocar el script.
+ACTIVE_ONLY="${MIGRATE_ACTIVE_ONLY:-false}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -28,14 +32,15 @@ if ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
   exit 1
 fi
 
-echo "$(date -Iseconds) [start] migrate-fleet-cron workers=${WORKERS} limit=${LIMIT}" >> "${LOG_FILE}"
+echo "$(date -Iseconds) [start] migrate-fleet-cron workers=${WORKERS} limit=${LIMIT} active-only=${ACTIVE_ONLY}" >> "${LOG_FILE}"
 
 set +e
 
 timeout "${TIMEOUT}" docker exec "${CONTAINER}" \
   ./tukifac-api migrate-fleet-cron \
   --workers="${WORKERS}" \
-  --limit="${LIMIT}" >> "${LOG_FILE}" 2>&1
+  --limit="${LIMIT}" \
+  --active-only="${ACTIVE_ONLY}" >> "${LOG_FILE}" 2>&1
 
 RC=$?
 

@@ -24,6 +24,18 @@ func FormatFiscalDateTime(t time.Time) string {
 	return normalized.Format(FiscalDateTimeLayout)
 }
 
+// FormatFiscalDateTimeExact formatea con la hora real (sin normalizar a mediodía). A diferencia
+// de facturas/boletas —donde SUNAT solo valida la fecha calendario, por eso FormatFiscalDateTime
+// fija 12:00:00 y evita corrimientos de día por zona horaria— el servicio GRE de guía de
+// remisión valida fechaEmision con precisión de hora contra el momento real de recepción en
+// SUNAT. Usar FormatFiscalDateTime ahí hacía que una guía emitida antes del mediodía llegara con
+// una hora "futura" respecto al envío real, y SUNAT la rechazaba con 2108 "Presentación fuera de
+// fecha o con Fecha/hora mayor a la recepción en SUNAT" — bug real en producción (dos guías
+// rechazadas, tenant RUC 20607277193, ambas emitidas ~08:3x con fechaEmision en 12:00:00).
+func FormatFiscalDateTimeExact(t time.Time) string {
+	return t.In(limaLocation()).Format(FiscalDateTimeLayout)
+}
+
 // NormalizeFiscalDateTimeString convierte fechas sin zona horaria al layout exigido por JMS (Y-m-d\TH:i:sP).
 func NormalizeFiscalDateTimeString(value, fallback string) string {
 	value = strings.TrimSpace(value)

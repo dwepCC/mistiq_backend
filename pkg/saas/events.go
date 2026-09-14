@@ -12,4 +12,5 @@ const (
 	EventValidityAdjusted   = "VALIDITY_ADJUSTED"
 	EventInvoiceIssued      = "INVOICE_ISSUED"
 	EventInvoiceSuperseded  = "INVOICE_SUPERSEDED"
+	EventPaymentReversed    = "PAYMENT_REVERSED"
 )

@@ -315,7 +315,7 @@ func logMigrationAudit(tenantID, saUserID uint, action, slug, ip string) {
 	if database.CentralDB == nil {
 		return
 	}
-	_ = database.CentralDB.Create(&database.AuditLog{
+	database.WriteAuditLog(&database.AuditLog{
 		TenantID:  tenantID,
 		UserID:    saUserID,
 		Action:    action,
@@ -323,7 +323,7 @@ func logMigrationAudit(tenantID, saUserID uint, action, slug, ip string) {
 		EntityID:  tenantID,
 		Payload:   fmt.Sprintf(`{"slug":%q}`, slug),
 		IPAddress: ip,
-	}).Error
+	})
 }
 
 // GuardMigrateAllProduction bloquea migrate-all en producción.

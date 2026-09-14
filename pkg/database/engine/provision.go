@@ -48,6 +48,10 @@ func ProvisionTenantDB(dbName string, tenantID uint, tenantSlug string, seed dat
 		_ = database.DropTenantDB(dbName)
 		return fmt.Errorf("seed payment methods: %w", err)
 	}
+	if err := database.SeedUnitsCatalog(db); err != nil {
+		_ = database.DropTenantDB(dbName)
+		return fmt.Errorf("seed units catalog: %w", err)
+	}
 	if err := database.ProvisionTenantSeed(db, seed); err != nil {
 		_ = database.DropTenantDB(dbName)
 		return fmt.Errorf("seed tenant: %w", err)

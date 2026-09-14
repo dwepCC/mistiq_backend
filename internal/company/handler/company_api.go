@@ -465,11 +465,12 @@ func (h *CompanyHandler) CreateSeriesAPI(c fiber.Ctx) error {
 		DocType     string `json:"doc_type"`
 		Series      string `json:"series"`
 		Correlative *uint  `json:"correlative"`
+		IsDefault   bool   `json:"is_default"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
-	if err := service.NewCompanyService(db(c)).CreateSeries(body.BranchID, body.DocType, body.Series, body.Correlative); err != nil {
+	if err := service.NewCompanyService(db(c)).CreateSeries(body.BranchID, body.DocType, body.Series, body.Correlative, body.IsDefault); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true})
@@ -486,6 +487,7 @@ func (h *CompanyHandler) UpdateSeriesAPI(c fiber.Ctx) error {
 		Active      bool   `json:"active"`
 		DocType     string `json:"doc_type"`
 		Correlative *uint  `json:"correlative"`
+		IsDefault   *bool  `json:"is_default"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
@@ -494,7 +496,20 @@ func (h *CompanyHandler) UpdateSeriesAPI(c fiber.Ctx) error {
 	if body.Correlative != nil {
 		corr = body.Correlative
 	}
-	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), body.Series, body.Active, body.DocType, corr); err != nil {
+	if err := service.NewCompanyService(db(c)).UpdateSeries(uint(id), body.Series, body.Active, body.DocType, corr, body.IsDefault); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// PUT /api/company/series/:id/default — atajo de un clic: marca esta serie como el comprobante
+// por defecto de su sucursal (desmarca cualquier otra de la misma sucursal+categoría venta).
+func (h *CompanyHandler) SetDefaultSeriesAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := service.NewCompanyService(db(c)).SetDefaultSeries(uint(id)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

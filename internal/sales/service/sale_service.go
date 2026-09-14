@@ -3,7 +3,9 @@ package service
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,12 +38,37 @@ const SunatMaxMontoClienteSinRUC = 700
 // RUC Perú: 11 dígitos.
 const SunatRucLength = 11
 
+// Detecta una búsqueda tipo "B001-358": serie + correlativo tal como lo escribe el usuario, sin
+// los ceros a la izquierda con los que se guarda tenant_sales.number (p. ej. "B001-00000358").
+// El LIKE por substring de List() no matchea ese caso porque no hay match literal.
+var saleSeriesCorrelativeQueryRe = regexp.MustCompile(`^([A-Za-z0-9]+)-(\d{1,8})$`)
+
 type SaleService struct {
 	db *gorm.DB
 }
 
 func NewSaleService(db *gorm.DB) *SaleService {
 	return &SaleService{db: db}
+}
+
+// validateSaleItemPrices exige un precio unitario real (>0) en cada línea de venta. No distingue
+// por tipo de afectación IGV: en bonificación (código 15) lo único que se fuerza a 0 es el total
+// cobrado (ver CalcItemPayableTotal), el precio de referencia siempre debe ser real.
+func validateSaleItemPrices(items []SaleItemInput) error {
+	for _, it := range items {
+		if it.UnitPrice > 0 {
+			continue
+		}
+		label := strings.TrimSpace(it.Description)
+		if label == "" {
+			label = strings.TrimSpace(it.Code)
+		}
+		if label == "" {
+			label = "un ítem de la venta"
+		}
+		return fmt.Errorf("'%s' no tiene un precio de venta válido (S/ 0.00)", label)
+	}
+	return nil
 }
 
 // productIsCatalogService: servicios no consumen inventario aunque un registro legacy tenga manage_stock en true.
@@ -152,6 +179,13 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 	// SUNAT exige código en cada línea: sin él la venta se guardaba y reventaba recién al
 	// emitir, con el cliente esperando. Se completa antes de calcular nada.
 	fillMissingItemCodes(s.db, input.Items)
+	// Precio real obligatorio en toda línea (ya con combos resueltos): en bonificación (código
+	// IGV 15) lo que se zeroa es el total cobrado, no el precio de referencia — así que esto no
+	// bloquea bonificaciones legítimas, solo precios en 0 por error de catálogo/carrito. Es la
+	// última barrera si alguien llama a la API directo sin pasar por el frontend.
+	if err := validateSaleItemPrices(input.Items); err != nil {
+		return nil, err
+	}
 
 	series, err := docseries.ValidateForBranch(s.db, input.SeriesID, input.BranchID)
 	if err != nil {
@@ -235,9 +269,12 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 	}
 
 	sunatCode := strings.TrimSpace(series.SunatCode)
-	if opCode == salecurrency.OpDetraccion {
+	if opCode == salecurrency.OpVentasNoDomiciliados && sunatCode != "01" {
+		return nil, errors.New("la operación ventas no domiciliados (0401) solo aplica a facturas (01)")
+	}
+	if salecurrency.IsDetraccion(opCode) {
 		if sunatCode != "01" {
-			return nil, errors.New("la operación sujeta a detracción (1001) solo aplica a facturas (01)")
+			return nil, fmt.Errorf("la operación sujeta a detracción (%s) solo aplica a facturas (01)", opCode)
 		}
 		if currency != salecurrency.CurrencyPEN {
 			return nil, errors.New("la detracción requiere moneda PEN en la factura")
@@ -249,8 +286,8 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 			return nil, errors.New("no se puede combinar detracción con retención IGV en la misma factura")
 		}
 	}
-	if opCode != salecurrency.OpDetraccion && input.Detraccion != nil {
-		return nil, errors.New("datos de detracción solo aplican con tipo de operación 1001")
+	if !salecurrency.IsDetraccion(opCode) && input.Detraccion != nil {
+		return nil, fmt.Errorf("datos de detracción solo aplican con tipo de operación %s o %s", salecurrency.OpDetraccion, salecurrency.OpDetraccionTransporte)
 	}
 	if input.Prepayment != nil && input.Prepayment.Emit {
 		if sunatCode != "01" && sunatCode != "03" {
@@ -282,23 +319,28 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 			contact = &c
 		}
 	}
-	if opCode == salecurrency.OpDetraccion && contact != nil && contact.EsAgenteDePercepcion {
+	if salecurrency.IsDetraccion(opCode) && contact != nil && contact.EsAgenteDePercepcion {
 		return nil, errors.New("no se permite detracción con cliente agente de percepción")
 	}
 	if sunatCode == "01" {
 		if contact == nil {
-			return nil, errors.New("la factura electrónica (01) requiere un cliente con RUC de 11 dígitos")
+			return nil, errors.New("la factura electrónica (01) requiere un cliente")
 		}
-		if contact.DocType != "6" {
-			return nil, errors.New("la factura solo puede emitirse a clientes con RUC (tipo de documento 6). El cliente seleccionado no tiene RUC")
-		}
-		docNum := strings.TrimSpace(contact.DocNumber)
-		if len(docNum) != SunatRucLength {
-			return nil, fmt.Errorf("el RUC del cliente debe tener exactamente %d dígitos", SunatRucLength)
-		}
-		for _, r := range docNum {
-			if r < '0' || r > '9' {
-				return nil, errors.New("el RUC del cliente debe contener solo dígitos")
+		// 0401 (ventas no domiciliados): el cliente no tiene RUC peruano —extranjero sin RUC,
+		// pasaporte, carné de extranjería—, así que no se exige RUC. Cualquier otro tipo de
+		// operación en factura sigue exigiéndolo (mismo comportamiento de siempre).
+		if opCode != salecurrency.OpVentasNoDomiciliados {
+			if contact.DocType != "6" {
+				return nil, errors.New("la factura solo puede emitirse a clientes con RUC (tipo de documento 6). El cliente seleccionado no tiene RUC")
+			}
+			docNum := strings.TrimSpace(contact.DocNumber)
+			if len(docNum) != SunatRucLength {
+				return nil, fmt.Errorf("el RUC del cliente debe tener exactamente %d dígitos", SunatRucLength)
+			}
+			for _, r := range docNum {
+				if r < '0' || r > '9' {
+					return nil, errors.New("el RUC del cliente debe contener solo dígitos")
+				}
 			}
 		}
 	}
@@ -381,11 +423,16 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		for _, p := range payments {
 			sumPayments += p.Amount
 		}
-		if money.RoundDisplay(sumPayments) != money.RoundDisplay(total) {
+		// Solo realinear cuando el pago original NO alcanza el total recalculado (redondeo SUNAT
+		// al emitir boleta/factura desde la NV). Si sumPayments >= total, puede ser un pago exacto
+		// o uno de más (vuelto real, en efectivo o cualquier otro medio) — en ese caso se conserva
+		// tal cual para que print_data.ChangeAmount lo calcule (ver comentario "Vuelto" más abajo);
+		// antes esto se realineaba siempre, borrando el vuelto de cualquier método al convertir.
+		if money.RoundDisplay(sumPayments) < money.RoundDisplay(total) {
 			payments = alignPaymentsToSaleTotal(payments, total)
 		}
 	}
-	if opCode == salecurrency.OpDetraccion && total > 0 {
+	if salecurrency.IsDetraccion(opCode) && total > 0 {
 		eval, err := s.evaluateDetractionForCreate(input, &series, total, saleItems, contact)
 		if err != nil {
 			return nil, err
@@ -435,7 +482,7 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 	}
 
 	salePayable := total
-	if opCode == salecurrency.OpDetraccion && total > 0 {
+	if salecurrency.IsDetraccion(opCode) && total > 0 {
 		if eval, derr := s.evaluateDetractionForCreate(input, &series, total, saleItems, contact); derr == nil && eval.Applicable {
 			salePayable = eval.NetPayablePEN
 		}
@@ -461,7 +508,7 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		}
 		var lastDue *time.Time
 		var instErr error
-		creditInstallmentRows, lastDue, instErr = validateCreditInstallments(installments, creditTarget, currency, loc)
+		creditInstallmentRows, lastDue, instErr = validateCreditInstallments(installments, creditTarget, currency, loc, input.IssueDate)
 		if instErr != nil {
 			return nil, instErr
 		}
@@ -590,10 +637,11 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				continue
 			}
 			if err := tx.Create(&database.TenantSalePayment{
-				SaleID:    sale.ID,
-				Method:    p.Method,
-				Amount:    p.Amount,
-				Reference: strings.TrimSpace(p.Reference),
+				SaleID:        sale.ID,
+				Method:        p.Method,
+				Amount:        p.Amount,
+				Reference:     strings.TrimSpace(p.Reference),
+				CashSessionID: input.CashSessionID,
 			}).Error; err != nil {
 				return err
 			}
@@ -786,7 +834,7 @@ func (s *SaleService) persistDetraccionTx(
 	series database.TenantDocumentSeries,
 	saleItems []database.TenantSaleItem,
 ) error {
-	if strings.TrimSpace(input.OperationTypeCode) != salecurrency.OpDetraccion {
+	if !salecurrency.IsDetraccion(strings.TrimSpace(input.OperationTypeCode)) {
 		return nil
 	}
 	var companyCfg database.TenantCompanyConfig
@@ -1065,12 +1113,26 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 		q = q.Where("(SELECT COUNT(1) FROM tenant_sale_payments tsp WHERE tsp.sale_id = tenant_sales.id) <= 1")
 	}
 	if params.Query != "" {
-		query := "%" + strings.TrimSpace(params.Query) + "%"
+		trimmed := strings.TrimSpace(params.Query)
+		like := "%" + trimmed + "%"
+		conds := []string{
+			"tenant_sales.number LIKE ?",
+			"tenant_sales.series LIKE ?",
+			"CONCAT(tenant_sales.series, '-', tenant_sales.number) LIKE ?",
+			"tc_filter.business_name LIKE ?",
+			"tc_filter.doc_number LIKE ?",
+		}
+		args := []interface{}{like, like, like, like, like}
+		// "B001-358" debe encontrar "B001-00000358": comparar serie + correlativo numérico
+		// aparte del LIKE, que solo matchea substring literal y no ignora los ceros a la izquierda.
+		if m := saleSeriesCorrelativeQueryRe.FindStringSubmatch(trimmed); m != nil {
+			if correlative, err := strconv.ParseUint(m[2], 10, 64); err == nil {
+				conds = append(conds, "(tenant_sales.series LIKE ? AND tenant_sales.correlative = ?)")
+				args = append(args, "%"+m[1]+"%", correlative)
+			}
+		}
 		q = q.Joins("LEFT JOIN tenant_contacts tc_filter ON tc_filter.id = tenant_sales.contact_id").
-			Where(
-				"tenant_sales.number LIKE ? OR tenant_sales.series LIKE ? OR CONCAT(tenant_sales.series, '-', tenant_sales.number) LIKE ? OR tc_filter.business_name LIKE ? OR tc_filter.doc_number LIKE ?",
-				query, query, query, query, query,
-			)
+			Where(strings.Join(conds, " OR "), args...)
 	}
 	if params.DateFrom != nil {
 		q = q.Where("tenant_sales.issue_date >= ?", params.DateFrom)
@@ -1216,15 +1278,24 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		CountCancelled int64   `gorm:"column:count_cancelled"`
 		CountActive    int64   `gorm:"column:count_active"`
 	}
+	// Una nota de crédito es la reversión de la venta anulada, no una venta nueva ni una resta
+	// aparte: su propia venta original ya queda excluida de sum_active (status != 'cancelled') y
+	// contabilizada en sum_cancelled a su valor real. Si la NC también restara su total, la
+	// reversión se contaría dos veces (una por excluir la original, otra por restar la NC) y el
+	// neto quedaría negativo de más. netTotal simplemente la excluye (aporta 0): su efecto ya
+	// está reflejado en que la original no se cuenta como venta vigente.
+	const netTotal = "(CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN 0 ELSE tenant_sales.total END)"
+	const netSubtotal = "(CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN 0 ELSE tenant_sales.subtotal END)"
+	const netTax = "(CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN 0 ELSE tenant_sales.tax_amount END)"
 	var row aggRow
 	err := salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
 		Where("tenant_sales.id IN (?)", idSub).
 		Select(`
-			COALESCE(SUM(tenant_sales.total), 0) AS sum_total,
-			COALESCE(SUM(tenant_sales.subtotal), 0) AS sum_subtotal,
-			COALESCE(SUM(tenant_sales.tax_amount), 0) AS sum_tax,
+			COALESCE(SUM(` + netTotal + `), 0) AS sum_total,
+			COALESCE(SUM(` + netSubtotal + `), 0) AS sum_subtotal,
+			COALESCE(SUM(` + netTax + `), 0) AS sum_tax,
 			COALESCE(SUM(CASE WHEN tenant_sales.status = 'cancelled' THEN tenant_sales.total ELSE 0 END), 0) AS sum_cancelled,
-			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' THEN tenant_sales.total ELSE 0 END), 0) AS sum_active,
+			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' THEN ` + netTotal + ` ELSE 0 END), 0) AS sum_active,
 			COALESCE(SUM(CASE WHEN tenant_sales.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS count_cancelled,
 			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' THEN 1 ELSE 0 END), 0) AS count_active
 		`).
@@ -1297,7 +1368,7 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 
 	var fromHeader []payRow
 	err = salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
-		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, COALESCE(SUM(tenant_sales.total), 0) AS total`).
+		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, COALESCE(SUM(` + netTotal + `), 0) AS total`).
 		Where("tenant_sales.id IN (?)", idSub).
 		Where("tenant_sales.status != ?", "cancelled").
 		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp WHERE tsp.sale_id = tenant_sales.id)").
@@ -1352,9 +1423,13 @@ type SalesByProductRow struct {
 	Unit          string  `json:"unit"`
 	QuantitySold  float64 `json:"quantity_sold"`
 	TotalAmount   float64 `json:"total_amount"`
+	// LinesCount/AvgLineAmount: métricas técnicas de granularidad interna (cuántas filas de
+	// detalle tuvo el producto, no cuántas ventas) — no se muestran en el reporte del front
+	// porque no tienen lectura de negocio clara, pero se dejan calculadas por si se reusan.
 	LinesCount    int64   `json:"lines_count"`
 	SalesCount    int64   `json:"sales_count"`
-	AvgLineAmount float64 `json:"avg_line_amount"` // total_amount / lines_count (precio medio por línea del producto)
+	AvgLineAmount float64 `json:"avg_line_amount"` // total_amount / lines_count
+	AvgUnitPrice  float64 `json:"avg_unit_price"`  // total_amount / quantity_sold (precio promedio de venta por unidad)
 }
 
 // SalesByProductSummary totales del período (mismos filtros que las filas).
@@ -1372,6 +1447,11 @@ type SalesByProductParams struct {
 	DateTo     *time.Time
 	BranchID   uint
 	CategoryID uint
+	// Q busca por código o nombre de producto (LIKE, case-insensitive).
+	Q string
+	// ProductType filtra por tenant_products.type: "product" o "service". Vacío = todos.
+	// Ítems sin producto de catálogo (product_id=0, ítems manuales) se tratan como "product".
+	ProductType string
 }
 
 func (s *SaleService) salesByProductBaseQuery(params SalesByProductParams) *gorm.DB {
@@ -1391,6 +1471,13 @@ func (s *SaleService) salesByProductBaseQuery(params SalesByProductParams) *gorm
 	}
 	if params.CategoryID > 0 {
 		q = q.Where("p.category_id = ?", params.CategoryID)
+	}
+	if qStr := strings.TrimSpace(params.Q); qStr != "" {
+		like := "%" + qStr + "%"
+		q = q.Where("p.code LIKE ? OR p.name LIKE ? OR tenant_sale_items.description LIKE ?", like, like, like)
+	}
+	if pt := strings.TrimSpace(params.ProductType); pt != "" {
+		q = q.Where("COALESCE(NULLIF(p.type, ''), 'product') = ?", pt)
 	}
 	return q
 }
@@ -1449,6 +1536,10 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 		if r.LinesCount > 0 {
 			avgLine = r.TotalAmount / float64(r.LinesCount)
 		}
+		avgUnit := float64(0)
+		if r.QuantitySold > 0 {
+			avgUnit = r.TotalAmount / r.QuantitySold
+		}
 		out[i] = SalesByProductRow{
 			ProductID:     r.ProductID,
 			ProductCode:   r.ProductCode,
@@ -1461,6 +1552,7 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 			LinesCount:    r.LinesCount,
 			SalesCount:    r.SalesCount,
 			AvgLineAmount: avgLine,
+			AvgUnitPrice:  avgUnit,
 		}
 		sumAmt += r.TotalAmount
 		sumQty += r.QuantitySold
@@ -1790,7 +1882,7 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 		return nil, fmt.Errorf("nota de venta en USD: %w", err)
 	}
 	nvID := notaSaleID
-	return s.Create(CreateSaleInput{
+	issued, err := s.Create(CreateSaleInput{
 		BranchID:                nota.BranchID,
 		ContactID:               contactID,
 		UserID:                  userID,
@@ -1812,6 +1904,31 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 		IssuedFromNotaSaleID:    &nvID,
 		CentralTenantID:         centralTenantID,
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Trazabilidad documental (no monetaria): esta factura/boleta no representa un nuevo
+	// movimiento de dinero — el pago real ya se registró (y ya quedó vinculado a su sesión de
+	// caja) cuando se creó la nota de venta original; por eso SkipPaymentDistribution=true arriba
+	// y ningún RecordPayment se vuelve a llamar. Pero el comprobante SÍ debe quedar trazable a la
+	// MISMA sesión que la nota, para que "en qué turno ocurrió esta venta" sea consultable desde
+	// el documento fiscal final, no solo desde la nota interna.
+	//
+	// Se asigna por UPDATE directo (no vía CreateSaleInput.CashSessionID) a propósito: si se
+	// pasara por ahí, sale_service.Create validaría la sesión con ValidateCashSessionForUser como
+	// si fuera un cobro en vivo (sesión abierta + del mismo usuario) — pero aquí puede pasar horas
+	// o días entre la nota y su emisión electrónica, la sesión original bien puede estar ya
+	// cerrada, y quien emite el comprobante (p. ej. contabilidad) puede no ser el mismo usuario
+	// que atendió la venta. Nada de eso invalida la trazabilidad histórica: solo se está anotando
+	// en qué sesión ocurrió realmente la venta, no autorizando un cobro nuevo.
+	if nota.CashSessionID != nil {
+		if err := s.db.Model(&database.TenantSale{}).Where("id = ?", issued.ID).
+			Update("cash_session_id", nota.CashSessionID).Error; err != nil {
+			return issued, err
+		}
+		issued.CashSessionID = nota.CashSessionID
+	}
+	return issued, nil
 }
 
 // SummaryStats retorna estadísticas resumidas de ventas.

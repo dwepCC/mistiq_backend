@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
+
 	"tukifac/config"
 	"tukifac/pkg/database"
 	"tukifac/pkg/database/tenantbackfills"
@@ -43,24 +45,24 @@ func RunBackfillFleet(opts BackfillOptions) database.MigrateSummary {
 	return runBackfillFleetForVersion(opts, bf)
 }
 
+// runAllRegisteredBackfills corre CADA backfill registrado con su propio presupuesto opts.Limit
+// independiente — NO compartido entre backfills.
+//
+// Antes, un único "budget := opts.Limit" se repartía entre todos los backfills del registry en
+// orden: como ListTenantsForMigration devuelve TODOS los tenants activos (sin filtrar por
+// pendientes) y runBackfillFleetForVersion trunca esa lista a opts.Limit, el PRIMER backfill del
+// registry (V031) siempre consumía el presupuesto completo con su propio pase (aunque fuera puro
+// "skip" porque ya estaba aplicado en todos lados) — dejando 0 para V032, V033, ... V036, que
+// nunca llegaban a correr vía el cron automático. Encontrado en producción investigando por qué
+// V036 (backfill de Caja) nunca corría solo; confirmado con test.
 func runAllRegisteredBackfills(opts BackfillOptions) database.MigrateSummary {
 	merged := database.MigrateSummary{}
-	budget := opts.Limit
 	for _, reg := range tenantbackfills.TenantBackfills {
-		if opts.Limit > 0 && budget <= 0 {
-			break
-		}
 		sub := opts
 		sub.Version = reg.Version()
-		if opts.Limit > 0 {
-			sub.Limit = budget
-		}
 		part := runBackfillFleetForVersion(sub, reg)
 		merged.Success = append(merged.Success, part.Success...)
 		merged.Failed = append(merged.Failed, part.Failed...)
-		if opts.Limit > 0 {
-			budget -= len(part.Success) + len(part.Failed)
-		}
 	}
 	return merged
 }
@@ -131,6 +133,18 @@ func runBackfillFleetForVersion(opts BackfillOptions, bf tenantbackfills.TenantB
 	return summary
 }
 
+// shouldSkipBackfill decide si runBackfillOne debe saltarse la corrida real: para un backfill
+// normal (run-once), true si tenant_migration_history ya tiene un éxito registrado para esa
+// versión (ver IsBackfillApplied). Un backfill que se declaró tenantbackfills.Repeatable nunca se
+// salta por esta vía — su propio Run() ya se encarga de no repetir trabajo (ver comentario de la
+// interfaz Repeatable sobre por qué el candado run-once genérico es inseguro para ese caso).
+func shouldSkipBackfill(db *gorm.DB, version int, bf tenantbackfills.TenantBackfill) (bool, error) {
+	if tenantbackfills.IsRepeatable(bf) {
+		return false, nil
+	}
+	return IsBackfillApplied(db, version)
+}
+
 func runBackfillOne(slug, dbName string, version int, bf tenantbackfills.TenantBackfill) error {
 	db, err := database.OpenTenantDBForMigration(dbName)
 	if err != nil {
@@ -138,11 +152,11 @@ func runBackfillOne(slug, dbName string, version int, bf tenantbackfills.TenantB
 	}
 	defer database.CloseTenantDB(db)
 
-	applied, err := IsBackfillApplied(db, version)
+	skip, err := shouldSkipBackfill(db, version, bf)
 	if err != nil {
 		return err
 	}
-	if applied {
+	if skip {
 		logger.L.Info("tenant_backfill_skip",
 			slog.String("tenant", slug),
 			slog.Int("version", version),

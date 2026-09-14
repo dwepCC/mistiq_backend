@@ -55,6 +55,7 @@ func (h *EcommerceHandler) UpdateSettingsAPI(c fiber.Ctx) error {
 		FontFamily     *string `json:"font_family"`
 		CardStyle      *string `json:"card_style"`
 		CategoryStyle  *string `json:"category_style"`
+		ShowStock      *bool   `json:"show_stock"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -70,6 +71,7 @@ func (h *EcommerceHandler) UpdateSettingsAPI(c fiber.Ctx) error {
 		FontFamily:     body.FontFamily,
 		CardStyle:      body.CardStyle,
 		CategoryStyle:  body.CategoryStyle,
+		ShowStock:      body.ShowStock,
 	}
 	if body.WhatsAppNumber != nil {
 		input.WhatsAppNumber = &body.WhatsAppNumber
@@ -350,6 +352,7 @@ func (h *EcommerceHandler) PublicSettingsAPI(c fiber.Ctx) error {
 		"font_family":          settings.FontFamily,
 		"card_style":           settings.CardStyle,
 		"category_style":       settings.CategoryStyle,
+		"show_stock":           settings.ShowStock,
 		"sliders":              sliders,
 	})
 }
@@ -384,7 +387,12 @@ func (h *EcommerceHandler) PublicProductsAPI(c fiber.Ctx) error {
 	if v, err := strconv.ParseFloat(c.Query("max_price"), 64); err == nil {
 		maxPrice = &v
 	}
-	items, total, err := service.NewEcommerceService(db(c)).PublicProducts(c.Query("q"), uint(catID), minPrice, maxPrice, page, perPage)
+	svc := service.NewEcommerceService(db(c))
+	settings, err := svc.GetSettings()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	items, total, err := svc.PublicProducts(c.Query("q"), uint(catID), minPrice, maxPrice, page, perPage, settings.ShowStock)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}

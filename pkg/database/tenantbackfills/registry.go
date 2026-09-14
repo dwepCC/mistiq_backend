@@ -6,6 +6,8 @@ var TenantBackfills = []TenantBackfill{
 	V032RestaurantOrdersBackfill{},
 	V033FinalizeOrphanTableOrders{},
 	V034ProductCodes{},
+	V035MergeDuplicateContacts{},
+	V036SalePaymentCashSessionBackfill{},
 }
 
 // ByVersion mapa versión → backfill.
