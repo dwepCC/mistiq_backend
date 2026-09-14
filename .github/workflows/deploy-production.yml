@@ -88,7 +88,7 @@ jobs:
             echo "${{ secrets.VPS_GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             echo "Updating image..."
-            sed -i "s|^MISTIQ_IMAGE=.*|MISTIQ_IMAGE=${IMAGE_SHA}|" .env
+            sed -i "s|^TUKIFAC_IMAGE=.*|TUKIFAC_IMAGE=${IMAGE_SHA}|" .env
 
             echo "Pulling image..."
             docker compose -f docker-compose.production.yml pull backend-go
@@ -101,7 +101,7 @@ jobs:
 
             if [ "$SKIP_MIGRATE" = "0" ]; then
               echo "Running migrate-central (fleet is separate cron)..."
-              docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./mistiq-api migrate-central
+              docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./tukifac-api migrate-central
             fi
 
             echo "Restarting container..."
