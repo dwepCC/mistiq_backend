@@ -50,7 +50,7 @@ func runServer(cfg *config.Config) {
 	cron.StartFiscalReconcileWorker()
 
 	app := fiber.New(fiber.Config{
-		AppName:      "Tukifac SaaS ERP",
+		AppName:      "Mistiq SaaS ERP",
 		ServerHeader: "",
 		BodyLimit:    cfg.BodyLimitBytes,
 		ReadTimeout:  cfg.ReadTimeout,

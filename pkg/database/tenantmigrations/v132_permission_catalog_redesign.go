@@ -68,7 +68,7 @@ var v132NewCatalog = []database.TenantPermission{
 	{Module: "billing", Action: "despatch", Label: "Emitir guías de remisión"},
 	{Module: "billing", Action: "advanced_docs", Label: "Retenciones, percepciones y reversiones"},
 	{Module: "ecommerce", Action: "orders", Label: "Gestionar pedidos web"},
-	{Module: "subscription", Action: "view", Label: "Ver suscripción y facturación de Tukifac"},
+	{Module: "subscription", Action: "view", Label: "Ver suscripción y facturación de Mistiq"},
 	{Module: "subscription", Action: "manage", Label: "Registrar pagos y comprar paquetes de documentos"},
 }
 

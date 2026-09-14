@@ -650,7 +650,7 @@ func SeedCentral() error {
 			{Key: "clinic", Name: "Clínica / Consultorio", Description: "Pacientes, citas y atenciones", Icon: "stethoscope"},
 			{Key: "transport", Name: "Transporte / Logística", Description: "Rutas, unidades y guías", Icon: "truck"},
 			{Key: "manufacturing", Name: "Producción / Manufactura", Description: "Órdenes de producción y procesos", Icon: "factory"},
-			{Key: "memberships", Name: "Cuotas y membresías (clientes del tenant)", Description: "Módulo del ERP para cuotas recurrentes entre el tenant y sus propios clientes (gimnasios, academias, etc.). No administra el contrato del tenant con la plataforma Tukifac.", Icon: "layers"},
+			{Key: "memberships", Name: "Cuotas y membresías (clientes del tenant)", Description: "Módulo del ERP para cuotas recurrentes entre el tenant y sus propios clientes (gimnasios, academias, etc.). No administra el contrato del tenant con la plataforma Mistiq.", Icon: "layers"},
 			{Key: "hr", Name: "Recursos Humanos (HR)", Description: "Colaboradores, asistencias y nóminas", Icon: "users"},
 			{Key: "accounting", Name: "Contabilidad", Description: "Libros contables y asientos", Icon: "file-text"},
 			{Key: "bi", Name: "Business Intelligence", Description: "Dashboards y analítica avanzada", Icon: "bar-chart-3"},
@@ -726,7 +726,7 @@ func SeedCentral() error {
 	var ajusteCount int64
 	CentralDB.Model(&CentralAjuste{}).Count(&ajusteCount)
 	if ajusteCount == 0 {
-		CentralDB.Create(&CentralAjuste{ID: 1, NombreSistema: "Tukifac"})
+		CentralDB.Create(&CentralAjuste{ID: 1, NombreSistema: "Mistiq"})
 	}
 
 	// RBAC del panel central (roles/permisos de SuperAdminUser) — idempotente, ver sa_rbac_seed.go

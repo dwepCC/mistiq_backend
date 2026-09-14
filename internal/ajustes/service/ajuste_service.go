@@ -16,7 +16,7 @@ func (s *AjusteService) Get() (*database.CentralAjuste, error) {
 	err := database.CentralDB.First(&a, AjusteID).Error
 	if err != nil {
 		// Crear fila por defecto si no existe
-		a = database.CentralAjuste{ID: AjusteID, NombreSistema: "Tukifac"}
+		a = database.CentralAjuste{ID: AjusteID, NombreSistema: "Mistiq"}
 		if createErr := database.CentralDB.Create(&a).Error; createErr != nil {
 			return nil, createErr
 		}

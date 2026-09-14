@@ -205,7 +205,7 @@ func (s *RoleService) SeedPermissions() error {
 		{Module: "ecommerce", Action: "orders", Label: "Gestionar pedidos web"},
 		{Module: "fleet", Action: "view", Label: "Ver transportistas, conductores y vehículos"},
 		{Module: "fleet", Action: "manage", Label: "Gestionar transportistas, conductores y vehículos"},
-		{Module: "subscription", Action: "view", Label: "Ver suscripción y facturación de Tukifac"},
+		{Module: "subscription", Action: "view", Label: "Ver suscripción y facturación de Mistiq"},
 		{Module: "subscription", Action: "manage", Label: "Registrar pagos y comprar paquetes de documentos"},
 	}
 

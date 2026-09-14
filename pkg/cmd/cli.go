@@ -75,7 +75,7 @@ func Execute(args []string) int {
 }
 
 func printUsage() {
-	fmt.Println(`Tukifac API — comandos disponibles:
+	fmt.Println(`Mistiq API — comandos disponibles:
 
   serve                      Inicia el servidor HTTP (sin argumentos)
   migrate                    Solo BD central (deploy producción)

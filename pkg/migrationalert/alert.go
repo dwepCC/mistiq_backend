@@ -44,7 +44,7 @@ func NotifyCircuitBreakerOpen(reason string, threshold int) {
 		})
 	}
 	if cfg.MigrationAlertEmail != "" && cfg.SMTPHost != "" {
-		_ = sendEmail(cfg.MigrationAlertEmail, "[Tukifac] Fleet circuit breaker OPEN", body, cfg)
+		_ = sendEmail(cfg.MigrationAlertEmail, "[Mistiq] Fleet circuit breaker OPEN", body, cfg)
 	}
 }
 
@@ -75,7 +75,7 @@ func NotifyMigrationFailure(ctx TenantFailureContext) {
 		})
 	}
 	if cfg.MigrationAlertEmail != "" && cfg.SMTPHost != "" {
-		_ = sendEmail(cfg.MigrationAlertEmail, "[Tukifac] Migration failed: "+ctx.TenantSlug, body, cfg)
+		_ = sendEmail(cfg.MigrationAlertEmail, "[Mistiq] Migration failed: "+ctx.TenantSlug, body, cfg)
 	}
 }
 

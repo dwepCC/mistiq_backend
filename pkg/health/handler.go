@@ -16,7 +16,7 @@ const readinessTimeout = 2 * time.Second
 // Usar en balanceadores y en clientes POS (GET /health/live) para heartbeat frecuente.
 func Liveness(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
-		"app":    "Tukifac API",
+		"app":    "Mistiq API",
 		"status": "ok",
 	})
 }
