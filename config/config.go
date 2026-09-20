@@ -105,6 +105,14 @@ type Config struct {
 	// Cola del agente (Redis) y rate-limit por remitente en WhatsApp.
 	AssistantQueueWorkers    int
 	AssistantRateLimitPerMin int
+	// Destino de las notificaciones internas del agente (commercial_notify_team).
+	AssistantNotifyEmail string
+	// Kill-switches de respaldo a nivel plataforma para las dos acciones
+	// Sensitive que crean tenants reales desde el chat — CUALQUIERA de los
+	// dos (este o el flag de la fila `assistants`) habilita la acción;
+	// ambos en false (el default) la bloquea.
+	AssistantEnableTrialTenant  bool
+	AssistantEnablePaidContract bool
 
 	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. tukifac.com).
 	// Alias env: ROOT_DOMAIN (tiene prioridad sobre APP_DOMAIN).
@@ -265,8 +273,11 @@ func Load() error {
 		WhatsAppGraphURL:      getEnv("WHATSAPP_GRAPH_URL", ""),
 		WhatsAppAPIVersion:    getEnv("WHATSAPP_API_VERSION", ""),
 
-		AssistantQueueWorkers:    getEnvInt("ASSISTANT_QUEUE_WORKERS", 2),
-		AssistantRateLimitPerMin: getEnvInt("ASSISTANT_RATE_LIMIT_PER_MIN", 15),
+		AssistantQueueWorkers:       getEnvInt("ASSISTANT_QUEUE_WORKERS", 2),
+		AssistantRateLimitPerMin:    getEnvInt("ASSISTANT_RATE_LIMIT_PER_MIN", 15),
+		AssistantNotifyEmail:        getEnv("ASSISTANT_NOTIFY_EMAIL", ""),
+		AssistantEnableTrialTenant:  getEnvBool("ASSISTANT_ENABLE_TRIAL_TENANT", false),
+		AssistantEnablePaidContract: getEnvBool("ASSISTANT_ENABLE_PAID_CONTRACT", false),
 
 		AppDomain:          resolveRootDomain(),
 		APIPublicURL:       strings.TrimSpace(getEnv("API_PUBLIC_URL", "")),

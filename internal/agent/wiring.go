@@ -1,10 +1,9 @@
 // Package agent es la capa HTTP del módulo "Assistant IA": arma el motor
 // (pkg/agent/*) con sus dependencias reales (BD central, Redis, proveedor
-// LLM, WhatsApp) y expone los endpoints HTTP. Fases 1+4 (ver
+// LLM, WhatsApp) y expone los endpoints HTTP. Fases 1+4+5 (ver
 // docs/CHATBOT-AGENT-ARCHITECTURE.md §6.3): motor + canal web síncrono +
-// canal WhatsApp (cola Redis) + RAG + memoria, SIN acciones de negocio ni
-// panel todavía — el catálogo de acciones (pkg/agent/actions.Registry)
-// arranca vacío a propósito (Fase 5).
+// canal WhatsApp (cola Redis) + RAG + memoria + catálogo de acciones
+// comerciales — falta el panel en mistiq_central (Fase 3).
 package agent
 
 import (
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"tukifac/config"
+	commercialactions "tukifac/internal/agent/actions"
 	"tukifac/internal/agent/service"
 	agentpkg "tukifac/pkg/agent"
 	"tukifac/pkg/agent/actions"
@@ -72,7 +72,7 @@ func Init(cfg *config.Config, rdb *redis.Client) error {
 	if err := types.Register(agentpkg.AgentType{
 		Key:       "commercial",
 		Scope:     bizctx.ScopePlatform,
-		Tools:     nil, // catálogo de acciones comerciales: Fase 5
+		Tools:     commercialactions.Names(),
 		MaxRounds: 4,
 	}); err != nil {
 		return fmt.Errorf("agent: registrar tipo de agente: %w", err)
@@ -80,7 +80,11 @@ func Init(cfg *config.Config, rdb *redis.Client) error {
 
 	memStore := memory.NewStore(database.CentralDB, rdb)
 	convStore := memory.NewConversationStore(database.CentralDB)
-	actionsRegistry := actions.NewRegistry() // vacío en Fase 1, a propósito
+
+	actionsRegistry := actions.NewRegistry()
+	if err := commercialactions.RegisterAll(actionsRegistry, cfg, memStore); err != nil {
+		return fmt.Errorf("agent: registrar catálogo de acciones: %w", err)
+	}
 
 	orch := orchestrator.New(orchestrator.Deps{
 		Resolver:      resolver,

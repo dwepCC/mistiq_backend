@@ -43,6 +43,14 @@ type Assistant struct {
 	EnableTrialTenant  bool `gorm:"not null;default:false" json:"enable_trial_tenant"`
 	EnablePaidContract bool `gorm:"not null;default:false" json:"enable_paid_contract"`
 
+	// Pago manual (Yape/Plin) — sin pasarela, igual que Bendey. El agente
+	// solo ENTREGA estos datos y marca "pago reportado"; nunca valida un
+	// pago por su cuenta (ver actions/payment.go y
+	// docs/CHATBOT-AGENT-ARCHITECTURE.md §3.3).
+	PaymentPlinNumber   string `gorm:"size:30" json:"payment_plin_number"`
+	PaymentHolderName   string `gorm:"size:150" json:"payment_holder_name"`
+	PaymentReceiptPhone string `gorm:"size:30" json:"payment_receipt_phone"`
+
 	AgentType     string `gorm:"size:40;not null;default:'commercial';index" json:"agent_type"`
 	EnabledTools  string `gorm:"type:text" json:"enabled_tools"`
 	MaxToolRounds int    `gorm:"not null;default:0" json:"max_tool_rounds"`
