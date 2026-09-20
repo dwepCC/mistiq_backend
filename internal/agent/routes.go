@@ -48,4 +48,12 @@ func RegisterRoutes(saAPI fiber.Router) {
 	saAPI.Post("/assistant/conversations/:id/close", manage, handleConversationClose)
 	saAPI.Post("/assistant/conversations/:id/reopen", manage, handleConversationReopen)
 	saAPI.Post("/assistant/conversations/:id/validate-payment", manage, handleConversationValidatePayment)
+
+	saAPI.Get("/assistant/knowledge", view, handleKnowledgeList)
+	saAPI.Post("/assistant/knowledge", manage, handleKnowledgeCreate)
+	saAPI.Post("/assistant/knowledge/seed-defaults", manage, handleKnowledgeSeedDefaults)
+	saAPI.Delete("/assistant/knowledge/:id", manage, handleKnowledgeDelete)
+
+	saAPI.Get("/assistant/metrics", view, handleMetrics)
+	saAPI.Get("/assistant/analytics", view, handleAnalytics)
 }
