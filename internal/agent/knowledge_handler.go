@@ -90,28 +90,81 @@ func handleKnowledgeDelete(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusOK)
 }
 
-// defaultKnowledgeSeed: corpus mínimo real sobre Mistiq para que el
-// asistente no arranque sin nada que citar. Deliberadamente corto — el
-// contenido real de producto lo carga el equipo comercial desde el panel.
+// defaultKnowledgeSeed: corpus real sobre el funcionamiento de Mistiq —
+// qué hace cada módulo, cómo funciona la facturación electrónica, cómo se
+// empieza. Deliberadamente SIN precios/planes exactos acá: esos se
+// consultan en vivo con la acción commercial_lookup_plans (siempre
+// actualizados contra la BD real), duplicarlos acá los dejaría
+// desactualizados en cuanto cambie un precio. El equipo comercial puede
+// ampliar/editar cualquiera de estos documentos desde este mismo panel.
 var defaultKnowledgeSeed = []struct{ Title, Content string }{
 	{
 		Title: "Qué es Mistiq",
-		Content: "Mistiq es un sistema de gestión (ERP/POS) para negocios peruanos: punto de venta, " +
-			"facturación electrónica SUNAT, inventario, cuentas por cobrar, y un módulo especializado " +
-			"para restaurantes (comandas, mesas, delivery). Funciona en la nube, se usa desde el navegador " +
-			"y también hay una app de punto de venta para Android/escritorio.",
+		Content: "Mistiq es un sistema de gestión (ERP + punto de venta) para negocios peruanos, en la nube: " +
+			"no se instala nada, se usa desde el navegador (y hay una app de punto de venta para " +
+			"Android/escritorio para el mostrador). Cubre ventas y punto de venta, facturación electrónica " +
+			"ante SUNAT, inventario, compras, contactos/clientes, caja y bancos, cuentas por cobrar, un " +
+			"módulo especializado para restaurantes, y una tienda online (catálogo digital / ecommerce). " +
+			"Cada negocio elige qué módulos activar según su plan — no todos los planes traen todos los " +
+			"módulos.",
+	},
+	{
+		Title: "Punto de venta y ventas",
+		Content: "El punto de venta permite cobrar rápido desde el navegador o la app (Android/escritorio), " +
+			"con caja y turnos (apertura/cierre de caja, arqueo, ingresos y egresos), múltiples medios de " +
+			"pago (efectivo, tarjeta, Yape/Plin, transferencia), y emisión del comprobante electrónico en " +
+			"el mismo momento de la venta. Funciona con o sin conexión estable — las ventas quedan " +
+			"registradas y se sincronizan.",
+	},
+	{
+		Title: "Facturación electrónica SUNAT",
+		Content: "Mistiq emite boletas de venta electrónicas, facturas electrónicas, notas de crédito y " +
+			"notas de débito, y guías de remisión electrónica (GRE) — todo enviado directo a SUNAT desde el " +
+			"sistema, sin pasos manuales. Los comprobantes quedan validados y disponibles para descargar " +
+			"(PDF/XML/CDR) y reenviar al cliente por correo. Si SUNAT rechaza un comprobante o hay un " +
+			"problema de conexión con SUNAT, el sistema reintenta y avisa — el negocio no se queda sin " +
+			"poder facturar por una caída temporal del servicio de SUNAT.",
+	},
+	{
+		Title: "Inventario y compras",
+		Content: "El módulo de inventario controla stock por producto (y por variantes/presentaciones), " +
+			"alerta cuando un producto está por agotarse, y se actualiza automáticamente con cada venta y " +
+			"cada compra registrada. El módulo de compras registra las compras a proveedores, actualiza el " +
+			"costo del producto y suma el stock comprado.",
+	},
+	{
+		Title: "Módulo de restaurantes",
+		Content: "Para negocios de comida, Mistiq tiene un módulo especializado: mapa de mesas, comandas " +
+			"que van directo a cocina, control de delivery, y todo integrado con la caja y la facturación " +
+			"electrónica — la cuenta de una mesa se cobra y factura sin pasos extra. Este módulo es " +
+			"adicional al punto de venta general, pensado específicamente para restaurantes/food service.",
+	},
+	{
+		Title: "Cuentas por cobrar y caja/bancos",
+		Content: "Cuentas por cobrar lleva el control de ventas al crédito: cuánto debe cada cliente, " +
+			"vencimientos, y registro de pagos parciales. Caja y bancos centraliza el efectivo y las cuentas " +
+			"bancarias del negocio, con el detalle de ingresos y egresos — útil para saber cuánto dinero hay " +
+			"realmente disponible, más allá de lo vendido.",
+	},
+	{
+		Title: "Tienda online (catálogo digital)",
+		Content: "El módulo de ecommerce genera una tienda online conectada al mismo inventario y precios " +
+			"del sistema — un pedido hecho por internet descuenta stock igual que una venta del mostrador, " +
+			"sin llevar dos inventarios por separado.",
 	},
 	{
 		Title: "Cómo empezar",
-		Content: "Para empezar a usar Mistiq no se necesita instalar nada: se crea la cuenta con el RUC " +
-			"del negocio, se elige un plan, y en minutos queda lista para emitir boletas/facturas y " +
-			"vender. El equipo comercial ayuda con la configuración inicial (productos, series de " +
-			"comprobantes, usuarios) sin costo adicional durante el primer contacto.",
+		Content: "Para empezar a usar Mistiq no se necesita instalar nada: se crea la cuenta con el RUC del " +
+			"negocio (los datos de la empresa se validan automáticamente contra SUNAT), se elige un plan, y " +
+			"en minutos queda lista para emitir boletas/facturas y vender. El equipo comercial ayuda con la " +
+			"configuración inicial (productos, series de comprobantes, usuarios) durante el primer contacto.",
 	},
 	{
 		Title: "Soporte",
-		Content: "El soporte de Mistiq se da por WhatsApp y correo. Cualquier duda técnica o de " +
-			"facturación electrónica que el asistente no pueda resolver se deriva a un asesor humano.",
+		Content: "El soporte de Mistiq se da por WhatsApp y correo. Cualquier duda técnica o de facturación " +
+			"electrónica que este asistente no pueda resolver con confianza se deriva a un asesor humano — " +
+			"mejor derivar que arriesgarse a dar una respuesta incorrecta sobre algo tan sensible como " +
+			"facturación electrónica.",
 	},
 }
 
