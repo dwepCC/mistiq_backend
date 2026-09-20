@@ -33,12 +33,17 @@ type Assistant struct {
 	SystemPromptOverride string `gorm:"type:text" json:"system_prompt_override"`
 	PersonalityOverride  string `gorm:"type:text" json:"personality_override"`
 
-	WhatsAppNumber        string `gorm:"size:30;index" json:"whatsapp_number"`
-	WhatsAppPhoneNumberID string `gorm:"size:60" json:"whatsapp_phone_number_id"`
-	WhatsAppAccessToken   string `gorm:"type:text" json:"-"`
-	WhatsAppAppSecret     string `gorm:"size:255" json:"-"`
-	WhatsAppVerifyToken   string `gorm:"size:255" json:"-"`
-	WhatsAppTemplatesJSON string `gorm:"type:text" json:"whatsapp_templates_json"`
+	// column: explícita en las 6 — el namer de GORM parte "WhatsApp" en
+	// "whats_app" (cada transición de mayúscula, no lo trata como una sola
+	// palabra), lo que no coincide con el nombre que usa el resto del
+	// código (API JSON, config_handler.go). Fijado a propósito para que
+	// columna Go/BD/API sean el mismo nombre en todos lados.
+	WhatsAppNumber        string `gorm:"column:whatsapp_number;size:30;index" json:"whatsapp_number"`
+	WhatsAppPhoneNumberID string `gorm:"column:whatsapp_phone_number_id;size:60" json:"whatsapp_phone_number_id"`
+	WhatsAppAccessToken   string `gorm:"column:whatsapp_access_token;type:text" json:"-"`
+	WhatsAppAppSecret     string `gorm:"column:whatsapp_app_secret;size:255" json:"-"`
+	WhatsAppVerifyToken   string `gorm:"column:whatsapp_verify_token;size:255" json:"-"`
+	WhatsAppTemplatesJSON string `gorm:"column:whatsapp_templates_json;type:text" json:"whatsapp_templates_json"`
 
 	EnableTrialTenant  bool `gorm:"not null;default:false" json:"enable_trial_tenant"`
 	EnablePaidContract bool `gorm:"not null;default:false" json:"enable_paid_contract"`

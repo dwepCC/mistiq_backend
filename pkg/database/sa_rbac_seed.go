@@ -100,6 +100,9 @@ var SACentralPermissionCatalog = []saPermissionDef{
 	{Module: "ajustes", Action: "manage", Label: "Editar ajustes del sistema"},
 
 	{Module: "system", Action: "view_audit", Label: "Ver bitácora de auditoría (pantalla futura)"},
+
+	{Module: "assistant", Action: "view", Label: "Ver bandeja, conocimiento y analítica del agente comercial IA"},
+	{Module: "assistant", Action: "manage", Label: "Gestionar conversaciones, configuración y conocimiento del agente comercial IA"},
 }
 
 // saDefaultRoleDef describe un rol inicial y sus permisos ("module.action") al momento de crearse.
@@ -131,6 +134,7 @@ var SADefaultRoles = []saDefaultRoleDef{
 			// reservada a superadmin real), empresas.destroy (no existe como permiso, ver catálogo).
 			"roles.view",
 			"ajustes.view", "ajustes.manage",
+			"assistant.view", "assistant.manage",
 		},
 	},
 	{

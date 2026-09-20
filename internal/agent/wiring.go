@@ -152,6 +152,22 @@ func whatsAppProcessor(orch *orchestrator.Orchestrator, wa *whatsapp.Client) que
 	}
 }
 
+// reloadWhatsApp reconstruye las credenciales del cliente WhatsApp EN EL
+// MISMO puntero (eng.whatsapp) tras un cambio de config — así el processor
+// de la cola (que capturó el puntero al arrancar, no una copia) ve las
+// credenciales nuevas sin reiniciar el proceso ni recrear la cola.
+func reloadWhatsApp(ctx context.Context) {
+	if eng == nil || eng.whatsapp == nil {
+		return
+	}
+	fresh, err := buildWhatsApp(ctx, eng.platformAssistantID, eng.cfg)
+	if err != nil {
+		logger.L.Warn("assistant_whatsapp_reload_failed", "error", err.Error())
+		return
+	}
+	*eng.whatsapp = *fresh
+}
+
 // buildWhatsApp construye el cliente con las credenciales de la fila
 // `assistants` (por instancia) y respaldo de `.env` — mismo patrón que
 // buildLLM. Si no hay AccessToken/PhoneNumberID configurados (ni por

@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/gofiber/fiber/v3"
+import (
+	"tukifac/pkg/middleware"
+
+	"github.com/gofiber/fiber/v3"
+)
 
 // RegisterPublicRoutes monta el canal web público (sin auth, rate-limit
 // propio) bajo /public/assistant/... — llamar con `app.Group("/api")` desde
@@ -20,13 +24,28 @@ func RegisterWebhookRoutes(app fiber.Router) {
 	app.Post("/webhooks/assistant/whatsapp", handleWhatsAppReceive)
 }
 
-// RegisterRoutes monta los endpoints del panel (Fase 1: solo status +
-// playground de pruebas; bandeja/config/knowledge/analytics llegan en la
-// Fase 3). `saAPI` ya viene protegido con middleware.SuperAdminAuthAPI()
-// desde internal/superadmin/routes.go — no se agrega permiso granular
-// todavía (RequireSAPermission) porque el módulo no tiene UI real hasta la
-// Fase 3; se agrega junto con esa UI.
+// RegisterRoutes monta los endpoints del panel. `saAPI` ya viene protegido
+// con middleware.SuperAdminAuthAPI() desde internal/superadmin/routes.go;
+// acá se suma el permiso granular real del módulo ("assistant.view" para
+// lectura, "assistant.manage" para escritura — sembrados en
+// pkg/database/sa_rbac_seed.go). Fase 3: bandeja + configuración.
+// Conocimiento/analítica quedan para la Fase 6.
 func RegisterRoutes(saAPI fiber.Router) {
-	saAPI.Get("/assistant/status", handleStatus)
-	saAPI.Post("/assistant/test", handleTest)
+	view := middleware.RequireSAPermission("assistant.view")
+	manage := middleware.RequireSAPermission("assistant.manage")
+
+	saAPI.Get("/assistant/status", view, handleStatus)
+	saAPI.Post("/assistant/test", view, handleTest)
+
+	saAPI.Get("/assistant/config", view, handleConfigGet)
+	saAPI.Put("/assistant/config", manage, handleConfigUpdate)
+
+	saAPI.Get("/assistant/conversations", view, handleConversationsList)
+	saAPI.Get("/assistant/conversations/:id/messages", view, handleConversationMessages)
+	saAPI.Get("/assistant/conversations/:id/lead", view, handleConversationLead)
+	saAPI.Post("/assistant/conversations/:id/take", manage, handleConversationTake)
+	saAPI.Post("/assistant/conversations/:id/reply", manage, handleConversationReply)
+	saAPI.Post("/assistant/conversations/:id/close", manage, handleConversationClose)
+	saAPI.Post("/assistant/conversations/:id/reopen", manage, handleConversationReopen)
+	saAPI.Post("/assistant/conversations/:id/validate-payment", manage, handleConversationValidatePayment)
 }
