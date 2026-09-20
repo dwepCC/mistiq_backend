@@ -4,6 +4,7 @@ import (
 	"time"
 
 	agentpkg "tukifac/pkg/agent"
+	"tukifac/pkg/logger"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -50,7 +51,8 @@ func handleTest(c fiber.Ctx) error {
 
 	out, err := eng.orch.Handle(c.Context(), in)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "no se pudo procesar el mensaje"})
+		logger.L.Warn("assistant_test_process_failed", "error", err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "no se pudo procesar el mensaje: " + err.Error()})
 	}
 	return c.JSON(testChatResponse{Reply: out.Text, Silent: out.Silent})
 }

@@ -5,6 +5,7 @@ import (
 
 	agentpkg "tukifac/pkg/agent"
 	"tukifac/pkg/agent/memory"
+	"tukifac/pkg/logger"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -61,6 +62,7 @@ func handlePublicChat(c fiber.Ctx) error {
 
 	out, err := eng.orch.Handle(c.Context(), in)
 	if err != nil {
+		logger.L.Warn("assistant_public_chat_process_failed", "error", err.Error())
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "no se pudo procesar el mensaje"})
 	}
 
