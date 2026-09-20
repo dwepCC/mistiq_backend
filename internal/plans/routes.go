@@ -28,3 +28,11 @@ func RegisterRoutes(saAPI fiber.Router) {
 	// ".manage" (planes no tiene ".manage" en la allowlist — no hay nada de qué implicarlo).
 	saAPI.Delete("/plans/:id", middleware.RequireSAPermission("planes.destroy"), h.DeleteAPI)
 }
+
+// RegisterPublicRoutes: catálogo de planes activos sin auth, para landing/marketing — ver
+// docs/CHATBOT-AGENT-ARCHITECTURE.md-style convención de montarlo aparte de saAPI (mismo patrón
+// que internal/ecommerce.RegisterPublicRoutes y internal/agent.RegisterPublicRoutes).
+func RegisterPublicRoutes(api fiber.Router) {
+	h := handler.NewPlanHandler()
+	api.Get("/public/plans", h.ListPublicAPI)
+}

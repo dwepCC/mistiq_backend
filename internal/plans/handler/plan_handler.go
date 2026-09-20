@@ -27,6 +27,16 @@ func (h *PlanHandler) ListAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": plans})
 }
 
+// GET /api/public/plans — catálogo comercial para la landing, sin auth. Ver
+// service.PlanService.ListPublic para el DTO explícito (solo campos comerciales).
+func (h *PlanHandler) ListPublicAPI(c fiber.Ctx) error {
+	plans, err := h.svc.ListPublic()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "no se pudo cargar los planes"})
+	}
+	return c.JSON(fiber.Map{"data": plans})
+}
+
 // GET /api/superadmin/plans/:id
 func (h *PlanHandler) GetAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)

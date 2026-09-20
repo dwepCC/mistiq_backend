@@ -25,6 +25,7 @@ import (
 	"tukifac/internal/modules"
 	"tukifac/internal/payables"
 	"tukifac/internal/paymentcatalog"
+	"tukifac/internal/plans"
 	"tukifac/internal/prepayment"
 	"tukifac/internal/products"
 	"tukifac/internal/purchases"
@@ -178,6 +179,9 @@ func Setup(app *fiber.App) {
 
 	// Catálogo Digital: tienda pública (sin JWT, con tenant + módulo + suscripción activa)
 	ecommerce.RegisterPublicRoutes(app.Group("/api"))
+
+	// Planes comerciales: catálogo de planes activos para landing/marketing (sin JWT, sin tenant)
+	plans.RegisterPublicRoutes(app.Group("/api"))
 
 	// Agente comercial IA: canal de chat web público (sin JWT, sin tenant)
 	agentmod.RegisterPublicRoutes(app.Group("/api"))

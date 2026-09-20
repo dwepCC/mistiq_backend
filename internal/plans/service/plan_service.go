@@ -40,6 +40,55 @@ func (s *PlanService) List() ([]PlanWithModules, error) {
 	return result, nil
 }
 
+// PublicPlan: DTO explícito para el catálogo público (landing) — deliberadamente separado de
+// PlanWithModules/database.SaasPlan para que un campo interno agregado a futuro en el modelo no
+// se filtre automáticamente a un endpoint sin autenticación.
+type PublicPlan struct {
+	ID                    uint                 `json:"id"`
+	Name                  string               `json:"name"`
+	Description           string               `json:"description"`
+	Price                 float64              `json:"price"`
+	BillingCycle          string               `json:"billing_cycle"`
+	IsUnlimitedDocuments  bool                 `json:"is_unlimited_documents"`
+	MonthlyDocumentsLimit int                  `json:"monthly_documents_limit"`
+	MaxUsers              int                  `json:"max_users"`
+	MaxBranches           int                  `json:"max_branches"`
+	MaxProducts           int                  `json:"max_products"`
+	Modules               []string             `json:"modules"`
+	Cycles                []saas.PlanCycleView `json:"cycles"`
+}
+
+// ListPublic: catálogo de planes ACTIVOS para consumo público (landing) — filtra `Active` en
+// memoria reutilizando List() en vez de duplicar la query, ya que el volumen de planes es
+// pequeño (decenas, no miles) y esto evita mantener dos SELECT distintos sincronizados.
+func (s *PlanService) ListPublic() ([]PublicPlan, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]PublicPlan, 0, len(all))
+	for _, p := range all {
+		if !p.Active {
+			continue
+		}
+		result = append(result, PublicPlan{
+			ID:                    p.ID,
+			Name:                  p.Name,
+			Description:           p.Description,
+			Price:                 p.Price,
+			BillingCycle:          p.BillingCycle,
+			IsUnlimitedDocuments:  p.IsUnlimitedDocuments,
+			MonthlyDocumentsLimit: p.MonthlyDocumentsLimit,
+			MaxUsers:              p.MaxUsers,
+			MaxBranches:           p.MaxBranches,
+			MaxProducts:           p.MaxProducts,
+			Modules:               p.Modules,
+			Cycles:                p.Cycles,
+		})
+	}
+	return result, nil
+}
+
 func (s *PlanService) GetByID(id uint) (*PlanWithModules, error) {
 	var plan database.SaasPlan
 	if err := database.CentralDB.First(&plan, id).Error; err != nil {
