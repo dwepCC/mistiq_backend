@@ -93,6 +93,19 @@ type Config struct {
 	OpenAIEmbedModel string
 	OpenAITimeout    time.Duration
 
+	// Canal WhatsApp del agente (Fase 4) — respaldo de plataforma; la fila
+	// `assistants` en BD sobreescribe cualquiera de estos por instancia.
+	WhatsAppVerifyToken   string
+	WhatsAppAppSecret     string
+	WhatsAppAccessToken   string
+	WhatsAppPhoneNumberID string
+	WhatsAppGraphURL      string
+	WhatsAppAPIVersion    string
+
+	// Cola del agente (Redis) y rate-limit por remitente en WhatsApp.
+	AssistantQueueWorkers    int
+	AssistantRateLimitPerMin int
+
 	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. tukifac.com).
 	// Alias env: ROOT_DOMAIN (tiene prioridad sobre APP_DOMAIN).
 	AppDomain string
@@ -244,6 +257,16 @@ func Load() error {
 		OpenAIChatModel:  getEnv("OPENAI_CHAT_MODEL", ""),
 		OpenAIEmbedModel: getEnv("OPENAI_EMBED_MODEL", ""),
 		OpenAITimeout:    getEnvDuration("OPENAI_TIMEOUT", "30s"),
+
+		WhatsAppVerifyToken:   getEnv("WHATSAPP_VERIFY_TOKEN", ""),
+		WhatsAppAppSecret:     getEnv("WHATSAPP_APP_SECRET", ""),
+		WhatsAppAccessToken:   getEnv("WHATSAPP_ACCESS_TOKEN", ""),
+		WhatsAppPhoneNumberID: getEnv("WHATSAPP_PHONE_NUMBER_ID", ""),
+		WhatsAppGraphURL:      getEnv("WHATSAPP_GRAPH_URL", ""),
+		WhatsAppAPIVersion:    getEnv("WHATSAPP_API_VERSION", ""),
+
+		AssistantQueueWorkers:    getEnvInt("ASSISTANT_QUEUE_WORKERS", 2),
+		AssistantRateLimitPerMin: getEnvInt("ASSISTANT_RATE_LIMIT_PER_MIN", 15),
 
 		AppDomain:          resolveRootDomain(),
 		APIPublicURL:       strings.TrimSpace(getEnv("API_PUBLIC_URL", "")),

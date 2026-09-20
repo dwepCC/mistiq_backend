@@ -181,6 +181,9 @@ func Setup(app *fiber.App) {
 
 	// Agente comercial IA: canal de chat web público (sin JWT, sin tenant)
 	agentmod.RegisterPublicRoutes(app.Group("/api"))
+	// Agente comercial IA: webhook de WhatsApp (fuera de /api, protegido por
+	// firma HMAC propia del canal, no por JWT)
+	agentmod.RegisterWebhookRoutes(app)
 
 	// Utilidades de desarrollo
 	if config.AppConfig.IsDev() {

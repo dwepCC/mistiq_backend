@@ -12,6 +12,14 @@ func RegisterPublicRoutes(api fiber.Router) {
 	g.Get("/chat/messages", handlePublicChatMessages)
 }
 
+// RegisterWebhookRoutes monta el webhook de WhatsApp en la RAÍZ (no bajo
+// /api): Meta no manda JWT, la protección es la firma HMAC propia del
+// canal. Llamar con el *fiber.App directo desde routes/routes.go.
+func RegisterWebhookRoutes(app fiber.Router) {
+	app.Get("/webhooks/assistant/whatsapp", handleWhatsAppVerify)
+	app.Post("/webhooks/assistant/whatsapp", handleWhatsAppReceive)
+}
+
 // RegisterRoutes monta los endpoints del panel (Fase 1: solo status +
 // playground de pruebas; bandeja/config/knowledge/analytics llegan en la
 // Fase 3). `saAPI` ya viene protegido con middleware.SuperAdminAuthAPI()

@@ -1,9 +1,10 @@
 // Package agent es la capa HTTP del módulo "Assistant IA": arma el motor
 // (pkg/agent/*) con sus dependencias reales (BD central, Redis, proveedor
-// LLM) y expone los endpoints HTTP. Fase 1 (ver
+// LLM, WhatsApp) y expone los endpoints HTTP. Fases 1+4 (ver
 // docs/CHATBOT-AGENT-ARCHITECTURE.md §6.3): motor + canal web síncrono +
-// RAG + memoria, SIN acciones de negocio ni panel todavía — el catálogo de
-// acciones (pkg/agent/actions.Registry) arranca vacío a propósito.
+// canal WhatsApp (cola Redis) + RAG + memoria, SIN acciones de negocio ni
+// panel todavía — el catálogo de acciones (pkg/agent/actions.Registry)
+// arranca vacío a propósito (Fase 5).
 package agent
 
 import (
@@ -16,6 +17,7 @@ import (
 	agentpkg "tukifac/pkg/agent"
 	"tukifac/pkg/agent/actions"
 	"tukifac/pkg/agent/bizctx"
+	"tukifac/pkg/agent/channels/whatsapp"
 	"tukifac/pkg/agent/knowledge"
 	knowledgemysql "tukifac/pkg/agent/knowledge/mysql"
 	"tukifac/pkg/agent/memory"
@@ -23,6 +25,7 @@ import (
 	"tukifac/pkg/agent/providers"
 	"tukifac/pkg/agent/providers/deepseek"
 	"tukifac/pkg/agent/providers/openai"
+	"tukifac/pkg/agent/queue"
 	"tukifac/pkg/database"
 	"tukifac/pkg/logger"
 
@@ -43,6 +46,9 @@ type engine struct {
 	platformAssistantID uint
 
 	chatLimiter *sessionRateLimiter
+
+	whatsapp *whatsapp.Client
+	queue    *queue.Queue
 }
 
 var eng *engine
@@ -86,6 +92,11 @@ func Init(cfg *config.Config, rdb *redis.Client) error {
 		LLMFor:        llmFor(resolver, cfg),
 	})
 
+	waClient, err := buildWhatsApp(context.Background(), assistantID, cfg)
+	if err != nil {
+		return fmt.Errorf("agent: construir cliente WhatsApp: %w", err)
+	}
+
 	eng = &engine{
 		cfg:                 cfg,
 		resolver:            resolver,
@@ -93,20 +104,70 @@ func Init(cfg *config.Config, rdb *redis.Client) error {
 		conversations:       convStore,
 		mem:                 memStore,
 		platformAssistantID: assistantID,
-		chatLimiter:         newSessionRateLimiter(15, time.Minute), // mismo tope que WhatsApp (ASSISTANT_RATE_LIMIT_PER_MIN default)
+		chatLimiter:         newSessionRateLimiter(cfg.AssistantRateLimitPerMin, time.Minute), // mismo tope que WhatsApp
+		whatsapp:            waClient,
 	}
+
+	eng.queue = queue.New(rdb, queue.Config{
+		Workers:    cfg.AssistantQueueWorkers,
+		RatePerMin: cfg.AssistantRateLimitPerMin,
+	}, whatsAppProcessor(orch, waClient))
+	eng.queue.Start()
 
 	logger.L.Info("agent_module_initialized",
 		"assistant_id", assistantID,
 		"redis_enabled", rdb != nil,
+		"whatsapp_enabled", waClient.AccessToken != "",
 	)
 	return nil
 }
 
-// Shutdown no tiene nada que liberar en Fase 1 (sin cola/workers propios
-// todavía — eso llega con el canal WhatsApp en Fase 4). Se deja el punto
-// de extensión para no tener que tocar pkg/runtime/bootstrap.go otra vez.
-func Shutdown() {}
+// Shutdown detiene los workers de la cola de WhatsApp con gracia.
+func Shutdown() {
+	if eng != nil && eng.queue != nil {
+		eng.queue.Stop()
+	}
+}
+
+// whatsAppProcessor arma el Processor cableado a la cola: corre el
+// orquestador y, si la respuesta no es silenciosa (Silent — p. ej. un
+// humano ya tiene la conversación), la envía de vuelta por WhatsApp.
+func whatsAppProcessor(orch *orchestrator.Orchestrator, wa *whatsapp.Client) queue.Processor {
+	return func(ctx context.Context, in agentpkg.Inbound) {
+		out, err := orch.Handle(ctx, in)
+		if err != nil {
+			logger.L.Warn("assistant_whatsapp_process_failed", "error", err.Error())
+			return
+		}
+		if out.Silent || out.Text == "" {
+			return
+		}
+		if _, err := wa.Send(ctx, out); err != nil {
+			logger.L.Warn("assistant_whatsapp_send_failed", "error", err.Error())
+		}
+	}
+}
+
+// buildWhatsApp construye el cliente con las credenciales de la fila
+// `assistants` (por instancia) y respaldo de `.env` — mismo patrón que
+// buildLLM. Si no hay AccessToken/PhoneNumberID configurados (ni por
+// instancia ni por .env), el cliente igual se construye (para que
+// handleWhatsAppVerify/Receive no sean nil) pero cualquier intento real de
+// envío fallará limpio contra la API de Meta.
+func buildWhatsApp(ctx context.Context, assistantID uint, appCfg *config.Config) (*whatsapp.Client, error) {
+	var row database.Assistant
+	if err := database.CentralDB.WithContext(ctx).First(&row, assistantID).Error; err != nil {
+		return nil, fmt.Errorf("agent: leer credenciales WhatsApp: %w", err)
+	}
+	return whatsapp.New(
+		firstNonEmpty(row.WhatsAppPhoneNumberID, appCfg.WhatsAppPhoneNumberID),
+		firstNonEmpty(row.WhatsAppAccessToken, appCfg.WhatsAppAccessToken),
+		firstNonEmpty(row.WhatsAppAppSecret, appCfg.WhatsAppAppSecret),
+		firstNonEmpty(row.WhatsAppVerifyToken, appCfg.WhatsAppVerifyToken),
+		appCfg.WhatsAppGraphURL,
+		appCfg.WhatsAppAPIVersion,
+	), nil
+}
 
 // newKnowledgeRetriever construye el RAG con el embedder del proveedor
 // ACTIVO resuelto en cada llamada (no cacheado aparte: resolver.Resolve ya
