@@ -234,8 +234,15 @@ func buildLLM(c agentpkg.Config, appCfg *config.Config) providers.LLM {
 
 	switch c.LLMProvider {
 	case "deepseek":
-		fallbackKey := appCfg.OpenAIAPIKey // clave de respaldo para embeddings (DeepSeek no las expone)
-		return deepseek.New(apiKey, baseURL, model, fallbackKey, timeout)
+		// Respaldo de embeddings (DeepSeek no las expone): prioriza lo que
+		// el usuario configuró específicamente para embeddings en el panel
+		// (c.EmbedAPIKey/EmbedBaseURL/EmbedModel) — antes se ignoraba por
+		// completo y solo se miraba el .env de plataforma, así que guardar
+		// una clave de embeddings por instancia no tenía ningún efecto.
+		fallbackKey := firstNonEmpty(c.EmbedAPIKey, appCfg.OpenAIAPIKey)
+		fallbackBaseURL := firstNonEmpty(c.EmbedBaseURL, appCfg.OpenAIBaseURL)
+		fallbackEmbedModel := firstNonEmpty(c.EmbedModel, appCfg.OpenAIEmbedModel)
+		return deepseek.New(apiKey, baseURL, model, fallbackKey, fallbackBaseURL, fallbackEmbedModel, timeout)
 	default:
 		return openai.New(apiKey, baseURL, model, firstNonEmpty(c.EmbedModel, appCfg.OpenAIEmbedModel), timeout)
 	}
