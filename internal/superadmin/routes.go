@@ -1,6 +1,7 @@
 package superadmin
 
 import (
+	agentmod "tukifac/internal/agent"
 	"tukifac/internal/ajustes"
 	consultaHandler "tukifac/internal/consulta/handler"
 	exchangeRateHandler "tukifac/internal/exchangerate/handler"
@@ -43,6 +44,9 @@ func RegisterRoutes(app *fiber.App) {
 	// propósito: el auto-servicio (editar el propio nombre/email) nunca requirió permiso — el
 	// gate para editar a OTRO usuario vive dentro del handler (usuarios_central.update). Ver
 	// comentario en auth_sa_handler.go.
+	// Agente comercial IA — Fase 1: solo status + playground de pruebas.
+	agentmod.RegisterRoutes(saAPI)
+
 	saAPI.Get("/users", middleware.RequireSAPermission("usuarios_central.view"), authHandler.ListUsersAPI)
 	saAPI.Post("/users", middleware.RequireSAPermission("usuarios_central.create"), authHandler.CreateUserAPI)
 	saAPI.Put("/users/:id", authHandler.UpdateUserAPI)

@@ -84,6 +84,15 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string
 
+	// Agente comercial IA (pkg/agent) — proveedor LLM por defecto/respaldo;
+	// la fila `assistants` en BD puede sobreescribir cualquiera de estos por
+	// instancia (ver internal/agent/wiring.go).
+	OpenAIAPIKey     string
+	OpenAIBaseURL    string
+	OpenAIChatModel  string
+	OpenAIEmbedModel string
+	OpenAITimeout    time.Duration
+
 	// Dominio raíz de tenants: empresa1.APP_DOMAIN (ej. tukifac.com).
 	// Alias env: ROOT_DOMAIN (tiene prioridad sobre APP_DOMAIN).
 	AppDomain string
@@ -111,9 +120,9 @@ type Config struct {
 	IdleTimeout    time.Duration
 
 	// Facturación electrónica externa
-	FacturadorBaseURL          string
-	FacturadorToken            string
-	FiscalQueueWorkers         int
+	FacturadorBaseURL  string
+	FacturadorToken    string
+	FiscalQueueWorkers int
 	// SunatMaxBackdateDays días calendario hacia atrás admitidos al reemitir un
 	// comprobante con otra fecha de emisión. Configurable porque el plazo lo fija
 	// SUNAT y ha cambiado con el tiempo.
@@ -229,6 +238,12 @@ func Load() error {
 		SMTPUser:     getEnv("SMTP_USER", ""),
 		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
 		SMTPFrom:     getEnv("SMTP_FROM", "noreply@tukifac.com"),
+
+		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
+		OpenAIBaseURL:    getEnv("OPENAI_BASE_URL", ""),
+		OpenAIChatModel:  getEnv("OPENAI_CHAT_MODEL", ""),
+		OpenAIEmbedModel: getEnv("OPENAI_EMBED_MODEL", ""),
+		OpenAITimeout:    getEnvDuration("OPENAI_TIMEOUT", "30s"),
 
 		AppDomain:          resolveRootDomain(),
 		APIPublicURL:       strings.TrimSpace(getEnv("API_PUBLIC_URL", "")),

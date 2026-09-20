@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"tukifac/config"
+	agentmod "tukifac/internal/agent"
 	"tukifac/internal/auth"
 	authHandler "tukifac/internal/auth/handler"
 	"tukifac/internal/billing"
@@ -177,6 +178,9 @@ func Setup(app *fiber.App) {
 
 	// Catálogo Digital: tienda pública (sin JWT, con tenant + módulo + suscripción activa)
 	ecommerce.RegisterPublicRoutes(app.Group("/api"))
+
+	// Agente comercial IA: canal de chat web público (sin JWT, sin tenant)
+	agentmod.RegisterPublicRoutes(app.Group("/api"))
 
 	// Utilidades de desarrollo
 	if config.AppConfig.IsDev() {

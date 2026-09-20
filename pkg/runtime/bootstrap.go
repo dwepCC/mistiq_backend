@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"tukifac/config"
+	agentmod "tukifac/internal/agent"
 	billworker "tukifac/internal/billing/worker"
 	fiscalworker "tukifac/internal/fiscal/worker"
 	"tukifac/pkg/billingevents"
@@ -34,6 +35,10 @@ func Init(cfg *config.Config) error {
 	rdb := tenantcache.InitRedis(cfg)
 	tenantcache.Init(cfg, rdb)
 	billingevents.Init(rdb)
+
+	if err := agentmod.Init(cfg, rdb); err != nil {
+		return err
+	}
 
 	if cfg.FacturadorBaseURL != "" && cfg.FacturadorToken != "" {
 		fiscalclient.Init(cfg.FacturadorBaseURL, cfg.FacturadorToken)
@@ -71,6 +76,7 @@ func Shutdown() {
 	billingqueue.Stop()
 	fiscalqueue.Stop()
 	billingevents.Shutdown()
+	agentmod.Shutdown()
 	database.ShutdownTenantDBManager()
 	_ = tenantcache.Close()
 }
