@@ -105,6 +105,11 @@ var TenantMigrations = []TenantMigration{
 	V131BackfillModulesEcommerceFleetPermissions{},
 	V132PermissionCatalogRedesign{},
 	V133TenantContactIsDefaultWalkIn{},
+	V134EcommerceOrderFields{},
+	V135EcommerceOrderStatusExpand{},
+	V136EcommerceOrderItems{},
+	V137EcommerceOrderStatusHistory{},
+	V138EcommerceOrdersRBACV2{},
 }
 
 // ByVersion mapa versión → migración.

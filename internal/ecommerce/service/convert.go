@@ -106,8 +106,8 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 		return nil, errors.New("target inválido: use nota_venta, 01 o 03")
 	}
 
-	var items []OrderItemInput
-	if err := json.Unmarshal([]byte(order.ItemsJSON), &items); err != nil || len(items) == 0 {
+	items, err := loadOrderItems(s.db, order)
+	if err != nil || len(items) == 0 {
 		return nil, errors.New("el pedido no tiene productos válidos")
 	}
 
@@ -216,14 +216,45 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 		return nil, err
 	}
 
+	// NO se toca order.Status: Pedido y Venta son ciclos de vida independientes (Contrato v2 §4).
+	// La conversión puede ocurrir en cualquier punto desde CONFIRMADO en adelante, sin importar el
+	// estado de preparación/despacho del pedido — antes esto forzaba status="cerrado", cerrando de
+	// facto el pedido en el momento de facturar aunque todavía no se hubiera ni preparado.
 	now := time.Now()
 	if err := s.db.Model(&order).Updates(map[string]interface{}{
 		"converted_sale_id": sale.ID,
 		"converted_at":      now,
-		"status":            "cerrado",
 	}).Error; err != nil {
 		return sale, err
 	}
 
 	return sale, nil
+}
+
+// loadOrderItems ítems del pedido para convertir a venta: prioriza TenantEcommerceOrderItem (fuente
+// normalizada desde la Fase 1) y cae a ItemsJSON solo para pedidos que no tengan filas ahí (JSON
+// corrupto/vacío en el backfill histórico, ver v136_ecommerce_order_items.go) — nunca deja de
+// funcionar para un pedido legacy.
+func loadOrderItems(db *gorm.DB, order database.TenantEcommerceOrder) ([]OrderItemInput, error) {
+	var rows []database.TenantEcommerceOrderItem
+	if err := db.Where("order_id = ?", order.ID).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) > 0 {
+		items := make([]OrderItemInput, len(rows))
+		for i, r := range rows {
+			items[i] = OrderItemInput{
+				ProductID: r.ProductID,
+				Name:      r.Name,
+				Quantity:  r.Quantity,
+				UnitPrice: r.UnitPrice,
+			}
+		}
+		return items, nil
+	}
+	var items []OrderItemInput
+	if err := json.Unmarshal([]byte(order.ItemsJSON), &items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

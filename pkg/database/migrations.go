@@ -1067,21 +1067,92 @@ type TenantEcommerceSlider struct {
 }
 
 // TenantEcommerceOrder registro del pedido armado en la tienda pública. El checkout real ocurre
-// por WhatsApp (no hay pasarela de pago); esta fila es solo el historial/seguimiento interno.
+// por WhatsApp (no hay pasarela de pago); esta fila es el registro oficial del pedido dentro de
+// Mistiq — el mensaje de WhatsApp es solo el canal, no el sistema de registro (Contrato ecommerce
+// v2, docs/ECOMMERCE-EVOLUTION-CONTRACT.md).
+//
+// Status: ciclo de vida propio del pedido, INDEPENDIENTE de si ya se convirtió a venta —
+// PENDIENTE | CONFIRMADO | EN_PREPARACION | EMPAQUETADO | LISTO_PARA_DESPACHO | DESPACHADO |
+// ENTREGADO | CANCELADO | RECHAZADO | DEVUELTO. Ver internal/ecommerce/service/order_status.go
+// para las transiciones válidas y el permiso que exige cada una. Pedidos creados antes de la
+// migración v135 tenían el enum plano histórico (nuevo|atendido|cerrado|cancelado), remapeado por
+// esa misma migración — no queda ningún pedido con el valor viejo.
 type TenantEcommerceOrder struct {
-	ID            uint    `gorm:"primaryKey" json:"id"`
-	CustomerName  string  `gorm:"size:150" json:"customer_name"`
-	CustomerPhone string  `gorm:"size:30" json:"customer_phone"`
-	ItemsJSON     string  `gorm:"type:text;not null" json:"items_json"`
-	Total         float64 `gorm:"type:decimal(15,2);not null" json:"total"`
-	Status        string  `gorm:"size:20;default:'nuevo';index" json:"status"` // nuevo | atendido | cerrado | cancelado
-	Notes         string  `gorm:"type:text" json:"notes"`
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	CustomerName  string `gorm:"size:150" json:"customer_name"`
+	CustomerPhone string `gorm:"size:30" json:"customer_phone"`
+	// CustomerAccountID: cuenta del comprador final si hizo login (Fase 4). nil = pedido de
+	// invitado — el checkout de invitado sigue siendo válido, no se fuerza cuenta.
+	CustomerAccountID *uint `gorm:"index" json:"customer_account_id"`
+	// ContactID: TenantContact vinculado (Fase 4/checkout con cuenta, o al convertir a venta).
+	ContactID *uint `gorm:"index" json:"contact_id"`
+	// BranchID: sucursal de preparación. nil hasta que el pedido se confirma (transición
+	// PENDIENTE→CONFIRMADO) — el pedido nace sin sucursal, el cliente no la elige.
+	BranchID *uint `gorm:"index" json:"branch_id"`
+	// ItemsJSON: formato histórico ([]OrderItemInput serializado). Se sigue escribiendo en cada
+	// pedido nuevo (dual-write) porque OrderPrintDataAPI/BuildPrintDataForOrder y el panel actual
+	// todavía leen de acá — la fuente normalizada es TenantEcommerceOrderItem, pero este campo NO
+	// se retira mientras algo lo siga leyendo. Ver TenantEcommerceOrderItem.
+	ItemsJSON string  `gorm:"type:text;not null" json:"items_json"`
+	Subtotal  float64 `gorm:"type:decimal(15,2);default:0" json:"subtotal"`
+	Total     float64 `gorm:"type:decimal(15,2);not null" json:"total"`
+	// DeliveryMethod: RECOJO_TIENDA | ENVIO_DOMICILIO. Vacío hasta que el checkout lo capture
+	// (Fase 3) — ningún flujo actual lo asigna todavía.
+	DeliveryMethod string `gorm:"size:30" json:"delivery_method"`
+	// DeliveryAddressID: FK a TenantEcommerceCustomerAddress (Fase 4). Para invitados la
+	// dirección se guardará como snapshot en Guest* en vez de esta FK (Fase 3).
+	DeliveryAddressID *uint  `gorm:"index" json:"delivery_address_id"`
+	GuestAddressLine  string `gorm:"size:255" json:"guest_address_line"`
+	GuestReference    string `gorm:"size:255" json:"guest_reference"`
+	GuestUbigeo       string `gorm:"size:6" json:"guest_ubigeo"`
+	// PaymentStatus: marcador arquitectónico para cuando exista pasarela de pago — inerte hoy.
+	// Fijo en NO_APLICA al crear el pedido; el cliente público no puede enviarlo ni modificarlo
+	// (CreateOrderInput no expone este campo). Sin pagos/webhooks/reservas en esta fase.
+	PaymentStatus string `gorm:"size:20;default:'NO_APLICA'" json:"payment_status"`
+	Status        string `gorm:"size:20;default:'PENDIENTE';index" json:"status"`
+	Notes         string `gorm:"type:text" json:"notes"`
 	// ConvertedSaleID: cuando el pedido se convierte en una venta real (nota de venta/boleta/
-	// factura) desde el panel. nil = todavía no convertido.
+	// factura) desde el panel. nil = todavía no convertido. La conversión NO cambia Status — son
+	// ciclos de vida independientes (Contrato v2 §4): un pedido puede convertirse en cualquier
+	// punto desde CONFIRMADO en adelante, sin importar su estado de preparación/despacho.
 	ConvertedSaleID *uint      `gorm:"index" json:"converted_sale_id"`
 	ConvertedAt     *time.Time `json:"converted_at"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// TenantEcommerceOrderItem línea normalizada del pedido — reemplaza gradualmente a ItemsJSON
+// (que se sigue escribiendo en paralelo, ver comentario en TenantEcommerceOrder). Permite mostrar
+// variantes/presentación por línea al almacenero (Fase 7) sin deserializar JSON, pero NO lleva
+// picked_quantity ni fulfillment_status: en esta fase la preparación es por pedido completo, no
+// por línea (Contrato v2 §1.2) — no hay caso de uso real hoy que justifique picking parcial
+// persistente, agregarlo ahora violaría "no agregues campos porque aparecieron en el brief".
+type TenantEcommerceOrderItem struct {
+	ID        uint `gorm:"primaryKey" json:"id"`
+	OrderID   uint `gorm:"not null;index" json:"order_id"`
+	ProductID uint `gorm:"not null;index" json:"product_id"`
+	// PresentationID: TenantProductPresentation si el producto tiene variantes (talla/color vía
+	// nombre compuesto, Contrato v2 §1.8). nil si el producto no tiene presentaciones.
+	PresentationID *uint     `gorm:"index" json:"presentation_id"`
+	Name           string    `gorm:"size:255;not null" json:"name"`
+	Quantity       float64   `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	UnitPrice      float64   `gorm:"type:decimal(15,2);not null" json:"unit_price"`
+	Subtotal       float64   `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// TenantEcommerceOrderStatusHistory bitácora de transiciones de TenantEcommerceOrder.Status —
+// responde "¿dónde está este pedido?" (Contrato v2 §11). Empieza a llenarse desde la Fase 1 en
+// adelante; pedidos históricos no tienen entradas retroactivas (no hay forma de reconstruir
+// timestamps reales de transiciones que nunca se registraron).
+type TenantEcommerceOrderStatusHistory struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	OrderID    uint      `gorm:"not null;index" json:"order_id"`
+	FromStatus string    `gorm:"size:20;not null" json:"from_status"`
+	ToStatus   string    `gorm:"size:20;not null" json:"to_status"`
+	UserID     *uint     `json:"user_id"`
+	Notes      string    `gorm:"type:text" json:"notes"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // TenantProductSerial rastrea números de serie individuales por producto y sucursal.

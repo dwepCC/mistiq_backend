@@ -315,18 +315,48 @@ func parseOrderIssueDate(bodyDate string) time.Time {
 	return fallback
 }
 
+// UpdateOrderStatusAPI ejecuta una transición del pedido (Contrato v2 §5/§6.2). El mismo endpoint
+// sirve distintos roles (confirmar, preparar, despachar, devolver...) según la transición pedida
+// en el body — por eso la ruta solo exige un permiso "de entrada" (ver routes.go) y ACÁ se valida
+// el permiso ESPECÍFICO que exige esa transición puntual, nunca confiando en que el frontend solo
+// muestre el botón correcto.
 func (h *EcommerceHandler) UpdateOrderStatusAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	var body struct {
-		Status string `json:"status"`
+		Status   string `json:"status"`
+		Notes    string `json:"notes"`
+		BranchID *uint  `json:"branch_id"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
-	if err := service.NewEcommerceService(db(c)).UpdateOrderStatus(uint(id), body.Status); err != nil {
+	svc := service.NewEcommerceService(db(c))
+	order, err := svc.GetOrder(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "pedido no encontrado"})
+	}
+	newStatus := strings.ToUpper(strings.TrimSpace(body.Status))
+	transition, ok := service.FindOrderTransition(order.Status, newStatus)
+	if !ok {
+		return c.Status(422).JSON(fiber.Map{
+			"error": fmt.Sprintf("no se puede pasar de %s a %s", order.Status, newStatus),
+		})
+	}
+	if !hasEcommercePermission(c, transition.Permission) {
+		return c.Status(403).JSON(fiber.Map{
+			"error":      "no tienes permiso para esta transición",
+			"permission": transition.Permission,
+		})
+	}
+	if err := svc.UpdateOrderStatus(uint(id), service.UpdateOrderStatusInput{
+		NewStatus: newStatus,
+		UserID:    orderUserID(c),
+		Notes:     body.Notes,
+		BranchID:  body.BranchID,
+	}); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

@@ -38,6 +38,8 @@ func ApplyBaselineSchema(db *gorm.DB) error {
 		&TenantEcommerceSettings{},
 		&TenantEcommerceSlider{},
 		&TenantEcommerceOrder{},
+		&TenantEcommerceOrderItem{},
+		&TenantEcommerceOrderStatusHistory{},
 		&TenantSale{},
 		&TenantSaleItem{},
 		&TenantInvoice{},

@@ -202,7 +202,18 @@ func (s *RoleService) SeedPermissions() error {
 		{Module: "modules", Action: "manage", Label: "Activar/desactivar módulos"},
 		{Module: "ecommerce", Action: "view", Label: "Ver configuración de tienda virtual"},
 		{Module: "ecommerce", Action: "manage", Label: "Configurar tienda virtual"},
-		{Module: "ecommerce", Action: "orders", Label: "Gestionar pedidos web"},
+		// "ecommerce.orders" (permiso único e indiferenciado) queda DEPRECADO: ya no se ofrece acá
+		// para tenants nuevos (Contrato ecommerce v2 §7/§17, docs/ECOMMERCE-EVOLUTION-CONTRACT.md).
+		// Sigue existiendo en el catálogo de tenants que ya lo tenían de antes (esta lista solo
+		// controla qué se siembra para tenants NUEVOS vía FirstOrCreate — no borra filas
+		// existentes) y se retiraría, si acaso, en una migración de limpieza independiente y
+		// posterior a una auditoría de uso real, no acá.
+		{Module: "ecommerce", Action: "orders_view", Label: "Ver pedidos web"},
+		{Module: "ecommerce", Action: "orders_prepare", Label: "Preparar pedidos web (picking/empaquetado)"},
+		{Module: "ecommerce", Action: "orders_manage", Label: "Confirmar, cancelar y gestionar pedidos web"},
+		{Module: "ecommerce", Action: "orders_convert", Label: "Convertir pedidos web a venta"},
+		{Module: "ecommerce", Action: "orders_dispatch", Label: "Despachar pedidos web"},
+		{Module: "ecommerce", Action: "orders_return", Label: "Registrar devoluciones de pedidos web"},
 		{Module: "fleet", Action: "view", Label: "Ver transportistas, conductores y vehículos"},
 		{Module: "fleet", Action: "manage", Label: "Gestionar transportistas, conductores y vehículos"},
 		{Module: "subscription", Action: "view", Label: "Ver suscripción y facturación de Mistiq"},
@@ -247,6 +258,11 @@ var defaultRolePermissions = map[string][][2]string{
 		{"cashbank", "view"}, {"cashbank", "arqueo"},
 		{"memberships", "view"},
 		{"subscription", "view"},
+		// Gestión completa de pedidos web (Contrato v2 §7): confirmar, preparar, convertir,
+		// despachar y — a diferencia de Vendedor — devolver (DEVUELTO restringido a
+		// Administrador/Supervisor, punto 4 aprobado).
+		{"ecommerce", "orders_view"}, {"ecommerce", "orders_manage"}, {"ecommerce", "orders_prepare"},
+		{"ecommerce", "orders_convert"}, {"ecommerce", "orders_dispatch"}, {"ecommerce", "orders_return"},
 	},
 	"Cajero": {
 		{"dashboard", "view"},
@@ -267,6 +283,9 @@ var defaultRolePermissions = map[string][][2]string{
 		{"receivables", "view"}, {"receivables", "collect"},
 		{"memberships", "view"}, {"memberships", "create"}, {"memberships", "generate_sale"},
 		{"cashbank", "view"},
+		// Consultar, confirmar, gestionar y convertir pedidos web — SIN despachar ni devolver
+		// (Contrato v2 §7, matriz de roles aprobada).
+		{"ecommerce", "orders_view"}, {"ecommerce", "orders_manage"}, {"ecommerce", "orders_convert"},
 	},
 	"Almacenero": {
 		{"dashboard", "view"},
@@ -277,6 +296,9 @@ var defaultRolePermissions = map[string][][2]string{
 		{"inventory", "transfer"}, {"inventory", "confirm_transfer"}, {"inventory", "cancel_transfer"},
 		{"inventory", "adjust"}, {"inventory", "import_adjustment"},
 		{"purchases", "view"}, {"purchases", "create"},
+		// Ver y preparar pedidos web — SIN convertir a venta, cancelar, devolver ni modificar
+		// información comercial (Contrato v2 §7, punto 3 aprobado explícitamente).
+		{"ecommerce", "orders_view"}, {"ecommerce", "orders_prepare"},
 	},
 	"Contador": {
 		{"dashboard", "view"},

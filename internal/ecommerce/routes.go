@@ -10,15 +10,27 @@ import (
 // RegisterRoutes rutas de administración (autenticadas, dentro de Tukifac). Cada una exige el
 // módulo "ecommerce" habilitado en el plan del tenant — mismo mecanismo que usa "billing".
 //
-// ecommerce.{view,manage} gatea la CONFIGURACIÓN de la tienda (ajustes, logo, banners) —
-// ecommerce.orders gatea los PEDIDOS WEB, un rol de logística/ventas que solo debe atender
-// pedidos no necesita poder tocar el diseño de la tienda.
+// ecommerce.{view,manage} gatea la CONFIGURACIÓN de la tienda (ajustes, logo, banners).
+//
+// Pedidos web: RBAC granular por responsabilidad (Contrato ecommerce v2 §7,
+// docs/ECOMMERCE-EVOLUTION-CONTRACT.md) — reemplaza el permiso único "ecommerce.orders"
+// (deprecado, se mantiene solo por compatibilidad, ver v138_ecommerce_orders_rbac_v2.go), que no
+// permitía distinguir "solo preparar" (Almacenero) de "puede despachar/convertir/devolver"
+// (Vendedor/Supervisor). GET/print-data exigen orders_view; convertir exige orders_convert; la
+// transición de estado (PUT status) exige AL MENOS uno de los permisos de gestión de pedidos como
+// filtro de entrada, y el handler valida ADEMÁS el permiso específico de la transición pedida
+// (ver UpdateOrderStatusAPI) porque un mismo endpoint sirve confirmar/preparar/despachar/devolver.
 func RegisterRoutes(api fiber.Router) {
 	h := handler.NewEcommerceHandler()
 	mod := middleware.RequireModule("ecommerce")
 	view := middleware.RequirePermission("ecommerce.view")
 	manage := middleware.RequirePermission("ecommerce.manage")
-	orders := middleware.RequirePermission("ecommerce.orders")
+	ordersView := middleware.RequirePermission("ecommerce.orders_view")
+	ordersConvert := middleware.RequirePermission("ecommerce.orders_convert")
+	ordersTransition := middleware.RequireAnyPermission(
+		"ecommerce.orders_manage", "ecommerce.orders_prepare",
+		"ecommerce.orders_dispatch", "ecommerce.orders_return",
+	)
 
 	api.Get("/ecommerce/settings", mod, view, h.GetSettingsAPI)
 	api.Put("/ecommerce/settings", mod, manage, h.UpdateSettingsAPI)
@@ -31,10 +43,10 @@ func RegisterRoutes(api fiber.Router) {
 	api.Delete("/ecommerce/sliders/:id", mod, manage, h.DeleteSliderAPI)
 	api.Post("/ecommerce/sliders/reorder", mod, manage, h.ReorderSlidersAPI)
 
-	api.Get("/ecommerce/orders", mod, orders, h.ListOrdersAPI)
-	api.Get("/ecommerce/orders/:id/print-data", mod, orders, h.OrderPrintDataAPI)
-	api.Put("/ecommerce/orders/:id/status", mod, orders, h.UpdateOrderStatusAPI)
-	api.Post("/ecommerce/orders/:id/convert", mod, orders, h.ConvertOrderAPI)
+	api.Get("/ecommerce/orders", mod, ordersView, h.ListOrdersAPI)
+	api.Get("/ecommerce/orders/:id/print-data", mod, ordersView, h.OrderPrintDataAPI)
+	api.Put("/ecommerce/orders/:id/status", mod, ordersTransition, h.UpdateOrderStatusAPI)
+	api.Post("/ecommerce/orders/:id/convert", mod, ordersConvert, h.ConvertOrderAPI)
 }
 
 // RegisterPublicRoutes rutas de la tienda pública (sin JWT), resueltas por tenant vía

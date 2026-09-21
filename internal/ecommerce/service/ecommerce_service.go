@@ -334,14 +334,42 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 	order := &database.TenantEcommerceOrder{
 		CustomerName:  strings.TrimSpace(input.CustomerName),
 		CustomerPhone: strings.TrimSpace(input.CustomerPhone),
-		ItemsJSON:     string(itemsJSON),
+		ItemsJSON:     string(itemsJSON), // dual-write: se sigue llenando, ver comentario en el modelo
+		Subtotal:      total,             // sin descuentos/impuestos a nivel de pedido todavía
 		Total:         total,
-		Status:        "nuevo",
+		// PaymentStatus NO se toma de input (CreateOrderInput no lo expone): el cliente público no
+		// puede enviarlo ni modificarlo. Fijo en NO_APLICA mientras no exista pasarela de pago.
+		PaymentStatus: "NO_APLICA",
+		Status:        OrderStatusPendiente,
 	}
-	if err := s.db.Create(order).Error; err != nil {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(order).Error; err != nil {
+			return err
+		}
+		items := make([]database.TenantEcommerceOrderItem, 0, len(input.Items))
+		for _, it := range input.Items {
+			items = append(items, database.TenantEcommerceOrderItem{
+				OrderID:   order.ID,
+				ProductID: it.ProductID,
+				Name:      it.Name,
+				Quantity:  it.Quantity,
+				UnitPrice: it.UnitPrice,
+				Subtotal:  it.Quantity * it.UnitPrice,
+			})
+		}
+		return tx.Create(&items).Error
+	}); err != nil {
 		return nil, err
 	}
 	return order, nil
+}
+
+func (s *EcommerceService) GetOrder(id uint) (*database.TenantEcommerceOrder, error) {
+	var order database.TenantEcommerceOrder
+	if err := s.db.First(&order, id).Error; err != nil {
+		return nil, fmt.Errorf("pedido no encontrado")
+	}
+	return &order, nil
 }
 
 func (s *EcommerceService) ListOrders(status string, limit int) ([]database.TenantEcommerceOrder, error) {
@@ -357,11 +385,53 @@ func (s *EcommerceService) ListOrders(status string, limit int) ([]database.Tena
 	return rows, err
 }
 
-var validOrderStatuses = map[string]bool{"nuevo": true, "atendido": true, "cerrado": true, "cancelado": true}
+// UpdateOrderStatusInput ver Contrato v2 §5/§6.2. BranchID: solo se aplica en la transición
+// PENDIENTE→CONFIRMADO y solo si el pedido no tenía sucursal todavía (Contrato v2 §1.1).
+type UpdateOrderStatusInput struct {
+	NewStatus string
+	UserID    uint
+	Notes     string
+	BranchID  *uint
+}
 
-func (s *EcommerceService) UpdateOrderStatus(id uint, status string) error {
-	if !validOrderStatuses[status] {
-		return fmt.Errorf("estado inválido")
+// UpdateOrderStatus valida la transición contra orderTransitions (order_status.go) y la registra
+// en TenantEcommerceOrderStatusHistory. La verificación de PERMISO específico de la transición
+// (qué exige orderTransitions[i].Permission) es responsabilidad del handler, que conoce los claims
+// del usuario autenticado — este método revalida solo la transición en sí (defensa en profundidad:
+// nunca confía en que el caller ya la validó).
+func (s *EcommerceService) UpdateOrderStatus(id uint, input UpdateOrderStatusInput) error {
+	var order database.TenantEcommerceOrder
+	if err := s.db.First(&order, id).Error; err != nil {
+		return fmt.Errorf("pedido no encontrado")
 	}
-	return s.db.Model(&database.TenantEcommerceOrder{}).Where("id = ?", id).Update("status", status).Error
+	newStatus := strings.ToUpper(strings.TrimSpace(input.NewStatus))
+	if !validOrderStatuses[newStatus] {
+		return fmt.Errorf("estado inválido: %s", newStatus)
+	}
+	if _, ok := FindOrderTransition(order.Status, newStatus); !ok {
+		return fmt.Errorf("no se puede pasar de %s a %s", order.Status, newStatus)
+	}
+	if requiresReasonNotes(newStatus) && strings.TrimSpace(input.Notes) == "" {
+		return fmt.Errorf("indica el motivo")
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		updates := map[string]interface{}{"status": newStatus}
+		if newStatus == OrderStatusConfirmado && order.BranchID == nil && input.BranchID != nil {
+			updates["branch_id"] = *input.BranchID
+		}
+		if err := tx.Model(&database.TenantEcommerceOrder{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		var userID *uint
+		if input.UserID > 0 {
+			userID = &input.UserID
+		}
+		return tx.Create(&database.TenantEcommerceOrderStatusHistory{
+			OrderID:    id,
+			FromStatus: order.Status,
+			ToStatus:   newStatus,
+			UserID:     userID,
+			Notes:      strings.TrimSpace(input.Notes),
+		}).Error
+	})
 }
