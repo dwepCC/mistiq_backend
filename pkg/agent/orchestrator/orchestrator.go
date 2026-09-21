@@ -263,7 +263,11 @@ func isBareGreeting(text string) bool {
 	return bareGreetings[norm]
 }
 
+// bareGreetingReply: primera interacción real del visitante — acá va la divulgación obligatoria
+// de IA (EU AI Act, art. 50: debe darse "a más tardar en el momento de la primera interacción",
+// de forma clara y perceptible, no oculta en términos y condiciones ni implícita en un nombre
+// ambiguo como "asistente"). Aplica igual si el visitante nunca pregunta si es un bot.
 func bareGreetingReply(cfg agentpkg.Config) string {
 	name := firstNonEmpty(cfg.Name, "Mistiq")
-	return fmt.Sprintf("¡Hola! Soy el asesor comercial de %s 👋 ¿En qué te puedo ayudar?", name)
+	return fmt.Sprintf("¡Hola! Soy Misti, el asistente de inteligencia artificial de %s 👋 ¿En qué te puedo ayudar?", name)
 }

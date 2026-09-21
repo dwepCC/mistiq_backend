@@ -51,7 +51,7 @@ func renderFirstTurn(in Input) string {
 	if !in.IsFirstTurn {
 		return ""
 	}
-	return "Es el primer mensaje real de esta conversación (no un saludo simple): preséntate brevemente en una línea como parte de tu respuesta, sin que suene a plantilla."
+	return "Es el primer mensaje real de esta conversación (no un saludo simple): en una línea, como parte natural de tu respuesta (sin que suene a plantilla), deja claro que te llamas Misti y que eres un asistente de inteligencia artificial — es obligatorio decirlo en esta primera interacción, no opcional ni solo si preguntan."
 }
 
 func renderOutreach(in Input) string {
