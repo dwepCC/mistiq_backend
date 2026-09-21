@@ -47,4 +47,7 @@ func RegisterPublicRoutes(app fiber.Router) {
 	g.Get("/price-bounds", h.PublicPriceBoundsAPI)
 	g.Get("/products", h.PublicProductsAPI)
 	g.Post("/orders", h.CreatePublicOrderAPI)
+	// Meta tags reales para crawlers (WhatsApp/Facebook/Twitter) — ver PublicPreviewAPI.
+	// Nginx reenvía acá SOLO peticiones de bots detectados por User-Agent.
+	g.Get("/preview", h.PublicPreviewAPI)
 }

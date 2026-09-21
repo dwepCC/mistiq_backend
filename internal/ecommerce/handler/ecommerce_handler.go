@@ -2,12 +2,14 @@ package handler
 
 import (
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"tukifac/config"
 	"tukifac/internal/ecommerce/service"
 	salessvc "tukifac/internal/sales/service"
 	"tukifac/pkg/database"
@@ -371,6 +373,79 @@ func (h *EcommerceHandler) PublicPriceBoundsAPI(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"min": min, "max": max})
+}
+
+// PublicPreviewAPI: HTML mínimo con meta tags Open Graph reales del tenant (nombre, descripción,
+// logo). Existe SOLO para crawlers de redes sociales (WhatsApp/Facebook/Twitter) — Nginx detecta
+// su User-Agent y reenvía acá en vez de servir el SPA estático, cuyo index.html es el mismo
+// archivo para todos los tenants y nunca puede tener meta tags dinámicas (los crawlers no
+// ejecutan JS). Un visitante real nunca llega a esta ruta.
+func (h *EcommerceHandler) PublicPreviewAPI(c fiber.Ctx) error {
+	svc := service.NewEcommerceService(db(c))
+	settings, err := svc.GetSettings()
+	if err != nil {
+		return c.Status(500).SendString("error interno")
+	}
+
+	title := strings.TrimSpace(settings.StoreName)
+	if title == "" {
+		title = "Catálogo virtual"
+	}
+	description := strings.TrimSpace(settings.Description)
+	if description == "" {
+		description = strings.TrimSpace(settings.Tagline)
+	}
+	if description == "" {
+		description = "Explora el catálogo y haz tu pedido directo por WhatsApp."
+	}
+
+	pageURL := fmt.Sprintf("%s://%s%s", c.Protocol(), c.Hostname(), c.OriginalURL())
+	imageURL := ""
+	if settings.LogoURL != "" {
+		imageURL = config.AppConfig.APIPublicURL + settings.LogoURL
+	}
+
+	c.Set("Content-Type", "text/html; charset=utf-8")
+	return c.SendString(buildPreviewHTML(previewMeta{
+		Title:       title,
+		Description: description,
+		URL:         pageURL,
+		Image:       imageURL,
+	}))
+}
+
+type previewMeta struct {
+	Title       string
+	Description string
+	URL         string
+	Image       string
+}
+
+func buildPreviewHTML(m previewMeta) string {
+	esc := html.EscapeString
+	imageTag := ""
+	if m.Image != "" {
+		imageTag = fmt.Sprintf(`
+    <meta property="og:image" content="%s">
+    <meta name="twitter:image" content="%s">`, esc(m.Image), esc(m.Image))
+	}
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>%s</title>
+<meta name="description" content="%s">
+<meta property="og:type" content="website">
+<meta property="og:title" content="%s">
+<meta property="og:description" content="%s">
+<meta property="og:url" content="%s">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="%s">
+<meta name="twitter:description" content="%s">%s
+<meta http-equiv="refresh" content="0; url=%s">
+</head>
+<body></body>
+</html>`, esc(m.Title), esc(m.Description), esc(m.Title), esc(m.Description), esc(m.URL), esc(m.Title), esc(m.Description), imageTag, esc(m.URL))
 }
 
 func (h *EcommerceHandler) PublicProductsAPI(c fiber.Ctx) error {
