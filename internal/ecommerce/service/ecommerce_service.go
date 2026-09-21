@@ -418,6 +418,18 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 		return nil, nil, fmt.Errorf("método de entrega inválido")
 	}
 	hasAuthenticatedAddress := input.DeliveryAddressID != nil && *input.DeliveryAddressID > 0
+	if hasAuthenticatedAddress {
+		// La dirección debe pertenecer al cliente autenticado — nunca se confía en el
+		// delivery_address_id "porque sí": si CustomerAccountID no viene (no debería poder pasar,
+		// el handler solo lo llena desde el token, nunca del body) o la dirección es de otro
+		// cliente, se rechaza acá, no en el handler (defensa en profundidad).
+		if input.CustomerAccountID == nil {
+			return nil, nil, fmt.Errorf("dirección inválida")
+		}
+		if _, err := s.loadOwnedAddress(*input.CustomerAccountID, *input.DeliveryAddressID); err != nil {
+			return nil, nil, fmt.Errorf("la dirección seleccionada no es válida")
+		}
+	}
 	if deliveryMethod == DeliveryMethodShipping && !hasAuthenticatedAddress && strings.TrimSpace(input.GuestAddressLine) == "" {
 		return nil, nil, fmt.Errorf("la dirección de entrega es obligatoria para envío a domicilio")
 	}

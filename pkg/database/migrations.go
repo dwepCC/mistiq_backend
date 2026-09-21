@@ -1172,6 +1172,54 @@ type TenantNotification struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
+// TenantEcommerceCustomerAccount identidad de LOGIN del comprador final — separada a propósito de
+// TenantUser (staff/panel interno, RBAC) y de TenantContact (registro de facturación). Contrato
+// ecommerce v2 §1.4, Fase 4. Password: mismo mecanismo bcrypt que TenantUser.SetPassword/
+// CheckPassword, nunca un esquema propio. ContactID: NO se autocompleta al registrarse — vincular
+// un TenantContact de forma segura (evitando duplicados/matching peligroso por teléfono) queda
+// fuera de esta fase, documentado como decisión deliberada, no como omisión.
+type TenantEcommerceCustomerAccount struct {
+	ID           uint           `gorm:"primaryKey" json:"id"`
+	Name         string         `gorm:"size:150;not null" json:"name"`
+	Phone        string         `gorm:"size:30;not null;uniqueIndex" json:"phone"`
+	Email        *string        `gorm:"size:255;uniqueIndex" json:"email"`
+	PasswordHash string         `gorm:"size:255;not null" json:"-"`
+	ContactID    *uint          `gorm:"index" json:"contact_id"`
+	Active       bool           `gorm:"default:true" json:"active"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+func (c *TenantEcommerceCustomerAccount) SetPassword(password string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	c.PasswordHash = string(hash)
+	return nil
+}
+
+func (c *TenantEcommerceCustomerAccount) CheckPassword(password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(c.PasswordHash), []byte(password)) == nil
+}
+
+// TenantEcommerceCustomerAddress dirección reutilizable de una cuenta de cliente — para invitados
+// (sin cuenta) el checkout sigue usando el snapshot en el propio pedido (GuestAddressLine/
+// Reference/Ubigeo, Fase 1), nunca esta tabla.
+type TenantEcommerceCustomerAddress struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	CustomerAccountID uint      `gorm:"not null;index" json:"customer_account_id"`
+	Label             string    `gorm:"size:60" json:"label"`
+	AddressLine       string    `gorm:"size:255;not null" json:"address_line"`
+	Reference         string    `gorm:"size:255" json:"reference"`
+	Ubigeo            string    `gorm:"size:6" json:"ubigeo"`
+	Phone             string    `gorm:"size:30" json:"phone"`
+	IsDefault         bool      `gorm:"default:false" json:"is_default"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
 // TenantProductSerial rastrea números de serie individuales por producto y sucursal.
 type TenantProductSerial struct {
 	ID             uint      `gorm:"primaryKey" json:"id"`

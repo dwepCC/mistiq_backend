@@ -29,6 +29,7 @@ func setupCreateOrderTestDB(t *testing.T) *gorm.DB {
 		&database.TenantProductStock{}, &database.TenantProductPresentationStock{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceCustomerAccount{}, &database.TenantEcommerceCustomerAddress{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatal(err)
@@ -362,25 +363,33 @@ func TestCreateOrder_EnvioSinDireccion_Rechazado(t *testing.T) {
 // ── 14. Cliente autenticado + dirección (nivel de servicio — Fase 4
 //        todavía no existe login público, se prueba que el MODELO ya lo soporta) ──
 
+// ── 19/21. Checkout autenticado: CustomerAccountID + DeliveryAddressID reales, con ownership ──
+
 func TestCreateOrder_ClienteAutenticadoConDireccion(t *testing.T) {
 	db := setupCreateOrderTestDB(t)
 	svc := &EcommerceService{db: db}
 	p := seedSimpleProduct(t, db, "S6", "Producto", 20)
+	account, err := svc.RegisterCustomer(RegisterCustomerInput{Name: "Cliente registrado", Phone: "999666777", Password: "clave123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, err := svc.CreateCustomerAddress(account.ID, CustomerAddressInput{AddressLine: "Av. Real 100"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	accountID := uint(7)
-	addressID := uint(3)
 	order, _, err := svc.CreateOrder(CreateOrderInput{
 		CustomerName: "Cliente registrado", CustomerPhone: "999666777", DeliveryMethod: DeliveryMethodShipping,
-		CustomerAccountID: &accountID, DeliveryAddressID: &addressID,
+		CustomerAccountID: &account.ID, DeliveryAddressID: &address.ID,
 		Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1}},
 	})
 	if err != nil {
 		t.Fatalf("CreateOrder: %v", err)
 	}
-	if order.CustomerAccountID == nil || *order.CustomerAccountID != accountID {
+	if order.CustomerAccountID == nil || *order.CustomerAccountID != account.ID {
 		t.Errorf("CustomerAccountID no quedó persistido: %v", order.CustomerAccountID)
 	}
-	if order.DeliveryAddressID == nil || *order.DeliveryAddressID != addressID {
+	if order.DeliveryAddressID == nil || *order.DeliveryAddressID != address.ID {
 		t.Errorf("DeliveryAddressID no quedó persistido: %v", order.DeliveryAddressID)
 	}
 	// Con dirección autenticada (FK), NO debe escribirse el snapshot de invitado — evita datos
@@ -437,6 +446,29 @@ func TestCreateOrder_FalloAMitadDeLista_NoPersisteNada(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("una línea inválida debe rechazar el pedido completo")
+	}
+	assertNoOrdersPersisted(t, db)
+}
+
+// ── 22. DeliveryAddressID de OTRO cliente → rechazo ─────────────────
+
+func TestCreateOrder_DeliveryAddressIDDeOtroCliente_Rechazada(t *testing.T) {
+	db := setupCreateOrderTestDB(t)
+	svc := &EcommerceService{db: db}
+	p := seedSimpleProduct(t, db, "S8", "Producto", 20)
+	accountA, _ := svc.RegisterCustomer(RegisterCustomerInput{Name: "A", Phone: "999111777", Password: "clave123"})
+	accountB, _ := svc.RegisterCustomer(RegisterCustomerInput{Name: "B", Phone: "999222888", Password: "clave123"})
+	addressB, _ := svc.CreateCustomerAddress(accountB.ID, CustomerAddressInput{AddressLine: "Dirección de B"})
+
+	// accountA intenta pagar el envío usando la dirección de accountB — debe rechazarse, aunque el
+	// ID de la dirección exista de verdad (solo no le pertenece a quien la está usando).
+	_, _, err := svc.CreateOrder(CreateOrderInput{
+		CustomerName: "A", CustomerPhone: "999111777", DeliveryMethod: DeliveryMethodShipping,
+		CustomerAccountID: &accountA.ID, DeliveryAddressID: &addressB.ID,
+		Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1}},
+	})
+	if err == nil {
+		t.Fatal("una dirección que pertenece a OTRO cliente nunca debe aceptarse en el checkout")
 	}
 	assertNoOrdersPersisted(t, db)
 }

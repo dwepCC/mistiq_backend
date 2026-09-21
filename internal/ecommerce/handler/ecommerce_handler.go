@@ -509,15 +509,20 @@ func (h *EcommerceHandler) PublicProductsAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": items, "total": total})
 }
 
-// CreatePublicOrderAPI Contrato ecommerce v2 Fase 3: el cliente SOLO puede mandar identidad de
+// CreatePublicOrderAPI Contrato ecommerce v2 Fase 3/4: el cliente SOLO puede mandar identidad de
 // producto/presentación + cantidad por línea — nombre/precio/subtotal/total nunca vienen del
 // cliente, EcommerceService.CreateOrder los resuelve siempre contra el catálogo real del tenant.
+// Sirve tanto a invitados como a clientes logueados por el MISMO endpoint (RequireEcommerceAvailable
+// + EcommerceCustomerAuthOptional en routes.go): si hay sesión de cliente válida, CustomerAccountID
+// se toma SIEMPRE del token (Locals), nunca de un campo del body — un body no tiene forma de
+// enviarlo porque el struct de bind no lo declara.
 func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 	var body struct {
-		CustomerName   string `json:"customer_name"`
-		CustomerPhone  string `json:"customer_phone"`
-		DeliveryMethod string `json:"delivery_method"`
-		Address        *struct {
+		CustomerName      string `json:"customer_name"`
+		CustomerPhone     string `json:"customer_phone"`
+		DeliveryMethod    string `json:"delivery_method"`
+		DeliveryAddressID *uint  `json:"delivery_address_id"` // solo válido con sesión de cliente
+		Address           *struct {
 			AddressLine string `json:"address_line"`
 			Reference   string `json:"reference"`
 			Ubigeo      string `json:"ubigeo"`
@@ -544,6 +549,14 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 		CustomerPhone:  body.CustomerPhone,
 		DeliveryMethod: body.DeliveryMethod,
 		Items:          items,
+	}
+	if customerID, ok := currentCustomerID(c); ok {
+		input.CustomerAccountID = &customerID
+		// delivery_address_id solo se acepta si hay sesión — CreateOrder valida ownership contra
+		// ESE customerID (nunca contra uno del body), ver EcommerceService.CreateOrder.
+		if body.DeliveryAddressID != nil {
+			input.DeliveryAddressID = body.DeliveryAddressID
+		}
 	}
 	if body.Address != nil {
 		input.GuestAddressLine = body.Address.AddressLine

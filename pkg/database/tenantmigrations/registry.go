@@ -111,6 +111,7 @@ var TenantMigrations = []TenantMigration{
 	V137EcommerceOrderStatusHistory{},
 	V138EcommerceOrdersRBACV2{},
 	V139TenantNotifications{},
+	V140EcommerceCustomerAccounts{},
 }
 
 // ByVersion mapa versión → migración.

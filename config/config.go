@@ -132,6 +132,11 @@ type Config struct {
 	// JWT
 	JWTSecret   string
 	SAJWTSecret string
+	// EcommerceCustomerJWTSecret: secreto DISTINTO del de staff (JWTSecret) — mismo criterio que ya
+	// separa SAJWTSecret de JWTSecret. Un token de cliente ecommerce firmado con este secreto nunca
+	// puede validarse como TenantClaims (secreto distinto, ni siquiera llega a comparar el campo
+	// Type) — aislamiento real, no solo un chequeo de campo.
+	EcommerceCustomerJWTSecret string
 
 	// Servidor HTTP
 	ServerPort     string
@@ -285,8 +290,9 @@ func Load() error {
 		ReservedSubdomains: domains.MergeReserved(splitEnvList(getEnv("RESERVED_SUBDOMAINS", ""))),
 		AppEnv:             appEnv,
 
-		JWTSecret:   getEnv("JWT_SECRET", "tenant-secret-change-in-production"),
-		SAJWTSecret: getEnv("SA_JWT_SECRET", "superadmin-secret-change-in-production"),
+		JWTSecret:                  getEnv("JWT_SECRET", "tenant-secret-change-in-production"),
+		SAJWTSecret:                getEnv("SA_JWT_SECRET", "superadmin-secret-change-in-production"),
+		EcommerceCustomerJWTSecret: getEnv("ECOMMERCE_CUSTOMER_JWT_SECRET", "ecommerce-customer-secret-change-in-production"),
 
 		ServerPort:     getEnv("PORT", "3000"),
 		BodyLimitBytes: getEnvInt("BODY_LIMIT_BYTES", 12*1024*1024),

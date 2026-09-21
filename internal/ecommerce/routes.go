@@ -49,8 +49,14 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/ecommerce/orders/:id/convert", mod, ordersConvert, h.ConvertOrderAPI)
 }
 
-// RegisterPublicRoutes rutas de la tienda pública (sin JWT), resueltas por tenant vía
+// RegisterPublicRoutes rutas de la tienda pública (sin JWT de staff), resueltas por tenant vía
 // TenantResolver (subdominio) + RequireEcommerceAvailable (módulo + ajustes + suscripción).
+//
+// Cuenta de cliente (Contrato ecommerce v2 §1.4, Fase 4): auth SEPARADA de TenantAuthAPI/staff —
+// mismo grupo /public/ecommerce, pero /account/* exige EcommerceCustomerAuthRequired (token propio,
+// secreto propio, jamás aceptado por rutas de TenantUser). /orders usa
+// EcommerceCustomerAuthOptional: sirve invitado Y cliente logueado por el mismo endpoint —
+// CreatePublicOrderAPI decide según si hay sesión de cliente en Locals.
 func RegisterPublicRoutes(app fiber.Router) {
 	h := handler.NewEcommerceHandler()
 	g := app.Group("/public/ecommerce", middleware.RequireTenant(), middleware.RequireEcommerceAvailable())
@@ -58,8 +64,21 @@ func RegisterPublicRoutes(app fiber.Router) {
 	g.Get("/categories", h.PublicCategoriesAPI)
 	g.Get("/price-bounds", h.PublicPriceBoundsAPI)
 	g.Get("/products", h.PublicProductsAPI)
-	g.Post("/orders", h.CreatePublicOrderAPI)
+	g.Post("/orders", middleware.EcommerceCustomerAuthOptional(), h.CreatePublicOrderAPI)
 	// Meta tags reales para crawlers (WhatsApp/Facebook/Twitter) — ver PublicPreviewAPI.
 	// Nginx reenvía acá SOLO peticiones de bots detectados por User-Agent.
 	g.Get("/preview", h.PublicPreviewAPI)
+
+	g.Post("/auth/register", h.RegisterCustomerAPI)
+	g.Post("/auth/login", h.LoginCustomerAPI)
+
+	acc := g.Group("/account", middleware.EcommerceCustomerAuthRequired())
+	acc.Get("/me", h.CustomerMeAPI)
+	acc.Get("/addresses", h.ListCustomerAddressesAPI)
+	acc.Post("/addresses", h.CreateCustomerAddressAPI)
+	acc.Put("/addresses/:id", h.UpdateCustomerAddressAPI)
+	acc.Delete("/addresses/:id", h.DeleteCustomerAddressAPI)
+	acc.Get("/orders", h.ListCustomerOrdersAPI)
+	acc.Get("/orders/:id", h.GetCustomerOrderAPI)
+	acc.Post("/orders/link", h.LinkGuestOrderAPI)
 }
