@@ -399,7 +399,12 @@ func (h *EcommerceHandler) PublicPreviewAPI(c fiber.Ctx) error {
 		description = "Explora el catálogo y haz tu pedido directo por WhatsApp."
 	}
 
-	pageURL := fmt.Sprintf("%s://%s%s", c.Protocol(), c.Hostname(), c.OriginalURL())
+	// Ruta pública fija (no c.OriginalURL()): Nginx reescribe la petición del bot hacia este
+	// endpoint interno, así que OriginalURL() acá sería la ruta de la API, no "/ecommerce".
+	// Protocolo fijo "https" (no c.Protocol()): esta ruta solo se alcanza vía el proxy interno
+	// de Nginx sobre HTTP plano — c.Protocol() reportaría "http" aunque el bot real llegó por
+	// HTTPS público.
+	pageURL := fmt.Sprintf("https://%s/ecommerce", c.Hostname())
 	imageURL := ""
 	if settings.LogoURL != "" {
 		imageURL = config.AppConfig.APIPublicURL + settings.LogoURL
