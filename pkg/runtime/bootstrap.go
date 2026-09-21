@@ -18,6 +18,7 @@ import (
 	"tukifac/pkg/fiscalclient"
 	"tukifac/pkg/fiscalqueue"
 	"tukifac/pkg/logger"
+	"tukifac/pkg/notificationevents"
 	"tukifac/pkg/tenantcache"
 )
 
@@ -35,6 +36,7 @@ func Init(cfg *config.Config) error {
 	rdb := tenantcache.InitRedis(cfg)
 	tenantcache.Init(cfg, rdb)
 	billingevents.Init(rdb)
+	notificationevents.Init(rdb)
 
 	if err := agentmod.Init(cfg, rdb); err != nil {
 		return err
@@ -76,6 +78,7 @@ func Shutdown() {
 	billingqueue.Stop()
 	fiscalqueue.Stop()
 	billingevents.Shutdown()
+	notificationevents.Shutdown()
 	agentmod.Shutdown()
 	database.ShutdownTenantDBManager()
 	_ = tenantcache.Close()

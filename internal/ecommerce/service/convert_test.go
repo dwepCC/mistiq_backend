@@ -206,3 +206,44 @@ func TestConvertToSale_FallbackAItemsJSONParaPedidosLegacy(t *testing.T) {
 		t.Fatalf("la venta debe tener 1 línea leída de ItemsJSON, tiene %d", len(saleItems))
 	}
 }
+
+// TestConvertToSale_GeneraNotificacionJuntoConConvertedSaleID Fase 6: la notificación de
+// "convertido a venta" y el marcado converted_sale_id/converted_at deben quedar en la misma
+// transacción — ninguno de los dos debe poder quedar huérfano del otro (Contrato v2 Fase 6,
+// transaccionalidad).
+func TestConvertToSale_GeneraNotificacionJuntoConConvertedSaleID(t *testing.T) {
+	db := setupConvertTestDB(t)
+	p := seedConvertProduct(t, db, "N1", 20)
+	series := seedNotaVentaSeries(t, db)
+
+	svc := &EcommerceService{db: db}
+	order, _, err := svc.CreateOrder(CreateOrderInput{
+		CustomerName: "Notif", CustomerPhone: "999444555", DeliveryMethod: DeliveryMethodPickup,
+		Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusConfirmado}); err != nil {
+		t.Fatal(err)
+	}
+
+	convSvc, input := convertServiceAndInput(db, series.ID, 1)
+	sale, err := convSvc.ConvertToSale(order.ID, input)
+	if err != nil {
+		t.Fatalf("ConvertToSale: %v", err)
+	}
+
+	var notif database.TenantNotification
+	if err := db.Where("type = ?", "ecommerce.order.converted").First(&notif).Error; err != nil {
+		t.Fatalf("debía crear 1 notificación ecommerce.order.converted: %v", err)
+	}
+	if notif.LinkPath != fmt.Sprintf("/sales/pedidos-web?id=%d", order.ID) {
+		t.Errorf("LinkPath = %q, quería apuntar al pedido real", notif.LinkPath)
+	}
+
+	after, _ := svc.GetOrder(order.ID)
+	if after.ConvertedSaleID == nil || *after.ConvertedSaleID != sale.ID {
+		t.Fatalf("ConvertedSaleID debía quedar en %d junto con la notificación, quedó %v", sale.ID, after.ConvertedSaleID)
+	}
+}

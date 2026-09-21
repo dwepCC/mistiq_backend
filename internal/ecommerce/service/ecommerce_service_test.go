@@ -228,3 +228,87 @@ func TestUpdateOrderStatus_EstadoInvalidoEsRechazado(t *testing.T) {
 		t.Fatal("un estado fuera del enum debe rechazarse")
 	}
 }
+
+func countNotificationsByType(t *testing.T, db *gorm.DB, notifType string) int64 {
+	t.Helper()
+	var n int64
+	db.Model(&database.TenantNotification{}).Where("type = ?", notifType).Count(&n)
+	return n
+}
+
+// TestUpdateOrderStatus_ConfirmarGeneraNotificacion Fase 6: PENDIENTE->CONFIRMADO es la única
+// transición "de confirmación" que notifica — ver notificationForTransition.
+func TestUpdateOrderStatus_ConfirmarGeneraNotificacion(t *testing.T) {
+	db := setupEcommerceServiceDB(t)
+	svc := &EcommerceService{db: db}
+	order := mustCreateOrder(t, svc) // ya deja 1 notificación "ecommerce.order.created"
+
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusConfirmado}); err != nil {
+		t.Fatalf("UpdateOrderStatus: %v", err)
+	}
+	if got := countNotificationsByType(t, db, "ecommerce.order.confirmed"); got != 1 {
+		t.Fatalf("debía crear exactamente 1 notificación ecommerce.order.confirmed, hay %d", got)
+	}
+
+	var notif database.TenantNotification
+	db.Where("type = ?", "ecommerce.order.confirmed").First(&notif)
+	if notif.LinkPath != fmt.Sprintf("/sales/pedidos-web?id=%d", order.ID) {
+		t.Errorf("LinkPath = %q, quería apuntar al pedido real", notif.LinkPath)
+	}
+	if notif.UserID != nil {
+		t.Errorf("la notificación de confirmación debe ser broadcast (UserID nil), quedó %v", notif.UserID)
+	}
+}
+
+// TestUpdateOrderStatus_CancelarYRechazarGeneranNotificacion Fase 6: ambas transiciones comparten
+// el mismo Type ("ecommerce.order.cancelled") — Contrato v2 Fase 6, evento #3 "cancelado/rechazado"
+// es UN tipo, diferenciado por Title/Body, no dos tipos separados.
+func TestUpdateOrderStatus_CancelarYRechazarGeneranNotificacion(t *testing.T) {
+	db := setupEcommerceServiceDB(t)
+	svc := &EcommerceService{db: db}
+
+	cancelado := mustCreateOrder(t, svc)
+	if err := svc.UpdateOrderStatus(cancelado.ID, UpdateOrderStatusInput{
+		NewStatus: OrderStatusCancelado, Notes: "motivo",
+	}); err != nil {
+		t.Fatalf("UpdateOrderStatus (cancelado): %v", err)
+	}
+
+	rechazado := mustCreateOrder(t, svc)
+	if err := svc.UpdateOrderStatus(rechazado.ID, UpdateOrderStatusInput{
+		NewStatus: OrderStatusRechazado, Notes: "motivo",
+	}); err != nil {
+		t.Fatalf("UpdateOrderStatus (rechazado): %v", err)
+	}
+
+	if got := countNotificationsByType(t, db, "ecommerce.order.cancelled"); got != 2 {
+		t.Fatalf("debía haber 2 notificaciones ecommerce.order.cancelled (una por pedido), hay %d", got)
+	}
+}
+
+// TestUpdateOrderStatus_TransicionesDePreparacionNoNotifican Fase 6: las transiciones de
+// picking/empaquetado/despacho NO deben generar notificación (solo las 3 "relevantes" pedidas) —
+// evita saturar el panel con un aviso por cada micro-cambio operativo.
+func TestUpdateOrderStatus_TransicionesDePreparacionNoNotifican(t *testing.T) {
+	db := setupEcommerceServiceDB(t)
+	svc := &EcommerceService{db: db}
+	order := mustCreateOrder(t, svc)
+
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusConfirmado}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusEnPreparacion}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusEmpaquetado}); err != nil {
+		t.Fatal(err)
+	}
+
+	var total int64
+	db.Model(&database.TenantNotification{}).Count(&total)
+	// Solo 2: "ecommerce.order.created" (CreateOrder) + "ecommerce.order.confirmed" (la única
+	// transición notificable de las tres ejecutadas acá).
+	if total != 2 {
+		t.Fatalf("EN_PREPARACION/EMPAQUETADO no deben generar notificación — total esperado 2, hay %d", total)
+	}
+}

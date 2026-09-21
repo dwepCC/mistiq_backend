@@ -388,10 +388,11 @@ func (h *EcommerceHandler) UpdateOrderStatusAPI(c fiber.Ctx) error {
 		})
 	}
 	if err := svc.UpdateOrderStatus(uint(id), service.UpdateOrderStatusInput{
-		NewStatus: newStatus,
-		UserID:    orderUserID(c),
-		Notes:     body.Notes,
-		BranchID:  body.BranchID,
+		NewStatus:       newStatus,
+		UserID:          orderUserID(c),
+		Notes:           body.Notes,
+		BranchID:        body.BranchID,
+		CentralTenantID: orderCentralTenantID(c),
 	}); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -581,10 +582,11 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 		})
 	}
 	input := service.CreateOrderInput{
-		CustomerName:   body.CustomerName,
-		CustomerPhone:  body.CustomerPhone,
-		DeliveryMethod: body.DeliveryMethod,
-		Items:          items,
+		CustomerName:    body.CustomerName,
+		CustomerPhone:   body.CustomerPhone,
+		DeliveryMethod:  body.DeliveryMethod,
+		Items:           items,
+		CentralTenantID: orderCentralTenantID(c),
 	}
 	if customerID, ok := currentCustomerID(c); ok {
 		input.CustomerAccountID = &customerID

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 
 	salessvc "tukifac/internal/sales/service"
 	"tukifac/pkg/database"
+	"tukifac/pkg/notificationevents"
 	"tukifac/pkg/salecurrency"
 	"tukifac/pkg/tax"
 
@@ -220,13 +222,29 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 	// La conversión puede ocurrir en cualquier punto desde CONFIRMADO en adelante, sin importar el
 	// estado de preparación/despacho del pedido — antes esto forzaba status="cerrado", cerrando de
 	// facto el pedido en el momento de facturar aunque todavía no se hubiera ni preparado.
+	//
+	// La venta (sale) ya quedó creada arriba por saleSvc.Create (su propia transacción, sin tocar
+	// acá — comportamiento preexistente desde Fase 1/3, fuera de alcance de Fase 6). Lo que SÍ debe
+	// ser atómico entre sí es "marcar el pedido como convertido" + "notificación de conversión": si
+	// uno de los dos falla, no debe quedar el otro huérfano (Contrato v2 Fase 6, transaccionalidad).
 	now := time.Now()
-	if err := s.db.Model(&order).Updates(map[string]interface{}{
-		"converted_sale_id": sale.ID,
-		"converted_at":      now,
-	}).Error; err != nil {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&order).Updates(map[string]interface{}{
+			"converted_sale_id": sale.ID,
+			"converted_at":      now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&database.TenantNotification{
+			Type:     "ecommerce.order.converted",
+			Title:    fmt.Sprintf("Pedido #%d convertido a venta", order.ID),
+			Body:     fmt.Sprintf("Venta #%d generada.", sale.ID),
+			LinkPath: fmt.Sprintf("/sales/pedidos-web?id=%d", order.ID),
+		}).Error
+	}); err != nil {
 		return sale, err
 	}
+	notificationevents.PublishChanged(context.Background(), input.CentralTenant)
 
 	return sale, nil
 }

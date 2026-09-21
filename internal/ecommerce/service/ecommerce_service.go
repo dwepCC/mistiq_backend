@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	productservice "tukifac/internal/products/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
+	"tukifac/pkg/notificationevents"
 
 	"gorm.io/gorm"
 )
@@ -342,6 +344,9 @@ type CreateOrderInput struct {
 	ContactID         *uint
 	DeliveryAddressID *uint
 	Items             []CreateOrderItemInput
+	// CentralTenantID solo para la señal SSE post-commit (Fase 6, notificationevents.PublishChanged)
+	// — nunca se usa para resolver datos, s.db ya está scopeado a la BD de este tenant.
+	CentralTenantID uint
 }
 
 // resolvedOrderLine línea ya validada/resuelta contra el catálogo real — nunca construida a partir
@@ -519,6 +524,10 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 		// WhatsApp para un pedido que no llegó a existir de verdad.
 		return nil, nil, err
 	}
+	// Señal SSE DESPUÉS del commit (Fase 6): si se publicara antes y la transacción hiciera
+	// rollback, el panel refrescaría para una notificación que nunca llegó a existir. Fire-and-
+	// forget: nunca bloquea ni falla la respuesta al cliente público.
+	notificationevents.PublishChanged(context.Background(), input.CentralTenantID)
 	return order, createdItems, nil
 }
 
@@ -611,6 +620,38 @@ type UpdateOrderStatusInput struct {
 	UserID    uint
 	Notes     string
 	BranchID  *uint
+	// CentralTenantID solo para la señal SSE post-commit (Fase 6), ver comentario en CreateOrderInput.
+	CentralTenantID uint
+}
+
+// notificationForTransition notificación interna a crear para una transición concreta (Contrato v2
+// §1.7, Fase 6) — solo las 3 transiciones "relevantes" pedidas: PENDIENTE→CONFIRMADO, →CANCELADO,
+// →RECHAZADO. Cualquier otra transición (preparación, empaquetado, despacho...) no genera
+// notificación: no tiene sentido operativo avisar de cada micro-cambio de picking.
+func notificationForTransition(orderID uint, fromStatus, newStatus string) *database.TenantNotification {
+	link := fmt.Sprintf("/sales/pedidos-web?id=%d", orderID)
+	switch {
+	case fromStatus == OrderStatusPendiente && newStatus == OrderStatusConfirmado:
+		return &database.TenantNotification{
+			Type: "ecommerce.order.confirmed", LinkPath: link,
+			Title: fmt.Sprintf("Pedido #%d confirmado", orderID),
+			Body:  "El pedido pasó a preparación.",
+		}
+	case newStatus == OrderStatusCancelado:
+		return &database.TenantNotification{
+			Type: "ecommerce.order.cancelled", LinkPath: link,
+			Title: fmt.Sprintf("Pedido #%d cancelado", orderID),
+			Body:  "El pedido fue cancelado.",
+		}
+	case newStatus == OrderStatusRechazado:
+		return &database.TenantNotification{
+			Type: "ecommerce.order.cancelled", LinkPath: link,
+			Title: fmt.Sprintf("Pedido #%d rechazado", orderID),
+			Body:  "El pedido fue rechazado.",
+		}
+	default:
+		return nil
+	}
 }
 
 // UpdateOrderStatus valida la transición contra orderTransitions (order_status.go) y la registra
@@ -633,7 +674,8 @@ func (s *EcommerceService) UpdateOrderStatus(id uint, input UpdateOrderStatusInp
 	if requiresReasonNotes(newStatus) && strings.TrimSpace(input.Notes) == "" {
 		return fmt.Errorf("indica el motivo")
 	}
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	fromStatus := order.Status
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		updates := map[string]interface{}{"status": newStatus}
 		if newStatus == OrderStatusConfirmado && order.BranchID == nil && input.BranchID != nil {
 			updates["branch_id"] = *input.BranchID
@@ -645,12 +687,27 @@ func (s *EcommerceService) UpdateOrderStatus(id uint, input UpdateOrderStatusInp
 		if input.UserID > 0 {
 			userID = &input.UserID
 		}
-		return tx.Create(&database.TenantEcommerceOrderStatusHistory{
+		if err := tx.Create(&database.TenantEcommerceOrderStatusHistory{
 			OrderID:    id,
-			FromStatus: order.Status,
+			FromStatus: fromStatus,
 			ToStatus:   newStatus,
 			UserID:     userID,
 			Notes:      strings.TrimSpace(input.Notes),
-		}).Error
-	})
+		}).Error; err != nil {
+			return err
+		}
+		// Notificación interna (Contrato v2 §1.7, Fase 6) — misma transacción que el cambio de
+		// estado: si algo de arriba falla, tampoco queda una notificación de un cambio que no
+		// llegó a persistir.
+		if notif := notificationForTransition(id, fromStatus, newStatus); notif != nil {
+			if err := tx.Create(notif).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	notificationevents.PublishChanged(context.Background(), input.CentralTenantID)
+	return nil
 }

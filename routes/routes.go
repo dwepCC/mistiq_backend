@@ -23,6 +23,7 @@ import (
 	"tukifac/internal/inventory"
 	"tukifac/internal/memberships"
 	"tukifac/internal/modules"
+	"tukifac/internal/notifications"
 	"tukifac/internal/payables"
 	"tukifac/internal/paymentcatalog"
 	"tukifac/internal/plans"
@@ -234,6 +235,7 @@ func Setup(app *fiber.App) {
 	catalogs.RegisterRoutes(tenantAPI)
 
 	tenantportal.RegisterRoutes(tenantAPI)
+	notifications.RegisterRoutes(tenantAPI)
 	dashboard.RegisterRoutes(tenantAPI)
 	company.RegisterRoutes(tenantAPI)
 	users.RegisterRoutes(tenantAPI)

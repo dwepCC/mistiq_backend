@@ -1155,12 +1155,16 @@ type TenantEcommerceOrderStatusHistory struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// TenantNotification notificación interna del panel (Contrato ecommerce v2 §1.7, Fase 3: solo se
-// persiste la fila al crear un pedido web; el mecanismo de entrega en vivo —hub SSE reutilizando
-// el patrón de pkg/billingevents, badge/campanita en Header.tsx— es Fase 6, todavía no
-// implementado. Type es un string libre versionado por dominio ("ecommerce.order.created") para
-// que otros módulos puedan emitir sus propios tipos sin migración nueva. UserID nil = visible para
-// cualquier usuario con el permiso correspondiente al Type, no dirigida a alguien puntual.
+// TenantNotification notificación interna del panel (Contrato ecommerce v2 §1.7). Fase 3 solo
+// persistía la fila al crear un pedido web; Fase 6 agrega entrega en vivo (pkg/notificationevents,
+// hub SSE con el mismo patrón de pkg/billingevents pero independiente) + API de lectura
+// (internal/notifications) + campanita en Header.tsx. Type es un string libre versionado por
+// dominio ("ecommerce.order.created") para que otros módulos puedan emitir sus propios tipos sin
+// migración nueva. UserID nil = notificación BROADCAST, visible para cualquier usuario con el
+// permiso correspondiente al Type (mapa en internal/notifications/service) — en ese caso ReadAt
+// NUNCA se usa como estado de lectura (marcaría "leído" para todos los que la ven); el estado de
+// lectura por usuario de una fila broadcast vive en TenantNotificationRead. ReadAt solo es el
+// estado real de lectura cuando UserID != nil (notificación dirigida a un único usuario).
 type TenantNotification struct {
 	ID        uint       `gorm:"primaryKey" json:"id"`
 	Type      string     `gorm:"size:60;not null;index" json:"type"`
@@ -1169,7 +1173,19 @@ type TenantNotification struct {
 	LinkPath  string     `gorm:"size:255" json:"link_path"`
 	ReadAt    *time.Time `json:"read_at"`
 	UserID    *uint      `gorm:"index" json:"user_id"`
-	CreatedAt time.Time  `json:"created_at"`
+	CreatedAt time.Time  `gorm:"index" json:"created_at"`
+}
+
+// TenantNotificationRead estado de lectura POR USUARIO de una TenantNotification broadcast
+// (UserID nil) — Fase 6. Una fila = "este usuario ya vio esta notificación". Nunca se crea para
+// notificaciones dirigidas (esas usan TenantNotification.ReadAt directamente). UNIQUE(NotificationID,
+// UserID): un mismo usuario no puede tener dos filas de lectura para la misma notificación.
+type TenantNotificationRead struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	NotificationID uint      `gorm:"not null;uniqueIndex:uk_tenant_notification_reads_notif_user;index:idx_tenant_notification_reads_notification_id" json:"notification_id"`
+	UserID         uint      `gorm:"not null;uniqueIndex:uk_tenant_notification_reads_notif_user;index:idx_tenant_notification_reads_user_id" json:"user_id"`
+	ReadAt         time.Time `json:"read_at"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // TenantEcommerceCustomerAccount identidad de LOGIN del comprador final — separada a propósito de
