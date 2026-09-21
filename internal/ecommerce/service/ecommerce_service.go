@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	companyservice "tukifac/internal/company/service"
 	productservice "tukifac/internal/products/service"
@@ -528,17 +530,78 @@ func (s *EcommerceService) GetOrder(id uint) (*database.TenantEcommerceOrder, er
 	return &order, nil
 }
 
-func (s *EcommerceService) ListOrders(status string, limit int) ([]database.TenantEcommerceOrder, error) {
+// ListOrdersParams filtros del panel de pedidos web (Contrato v2 Fase 5) — todos opcionales,
+// combinables. Query busca por nombre/teléfono (LIKE) o por ID exacto si es numérico.
+type ListOrdersParams struct {
+	Status   string
+	BranchID uint
+	Query    string
+	DateFrom *time.Time
+	DateTo   *time.Time
+	Limit    int
+}
+
+func (s *EcommerceService) ListOrders(params ListOrdersParams) ([]database.TenantEcommerceOrder, error) {
 	q := s.db.Model(&database.TenantEcommerceOrder{})
-	if status != "" && status != "all" {
-		q = q.Where("status = ?", status)
+	if params.Status != "" && params.Status != "all" {
+		q = q.Where("status = ?", strings.ToUpper(params.Status))
 	}
+	if params.BranchID > 0 {
+		q = q.Where("branch_id = ?", params.BranchID)
+	}
+	if query := strings.TrimSpace(params.Query); query != "" {
+		term := "%" + query + "%"
+		if id, err := strconv.ParseUint(query, 10, 32); err == nil {
+			q = q.Where("id = ? OR customer_name LIKE ? OR customer_phone LIKE ?", id, term, term)
+		} else {
+			q = q.Where("customer_name LIKE ? OR customer_phone LIKE ?", term, term)
+		}
+	}
+	if params.DateFrom != nil {
+		q = q.Where("created_at >= ?", params.DateFrom)
+	}
+	if params.DateTo != nil {
+		q = q.Where("created_at <= ?", params.DateTo)
+	}
+	limit := params.Limit
 	if limit <= 0 {
 		limit = 100
 	}
 	var rows []database.TenantEcommerceOrder
 	err := q.Order("created_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
+}
+
+// GetOrderDetail pedido + líneas + historial de transiciones, para el detalle del panel (Contrato
+// v2 Fase 5). Líneas: prioriza TenantEcommerceOrderItem (normalizado, con PresentationID real);
+// si un pedido legacy no tiene filas ahí, cae a deserializar ItemsJSON — mismo criterio de
+// fallback que ya usa ConvertToSale (internal/ecommerce/service/convert.go loadOrderItems), nunca
+// se deja un pedido sin poder mostrar sus productos.
+func (s *EcommerceService) GetOrderDetail(id uint) (*database.TenantEcommerceOrder, []database.TenantEcommerceOrderItem, []database.TenantEcommerceOrderStatusHistory, error) {
+	var order database.TenantEcommerceOrder
+	if err := s.db.First(&order, id).Error; err != nil {
+		return nil, nil, nil, fmt.Errorf("pedido no encontrado")
+	}
+	var items []database.TenantEcommerceOrderItem
+	if err := s.db.Where("order_id = ?", id).Order("id ASC").Find(&items).Error; err != nil {
+		return nil, nil, nil, err
+	}
+	if len(items) == 0 && strings.TrimSpace(order.ItemsJSON) != "" {
+		var legacy []OrderItemInput
+		if err := json.Unmarshal([]byte(order.ItemsJSON), &legacy); err == nil {
+			for _, l := range legacy {
+				items = append(items, database.TenantEcommerceOrderItem{
+					OrderID: order.ID, ProductID: l.ProductID, Name: l.Name,
+					Quantity: l.Quantity, UnitPrice: l.UnitPrice, Subtotal: money.RoundDisplay(l.Quantity * l.UnitPrice),
+				})
+			}
+		}
+	}
+	var history []database.TenantEcommerceOrderStatusHistory
+	if err := s.db.Where("order_id = ?", id).Order("created_at ASC, id ASC").Find(&history).Error; err != nil {
+		return nil, nil, nil, err
+	}
+	return &order, items, history, nil
 }
 
 // UpdateOrderStatusInput ver Contrato v2 §5/§6.2. BranchID: solo se aplica en la transición

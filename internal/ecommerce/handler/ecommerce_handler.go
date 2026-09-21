@@ -224,13 +224,49 @@ func (h *EcommerceHandler) ReorderSlidersAPI(c fiber.Ctx) error {
 
 // ── Admin: pedidos web ───────────────────────────────────────────────
 
+// ListOrdersAPI filtros del panel (Contrato v2 Fase 5): estado, sucursal, búsqueda por
+// nombre/teléfono/N° de pedido, rango de fechas — todos opcionales y combinables.
 func (h *EcommerceHandler) ListOrdersAPI(c fiber.Ctx) error {
-	status := c.Query("status")
-	rows, err := service.NewEcommerceService(db(c)).ListOrders(status, 200)
+	params := service.ListOrdersParams{
+		Status: c.Query("status"),
+		Query:  c.Query("q"),
+		Limit:  200,
+	}
+	if bid, err := strconv.ParseUint(c.Query("branch_id"), 10, 32); err == nil {
+		params.BranchID = uint(bid)
+	}
+	if from := strings.TrimSpace(c.Query("date_from")); from != "" {
+		if t, err := time.Parse("2006-01-02", from); err == nil {
+			params.DateFrom = &t
+		}
+	}
+	if to := strings.TrimSpace(c.Query("date_to")); to != "" {
+		if t, err := time.Parse("2006-01-02", to); err == nil {
+			endOfDay := t.Add(24*time.Hour - time.Second)
+			params.DateTo = &endOfDay
+		}
+	}
+	rows, err := service.NewEcommerceService(db(c)).ListOrders(params)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"data": rows})
+}
+
+// GetOrderAPI detalle completo de un pedido para el panel: pedido + líneas normalizadas
+// (con fallback a ItemsJSON si es un pedido legacy) + historial de transiciones real — Contrato v2
+// Fase 5. No fabrica historial: si no hay filas en TenantEcommerceOrderStatusHistory, "history"
+// viene vacío, nunca inventado.
+func (h *EcommerceHandler) GetOrderAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	order, items, history, err := service.NewEcommerceService(db(c)).GetOrderDetail(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": order, "items": items, "history": history})
 }
 
 func (h *EcommerceHandler) OrderPrintDataAPI(c fiber.Ctx) error {

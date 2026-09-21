@@ -44,6 +44,7 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/ecommerce/sliders/reorder", mod, manage, h.ReorderSlidersAPI)
 
 	api.Get("/ecommerce/orders", mod, ordersView, h.ListOrdersAPI)
+	api.Get("/ecommerce/orders/:id", mod, ordersView, h.GetOrderAPI)
 	api.Get("/ecommerce/orders/:id/print-data", mod, ordersView, h.OrderPrintDataAPI)
 	api.Put("/ecommerce/orders/:id/status", mod, ordersTransition, h.UpdateOrderStatusAPI)
 	api.Post("/ecommerce/orders/:id/convert", mod, ordersConvert, h.ConvertOrderAPI)
