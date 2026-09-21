@@ -218,6 +218,122 @@ func (s *EcommerceService) GetDispatchByOrderID(orderID uint) (*database.TenantE
 	return &d, nil
 }
 
+func (s *EcommerceService) GetDispatch(id uint) (*database.TenantEcommerceDispatch, error) {
+	var d database.TenantEcommerceDispatch
+	if err := s.db.First(&d, id).Error; err != nil {
+		return nil, errors.New("despacho no encontrado")
+	}
+	return &d, nil
+}
+
+// DispatchTransitionInput UserID: quién ejecuta la transición, para DispatchStatusHistory (y
+// OrderStatusHistory cuando corresponda). Notes: opcional, mismo patrón que
+// UpdateOrderStatusInput.Notes.
+type DispatchTransitionInput struct {
+	UserID uint
+	Notes  string
+}
+
+// MarkDispatchInTransit DESPACHADO->EN_TRANSITO — Contrato v2 §9, Fase 9. SOLO cambia
+// Dispatch.Status; Order.Status se queda en DESPACHADO (decisión aprobada explícitamente: son
+// ciclos de vida independientes, ver comentario de TenantEcommerceDispatch). Transacción con
+// SELECT...FOR UPDATE sobre el Dispatch (mismo patrón de concurrencia de Fase 8/1.5) para que dos
+// requests concurrentes sobre el MISMO despacho nunca produzcan dos transiciones ni dos filas de
+// historial.
+func (s *EcommerceService) MarkDispatchInTransit(dispatchID uint, input DispatchTransitionInput) (*database.TenantEcommerceDispatch, error) {
+	var dispatch database.TenantEcommerceDispatch
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&dispatch, dispatchID).Error; err != nil {
+			return errors.New("despacho no encontrado")
+		}
+		if dispatch.Status != DispatchStatusDespachado {
+			return fmt.Errorf("el despacho debe estar DESPACHADO para pasar a EN_TRANSITO (estado actual: %s)", dispatch.Status)
+		}
+		if err := tx.Model(&database.TenantEcommerceDispatch{}).Where("id = ?", dispatchID).
+			Update("status", DispatchStatusEnTransito).Error; err != nil {
+			return err
+		}
+		var userID *uint
+		if input.UserID > 0 {
+			userID = &input.UserID
+		}
+		if err := tx.Create(&database.TenantEcommerceDispatchStatusHistory{
+			DispatchID: dispatchID, FromStatus: DispatchStatusDespachado, ToStatus: DispatchStatusEnTransito,
+			UserID: userID, Notes: strings.TrimSpace(input.Notes),
+		}).Error; err != nil {
+			return err
+		}
+		dispatch.Status = DispatchStatusEnTransito
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dispatch, nil
+}
+
+// MarkDispatchDelivered EN_TRANSITO->ENTREGADO (Dispatch) + DESPACHADO->ENTREGADO (Order) —
+// Contrato v2 §9, Fase 9. A diferencia de MarkDispatchInTransit, ACÁ sí cambian ambos ciclos de
+// vida — atómico en una sola transacción: bloquea Dispatch y Order (FOR UPDATE en ambos, mismo
+// criterio que CreateDispatch), valida los dos estados actuales, fija DeliveredAt con el reloj del
+// servidor (nunca confía en un valor enviado por el cliente — CreateDispatchInput/
+// UpdateDispatchInput ni siquiera tienen ese campo, es estructuralmente imposible que el caller lo
+// mande), y escribe AMBOS historiales (Dispatch y Order) antes de confirmar. Si cualquier paso
+// falla, la transacción entera revierte — nunca queda Dispatch=ENTREGADO con Order=DESPACHADO ni
+// viceversa.
+func (s *EcommerceService) MarkDispatchDelivered(dispatchID uint, input DispatchTransitionInput) (*database.TenantEcommerceDispatch, error) {
+	var dispatch database.TenantEcommerceDispatch
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&dispatch, dispatchID).Error; err != nil {
+			return errors.New("despacho no encontrado")
+		}
+		if dispatch.Status != DispatchStatusEnTransito {
+			return fmt.Errorf("el despacho debe estar EN_TRANSITO para marcarse ENTREGADO (estado actual: %s)", dispatch.Status)
+		}
+		var order database.TenantEcommerceOrder
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&order, dispatch.OrderID).Error; err != nil {
+			return errors.New("pedido no encontrado")
+		}
+		if order.Status != OrderStatusDespachado {
+			// Defensa en profundidad: por construcción esto nunca debería divergir de
+			// Dispatch.Status==EN_TRANSITO, pero nunca se asume — siempre se revalida.
+			return fmt.Errorf("el pedido debe estar DESPACHADO para marcarse ENTREGADO (estado actual: %s)", order.Status)
+		}
+
+		now := time.Now()
+		if err := tx.Model(&database.TenantEcommerceDispatch{}).Where("id = ?", dispatchID).
+			Updates(map[string]interface{}{"status": DispatchStatusEntregado, "delivered_at": &now}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&database.TenantEcommerceOrder{}).Where("id = ?", order.ID).
+			Update("status", OrderStatusEntregado).Error; err != nil {
+			return err
+		}
+		var userID *uint
+		if input.UserID > 0 {
+			userID = &input.UserID
+		}
+		if err := tx.Create(&database.TenantEcommerceDispatchStatusHistory{
+			DispatchID: dispatchID, FromStatus: DispatchStatusEnTransito, ToStatus: DispatchStatusEntregado,
+			UserID: userID, Notes: strings.TrimSpace(input.Notes),
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&database.TenantEcommerceOrderStatusHistory{
+			OrderID: order.ID, FromStatus: OrderStatusDespachado, ToStatus: OrderStatusEntregado, UserID: userID,
+		}).Error; err != nil {
+			return err
+		}
+		dispatch.Status = DispatchStatusEntregado
+		dispatch.DeliveredAt = &now
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dispatch, nil
+}
+
 func trimmedOrNil(v *string) *string {
 	if v == nil {
 		return nil

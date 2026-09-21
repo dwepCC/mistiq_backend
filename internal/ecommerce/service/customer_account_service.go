@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"time"
 
 	"tukifac/pkg/database"
 
@@ -210,20 +211,45 @@ func (s *EcommerceService) ListCustomerOrders(customerID uint) ([]database.Tenan
 	return rows, err
 }
 
+// CustomerDispatchView subconjunto SEGURO de TenantEcommerceDispatch para el cliente final (Fase
+// 9, Contrato v2 §11) — deliberadamente sin UserID (quién despachó/entregó es dato interno del
+// staff, no del cliente), sin Notes (podrían contener observaciones internas del almacén) y sin
+// bultos/peso/dimensiones (dato operativo interno, no algo que el comprador necesite ver). Solo lo
+// explícitamente pedido: estado, transportista, tracking, fecha de despacho, fecha de entrega.
+type CustomerDispatchView struct {
+	Status       string     `json:"status"`
+	CarrierName  *string    `json:"carrier_name"`
+	TrackingCode *string    `json:"tracking_code"`
+	DispatchedAt *time.Time `json:"dispatched_at"`
+	DeliveredAt  *time.Time `json:"delivered_at"`
+}
+
 // GetCustomerOrder: la condición customer_account_id=? va EN LA MISMA query — un pedido que existe
 // pero pertenece a otro cliente (o es de invitado, sin cuenta) da el mismo "no encontrado" que un
 // ID que no existe. Nunca se carga el pedido primero y se compara después (evita el error de
-// "cargar y comparar en Go", que es fácil de olvidar en un handler futuro).
-func (s *EcommerceService) GetCustomerOrder(customerID, orderID uint) (*database.TenantEcommerceOrder, []database.TenantEcommerceOrderItem, error) {
+// "cargar y comparar en Go", que es fácil de olvidar en un handler futuro). Dispatch: nil si el
+// pedido todavía no fue despachado — nunca se fabrica un estado de despacho que no existe.
+func (s *EcommerceService) GetCustomerOrder(customerID, orderID uint) (*database.TenantEcommerceOrder, []database.TenantEcommerceOrderItem, *CustomerDispatchView, error) {
 	var order database.TenantEcommerceOrder
 	if err := s.db.Where("id = ? AND customer_account_id = ?", orderID, customerID).First(&order).Error; err != nil {
-		return nil, nil, fmt.Errorf("pedido no encontrado")
+		return nil, nil, nil, fmt.Errorf("pedido no encontrado")
 	}
 	var items []database.TenantEcommerceOrderItem
 	if err := s.db.Where("order_id = ?", order.ID).Find(&items).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return &order, items, nil
+	dispatch, err := s.GetDispatchByOrderID(order.ID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var view *CustomerDispatchView
+	if dispatch != nil {
+		view = &CustomerDispatchView{
+			Status: dispatch.Status, CarrierName: dispatch.CarrierName, TrackingCode: dispatch.TrackingCode,
+			DispatchedAt: dispatch.DispatchedAt, DeliveredAt: dispatch.DeliveredAt,
+		}
+	}
+	return &order, items, view, nil
 }
 
 // LinkGuestOrder vincula un pedido de invitado a la cuenta autenticada — SOLO si el pedido no

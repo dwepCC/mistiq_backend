@@ -200,11 +200,11 @@ func (h *EcommerceHandler) GetCustomerOrderAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	order, items, err := service.NewEcommerceService(db(c)).GetCustomerOrder(customerID, uint(orderID))
+	order, items, dispatch, err := service.NewEcommerceService(db(c)).GetCustomerOrder(customerID, uint(orderID))
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": order, "items": items})
+	return c.JSON(fiber.Map{"data": order, "items": items, "dispatch": dispatch})
 }
 
 func (h *EcommerceHandler) LinkGuestOrderAPI(c fiber.Ctx) error {

@@ -52,6 +52,9 @@ func RegisterRoutes(api fiber.Router) {
 	// Despacho operativo (Fase 8) — permiso fijo (a diferencia de status, esta acción no varía).
 	api.Post("/ecommerce/orders/:id/dispatch", mod, ordersDispatch, h.CreateDispatchAPI)
 	api.Patch("/ecommerce/dispatches/:id", mod, ordersDispatch, h.UpdateDispatchAPI)
+	// Tracking/transición de despacho (Fase 9) — DESPACHADO->EN_TRANSITO->ENTREGADO, separado de
+	// PATCH (metadata) a propósito.
+	api.Put("/ecommerce/dispatches/:id/status", mod, ordersDispatch, h.UpdateDispatchStatusAPI)
 }
 
 // RegisterPublicRoutes rutas de la tienda pública (sin JWT de staff), resueltas por tenant vía

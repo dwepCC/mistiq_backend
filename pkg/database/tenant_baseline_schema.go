@@ -41,6 +41,7 @@ func ApplyBaselineSchema(db *gorm.DB) error {
 		&TenantEcommerceOrderItem{},
 		&TenantEcommerceOrderStatusHistory{},
 		&TenantEcommerceDispatch{},
+		&TenantEcommerceDispatchStatusHistory{},
 		&TenantNotification{},
 		&TenantNotificationRead{},
 		&TenantEcommerceCustomerAccount{},

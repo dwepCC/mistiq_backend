@@ -360,7 +360,10 @@ func (h *EcommerceHandler) CreateDispatchAPI(c fiber.Ctx) error {
 
 // UpdateDispatchAPI PATCH /api/ecommerce/dispatches/:id — Fase 8. Solo metadata (carrier/tracking/
 // bultos/peso/dimensiones/notas); Status, OrderID y fechas de auditoría quedan explícitamente
-// fuera de este endpoint (restricción aprobada), avanzar Dispatch.Status es Fase 9.
+// fuera de este endpoint (restricción aprobada) — avanzar Dispatch.Status vive en
+// UpdateDispatchStatusAPI (Fase 9), un endpoint separado a propósito: el body de este handler no
+// tiene (ni tendrá) un campo "status", así que es estructuralmente imposible usar este PATCH para
+// forzar una transición de estado.
 func (h *EcommerceHandler) UpdateDispatchAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
@@ -385,6 +388,42 @@ func (h *EcommerceHandler) UpdateDispatchAPI(c fiber.Ctx) error {
 		LengthCm: body.LengthCm, WidthCm: body.WidthCm, HeightCm: body.HeightCm,
 		Notes: body.Notes,
 	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": dispatch})
+}
+
+// UpdateDispatchStatusAPI PUT /api/ecommerce/dispatches/:id/status — Fase 9. Único punto de
+// entrada para avanzar el ciclo de vida del despacho, separado a propósito de UpdateDispatchAPI
+// (metadata). Mismo idioma que UpdateOrderStatusAPI (PUT .../status con {status, notes} en el
+// body), pero acá solo dos destinos son válidos: EN_TRANSITO (DESPACHADO->EN_TRANSITO, no toca
+// Order) y ENTREGADO (EN_TRANSITO->ENTREGADO, sí toca Order — ver
+// EcommerceService.MarkDispatchDelivered). Cualquier otro valor se rechaza con 422 antes de tocar
+// el servicio — nunca se acepta un status arbitrario.
+func (h *EcommerceHandler) UpdateDispatchStatusAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Status string `json:"status"`
+		Notes  string `json:"notes"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	svc := service.NewEcommerceService(db(c))
+	input := service.DispatchTransitionInput{UserID: orderUserID(c), Notes: body.Notes}
+	var dispatch *database.TenantEcommerceDispatch
+	switch strings.ToUpper(strings.TrimSpace(body.Status)) {
+	case service.DispatchStatusEnTransito:
+		dispatch, err = svc.MarkDispatchInTransit(uint(id), input)
+	case service.DispatchStatusEntregado:
+		dispatch, err = svc.MarkDispatchDelivered(uint(id), input)
+	default:
+		return c.Status(422).JSON(fiber.Map{"error": "transición de despacho no soportada"})
+	}
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}

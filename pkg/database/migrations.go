@@ -1193,6 +1193,23 @@ type TenantEcommerceDispatch struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
+// TenantEcommerceDispatchStatusHistory historial del DESPACHO (Contrato v2 §5/§8/§9, Fase 9) —
+// deliberadamente SEPARADO de TenantEcommerceOrderStatusHistory: la transición DESPACHADO→
+// EN_TRANSITO cambia SOLO Dispatch.Status (Order.Status se queda en DESPACHADO), así que una fila
+// ahí con ToStatus="EN_TRANSITO" sería incorrecta — "EN_TRANSITO" ni siquiera es un valor válido
+// de Order.Status. Mismo shape exacto que TenantEcommerceOrderStatusHistory, mismo patrón, sin
+// campos extra. FromStatus/ToStatus usan los valores de DispatchStatus* (order_status.go), nunca
+// los de OrderStatus*.
+type TenantEcommerceDispatchStatusHistory struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	DispatchID uint      `gorm:"not null;index" json:"dispatch_id"`
+	FromStatus string    `gorm:"size:20;not null" json:"from_status"`
+	ToStatus   string    `gorm:"size:20;not null" json:"to_status"`
+	UserID     *uint     `json:"user_id"`
+	Notes      string    `gorm:"type:text" json:"notes"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // TenantNotification notificación interna del panel (Contrato ecommerce v2 §1.7). Fase 3 solo
 // persistía la fila al crear un pedido web; Fase 6 agrega entrega en vivo (pkg/notificationevents,
 // hub SSE con el mismo patrón de pkg/billingevents pero independiente) + API de lectura
