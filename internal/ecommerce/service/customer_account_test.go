@@ -25,6 +25,7 @@ func setupCustomerAccountTestDB(t *testing.T) *gorm.DB {
 	for _, m := range []interface{}{
 		&database.TenantEcommerceCustomerAccount{}, &database.TenantEcommerceCustomerAddress{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
+		&database.TenantEcommerceDispatch{}, &database.TenantEcommerceDispatchStatusHistory{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatal(err)
@@ -204,7 +205,7 @@ func TestGetCustomerOrder_DeOtroCliente_Rechazado(t *testing.T) {
 	db.Create(&orderB)
 
 	// Cliente A intenta consultar el pedido de Cliente B conociendo su ID — debe fallar.
-	_, _, err := svc.GetCustomerOrder(clienteA.ID, orderB.ID)
+	_, _, _, err := svc.GetCustomerOrder(clienteA.ID, orderB.ID)
 	if err == nil {
 		t.Fatal("un cliente NUNCA debe poder consultar el pedido de otro solo conociendo el ID")
 	}
@@ -221,7 +222,7 @@ func TestGetCustomerOrder_DeOtroTenant_Rechazado(t *testing.T) {
 	dbA.Create(&orderA)
 
 	clienteB := mustRegisterCustomer(t, svcB, "999666111") // mismo teléfono, otro tenant — IDs pueden coincidir
-	_, _, err := svcB.GetCustomerOrder(clienteB.ID, orderA.ID)
+	_, _, _, err := svcB.GetCustomerOrder(clienteB.ID, orderA.ID)
 	if err == nil {
 		t.Fatal("un pedido que solo existe en OTRO tenant (BD separada) nunca debe resolverse")
 	}

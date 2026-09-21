@@ -31,7 +31,8 @@ func setupConvertTestDB(t *testing.T) *gorm.DB {
 		&database.TenantBranch{}, &database.TenantProductStock{}, &database.TenantStockMovement{},
 		&database.TenantInventoryOperationType{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
-		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{}, &database.TenantNotification{},
+		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{},
+		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantNotification{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {
