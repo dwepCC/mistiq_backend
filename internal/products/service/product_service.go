@@ -73,6 +73,21 @@ type ProductReportItem struct {
 	StockByBranch []BranchStockRow `json:"stock_by_branch"`
 	Serials       []string         `json:"serials"`
 	SerialCount   int              `json:"serial_count"`
+	// Presentations: solo poblado cuando HasVariants=true (mismas TenantProductPresentation que ya
+	// usa POS/Inventario — ver ProductService.syncPresentations). nil/omitido para productos
+	// simples. Contrato ecommerce v2 §1.8/Fase 2: variantes tipo "Rojo / XL" son presentaciones con
+	// nombre compuesto, no una entidad nueva.
+	Presentations []PresentationOption `json:"presentations,omitempty"`
+}
+
+// PresentationOption presentación de un producto con su stock agregado, para catálogo/reportes.
+// Stock respeta el mismo alcance (branchID) que StockTotal/StockByBranch del producto — branchID=0
+// = agregado de todas las sucursales, igual que el resto de este método.
+type PresentationOption struct {
+	ID        uint    `json:"id"`
+	Name      string  `json:"name"`
+	SalePrice float64 `json:"sale_price"`
+	Stock     float64 `json:"stock"`
 }
 
 func (s *ProductService) buildListQuery(params ProductListParams) *gorm.DB {
@@ -424,6 +439,48 @@ func (s *ProductService) enrichReport(products []database.TenantProduct, branchI
 		}
 	}
 
+	// Presentaciones (variantes) por producto, con su stock agregado en el mismo alcance
+	// (branchID) que ya se usó arriba para recalcular totals/stockMap de productos con variantes —
+	// reutiliza exactamente las mismas tablas (tenant_product_presentations/_stocks), sin duplicar
+	// lógica de inventario en el catálogo.
+	presByProduct := map[uint][]PresentationOption{}
+	if len(variantIDs) > 0 {
+		var presentations []database.TenantProductPresentation
+		s.db.Where("product_id IN ? AND active = ?", variantIDs, true).
+			Order("sort_order ASC, id ASC").Find(&presentations)
+
+		presentationIDs := make([]uint, len(presentations))
+		for i, pr := range presentations {
+			presentationIDs[i] = pr.ID
+		}
+
+		type presStockRow struct {
+			PresentationID uint
+			Quantity       float64
+		}
+		stockByPresentation := map[uint]float64{}
+		if len(presentationIDs) > 0 {
+			var stockRows []presStockRow
+			psq := s.db.Table("tenant_product_presentation_stocks").
+				Select("presentation_id, SUM(quantity) AS quantity").
+				Where("presentation_id IN ?", presentationIDs).
+				Group("presentation_id")
+			if branchID > 0 {
+				psq = psq.Where("branch_id = ?", branchID)
+			}
+			_ = psq.Scan(&stockRows).Error
+			for _, r := range stockRows {
+				stockByPresentation[r.PresentationID] = r.Quantity
+			}
+		}
+
+		for _, pr := range presentations {
+			presByProduct[pr.ProductID] = append(presByProduct[pr.ProductID], PresentationOption{
+				ID: pr.ID, Name: pr.Name, SalePrice: pr.SalePrice, Stock: stockByPresentation[pr.ID],
+			})
+		}
+	}
+
 	seriesIDs := make([]uint, 0)
 	for _, p := range products {
 		if p.ManageSeries {
@@ -472,6 +529,7 @@ func (s *ProductService) enrichReport(products []database.TenantProduct, branchI
 			StockByBranch: br,
 			Serials:       ser,
 			SerialCount:   sc,
+			Presentations: presByProduct[p.ID],
 		}
 	}
 	return out
@@ -553,13 +611,13 @@ func (s *ProductService) EnsureRestaurantBranchAccess(p *database.TenantProduct,
 }
 
 type ProductInput struct {
-	CategoryID           *uint
-	BrandID              *uint
-	Code                 string
-	Name                 string
-	Description          string
-	Type                 string
-	Unit                 string
+	CategoryID  *uint
+	BrandID     *uint
+	Code        string
+	Name        string
+	Description string
+	Type        string
+	Unit        string
 	// UnitID: si viene, manda sobre Unit (el catálogo por ID es la fuente de verdad para altas/
 	// ediciones desde la UI). Si viene nil, se resuelve/crea a partir de Unit (compatibilidad con
 	// importación masiva y clientes de API que todavía mandan solo texto) — ver resolveUnitReference.

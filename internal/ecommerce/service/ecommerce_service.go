@@ -284,6 +284,12 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 			items[i].StockByBranch = nil
 			items[i].Serials = nil
 			items[i].SerialCount = 0
+			// Las presentaciones en sí (id/name/sale_price) se mantienen — el cliente sigue
+			// necesitando elegir una para agregar al carrito, "Mostrar stock" solo oculta el
+			// número de disponibilidad, igual que ya hace con StockTotal.
+			for j := range items[i].Presentations {
+				items[i].Presentations[j].Stock = 0
+			}
 		}
 	}
 	return items, total, nil
