@@ -58,6 +58,25 @@ func TestFindOrderTransition_TablaAprobada(t *testing.T) {
 	}
 }
 
+// TestFindOrderTransition_EstadosTerminalesNoEntranAPreparacion Fase 7 (Contrato v2 §5): un
+// pedido cancelado, rechazado, ya despachado o ya entregado nunca puede "retroceder" o "saltar" a
+// una etapa de preparación — la tabla de transiciones ya lo garantiza por construcción (no existen
+// esas filas), esto lo prueba explícitamente para que una futura edición de la tabla no lo rompa
+// sin que un test lo note.
+func TestFindOrderTransition_EstadosTerminalesNoEntranAPreparacion(t *testing.T) {
+	terminalesOFueraDeFlujo := []string{
+		OrderStatusCancelado, OrderStatusRechazado, OrderStatusDespachado, OrderStatusEntregado, OrderStatusDevuelto,
+	}
+	etapasPreparacion := []string{OrderStatusEnPreparacion, OrderStatusEmpaquetado, OrderStatusListoParaDespacho}
+	for _, from := range terminalesOFueraDeFlujo {
+		for _, to := range etapasPreparacion {
+			if _, ok := FindOrderTransition(from, to); ok {
+				t.Errorf("FindOrderTransition(%s, %s) no debía existir — un pedido en %s nunca entra a preparación", from, to, from)
+			}
+		}
+	}
+}
+
 func TestRequiresReasonNotes(t *testing.T) {
 	if !requiresReasonNotes(OrderStatusCancelado) {
 		t.Error("CANCELADO debe exigir motivo")
