@@ -9,6 +9,7 @@ import (
 	"tukifac/pkg/database"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type InventoryService struct {
@@ -75,14 +76,29 @@ func (s *InventoryService) RecordMovementTx(tx *gorm.DB, input MovementInput) er
 
 	byPresentation := input.PresentationID != nil && *input.PresentationID > 0
 
+	// SELECT ... FOR UPDATE sobre la fila de stock (product_id+branch_id, o presentation_id+
+	// branch_id): bloquea esa fila puntual hasta que ESTA transacción confirme o revierta. Sin
+	// esto, dos llamadas concurrentes a RecordMovementTx sobre el mismo producto/sucursal pueden
+	// leer el mismo currentQty ANTES de que cualquiera de las dos escriba, validar ambas "stock
+	// suficiente" contra ese mismo saldo, y terminar sobrevendiendo — confirmado de forma real
+	// contra MySQL antes de este fix (30 salidas concurrentes contra un stock de 10 pasaban las
+	// 30, ver TestRecordMovementTx_ConcurrentOut_NoOversell). Con el lock, la segunda transacción
+	// que intente leer la misma fila queda bloqueada en su propio SELECT hasta que la primera
+	// confirme — así su lectura de currentQty ya refleja el descuento anterior. El lock se
+	// libera solo al COMMIT/ROLLBACK de esta transacción (comportamiento estándar de InnoDB), no
+	// hay unlock manual. No se bloquea toda la tabla ni otras filas de otros productos/sucursales:
+	// dos movimientos concurrentes sobre productos DISTINTOS (o el mismo producto en sucursales
+	// distintas) no se esperan entre sí.
 	var currentQty float64
 	var stock database.TenantProductStock
 	var pstock database.TenantProductPresentationStock
 	if byPresentation {
-		tx.Where("presentation_id = ? AND branch_id = ?", *input.PresentationID, input.BranchID).First(&pstock)
+		tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("presentation_id = ? AND branch_id = ?", *input.PresentationID, input.BranchID).First(&pstock)
 		currentQty = pstock.Quantity
 	} else {
-		tx.Where("product_id = ? AND branch_id = ?", input.ProductID, input.BranchID).First(&stock)
+		tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("product_id = ? AND branch_id = ?", input.ProductID, input.BranchID).First(&stock)
 		currentQty = stock.Quantity
 	}
 
