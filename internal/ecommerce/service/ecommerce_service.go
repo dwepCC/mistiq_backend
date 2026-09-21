@@ -581,19 +581,20 @@ func (s *EcommerceService) ListOrders(params ListOrdersParams) ([]database.Tenan
 	return rows, err
 }
 
-// GetOrderDetail pedido + líneas + historial de transiciones, para el detalle del panel (Contrato
-// v2 Fase 5). Líneas: prioriza TenantEcommerceOrderItem (normalizado, con PresentationID real);
-// si un pedido legacy no tiene filas ahí, cae a deserializar ItemsJSON — mismo criterio de
-// fallback que ya usa ConvertToSale (internal/ecommerce/service/convert.go loadOrderItems), nunca
-// se deja un pedido sin poder mostrar sus productos.
-func (s *EcommerceService) GetOrderDetail(id uint) (*database.TenantEcommerceOrder, []database.TenantEcommerceOrderItem, []database.TenantEcommerceOrderStatusHistory, error) {
+// GetOrderDetail pedido + líneas + historial de transiciones + despacho (si existe), para el
+// detalle del panel (Contrato v2 Fase 5/8). Líneas: prioriza TenantEcommerceOrderItem (normalizado,
+// con PresentationID real); si un pedido legacy no tiene filas ahí, cae a deserializar ItemsJSON —
+// mismo criterio de fallback que ya usa ConvertToSale (internal/ecommerce/service/convert.go
+// loadOrderItems), nunca se deja un pedido sin poder mostrar sus productos. Dispatch: nil sin error
+// si el pedido todavía no tiene uno — nunca un 404 solo por no estar despachado todavía.
+func (s *EcommerceService) GetOrderDetail(id uint) (*database.TenantEcommerceOrder, []database.TenantEcommerceOrderItem, []database.TenantEcommerceOrderStatusHistory, *database.TenantEcommerceDispatch, error) {
 	var order database.TenantEcommerceOrder
 	if err := s.db.First(&order, id).Error; err != nil {
-		return nil, nil, nil, fmt.Errorf("pedido no encontrado")
+		return nil, nil, nil, nil, fmt.Errorf("pedido no encontrado")
 	}
 	var items []database.TenantEcommerceOrderItem
 	if err := s.db.Where("order_id = ?", id).Order("id ASC").Find(&items).Error; err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if len(items) == 0 && strings.TrimSpace(order.ItemsJSON) != "" {
 		var legacy []OrderItemInput
@@ -608,9 +609,13 @@ func (s *EcommerceService) GetOrderDetail(id uint) (*database.TenantEcommerceOrd
 	}
 	var history []database.TenantEcommerceOrderStatusHistory
 	if err := s.db.Where("order_id = ?", id).Order("created_at ASC, id ASC").Find(&history).Error; err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return &order, items, history, nil
+	dispatch, err := s.GetDispatchByOrderID(id)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return &order, items, history, dispatch, nil
 }
 
 // UpdateOrderStatusInput ver Contrato v2 §5/§6.2. BranchID: solo se aplica en la transición

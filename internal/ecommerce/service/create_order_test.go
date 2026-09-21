@@ -28,7 +28,7 @@ func setupCreateOrderTestDB(t *testing.T) *gorm.DB {
 		&database.TenantProduct{}, &database.TenantProductPresentation{},
 		&database.TenantProductStock{}, &database.TenantProductPresentationStock{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
-		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{}, &database.TenantNotification{},
 		&database.TenantEcommerceCustomerAccount{}, &database.TenantEcommerceCustomerAddress{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {

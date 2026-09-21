@@ -81,8 +81,17 @@ func (V141TenantNotificationReads) Up(db *gorm.DB) error {
 		return nil
 	}
 	if !migrationHasIndex(db, "tenant_notifications", idxNotificationsType) {
+		// (type(60)), NO (type): v139Notification (el struct local que creó esta tabla para
+		// tenants existentes) no lleva tags gorm, así que MySQL tipó "type" como TEXT/BLOB —
+		// un índice sobre TEXT sin longitud de prefijo falla con "BLOB/TEXT column used in key
+		// specification without a key length" (Error 1170). El prefijo de 60 es inofensivo para
+		// tenants nuevos donde la columna ya es VARCHAR(60) (vía AutoMigrate del baseline con el
+		// struct real, que sí tiene el tag): un prefijo >= al tamaño real de la columna indexa la
+		// columna completa igual. Encontrado y corregido en la verificación real de Fase 8 contra
+		// MySQL — nunca se había ejecutado esta migración contra una tabla con la forma real de
+		// v139 hasta ahora.
 		if err := db.Exec(fmt.Sprintf(
-			`CREATE INDEX %s ON tenant_notifications (type)`, idxNotificationsType,
+			`CREATE INDEX %s ON tenant_notifications (type(60))`, idxNotificationsType,
 		)).Error; err != nil {
 			return fmt.Errorf("crear %s: %w", idxNotificationsType, err)
 		}

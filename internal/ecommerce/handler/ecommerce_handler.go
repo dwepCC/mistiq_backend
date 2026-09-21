@@ -254,19 +254,20 @@ func (h *EcommerceHandler) ListOrdersAPI(c fiber.Ctx) error {
 }
 
 // GetOrderAPI detalle completo de un pedido para el panel: pedido + líneas normalizadas
-// (con fallback a ItemsJSON si es un pedido legacy) + historial de transiciones real — Contrato v2
-// Fase 5. No fabrica historial: si no hay filas en TenantEcommerceOrderStatusHistory, "history"
-// viene vacío, nunca inventado.
+// (con fallback a ItemsJSON si es un pedido legacy) + historial de transiciones real + despacho si
+// existe — Contrato v2 Fase 5/8. No fabrica historial: si no hay filas en
+// TenantEcommerceOrderStatusHistory, "history" viene vacío, nunca inventado. "dispatch" viene null
+// si el pedido todavía no fue despachado (nunca un 404 solo por eso).
 func (h *EcommerceHandler) GetOrderAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	order, items, history, err := service.NewEcommerceService(db(c)).GetOrderDetail(uint(id))
+	order, items, history, dispatch, err := service.NewEcommerceService(db(c)).GetOrderDetail(uint(id))
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": order, "items": items, "history": history})
+	return c.JSON(fiber.Map{"data": order, "items": items, "history": history, "dispatch": dispatch})
 }
 
 func (h *EcommerceHandler) OrderPrintDataAPI(c fiber.Ctx) error {
@@ -321,6 +322,73 @@ func (h *EcommerceHandler) ConvertOrderAPI(c fiber.Ctx) error {
 		out["print_data"] = printData
 	}
 	return c.JSON(out)
+}
+
+// CreateDispatchAPI POST /api/ecommerce/orders/:id/dispatch — Contrato v2 §5/§8, Fase 8. Crea el
+// despacho y pasa el pedido a DESPACHADO en una única transacción (ver
+// EcommerceService.CreateDispatch). Carrier/tracking/bultos/peso/dimensiones son todos opcionales
+// — el frontend decide qué mostrar según DeliveryMethod, el backend nunca los exige.
+func (h *EcommerceHandler) CreateDispatchAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		CarrierName  *string  `json:"carrier_name"`
+		TrackingCode *string  `json:"tracking_code"`
+		PackageCount *int     `json:"package_count"`
+		WeightKg     *float64 `json:"weight_kg"`
+		LengthCm     *float64 `json:"length_cm"`
+		WidthCm      *float64 `json:"width_cm"`
+		HeightCm     *float64 `json:"height_cm"`
+		Notes        string   `json:"notes"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	dispatch, err := service.NewEcommerceService(db(c)).CreateDispatch(uint(id), service.CreateDispatchInput{
+		CarrierName: body.CarrierName, TrackingCode: body.TrackingCode,
+		PackageCount: body.PackageCount, WeightKg: body.WeightKg,
+		LengthCm: body.LengthCm, WidthCm: body.WidthCm, HeightCm: body.HeightCm,
+		Notes: body.Notes, UserID: orderUserID(c),
+	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"data": dispatch})
+}
+
+// UpdateDispatchAPI PATCH /api/ecommerce/dispatches/:id — Fase 8. Solo metadata (carrier/tracking/
+// bultos/peso/dimensiones/notas); Status, OrderID y fechas de auditoría quedan explícitamente
+// fuera de este endpoint (restricción aprobada), avanzar Dispatch.Status es Fase 9.
+func (h *EcommerceHandler) UpdateDispatchAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		CarrierName  *string  `json:"carrier_name"`
+		TrackingCode *string  `json:"tracking_code"`
+		PackageCount *int     `json:"package_count"`
+		WeightKg     *float64 `json:"weight_kg"`
+		LengthCm     *float64 `json:"length_cm"`
+		WidthCm      *float64 `json:"width_cm"`
+		HeightCm     *float64 `json:"height_cm"`
+		Notes        *string  `json:"notes"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	dispatch, err := service.NewEcommerceService(db(c)).UpdateDispatch(uint(id), service.UpdateDispatchInput{
+		CarrierName: body.CarrierName, TrackingCode: body.TrackingCode,
+		PackageCount: body.PackageCount, WeightKg: body.WeightKg,
+		LengthCm: body.LengthCm, WidthCm: body.WidthCm, HeightCm: body.HeightCm,
+		Notes: body.Notes,
+	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": dispatch})
 }
 
 func orderUserID(c fiber.Ctx) uint {

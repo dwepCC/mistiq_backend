@@ -30,7 +30,7 @@ func setupCustomerHandlerTestDB(t *testing.T) *gorm.DB {
 		&database.TenantEcommerceCustomerAccount{}, &database.TenantEcommerceCustomerAddress{},
 		&database.TenantProduct{}, &database.TenantProductPresentation{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
-		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{}, &database.TenantNotification{},
 	); err != nil {
 		t.Fatal(err)
 	}

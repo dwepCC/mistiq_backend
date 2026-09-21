@@ -105,7 +105,7 @@ func TestGetOrderDetail_UsaItemsNormalizados(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, items, history, err := svc.GetOrderDetail(order.ID)
+	got, items, history, _, err := svc.GetOrderDetail(order.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestGetOrderDetail_FallbackAItemsJSONParaPedidoLegacy(t *testing.T) {
 		CustomerName: "Legacy", CustomerPhone: "999", Total: 27, ItemsJSON: string(legacyItems),
 	})
 
-	_, items, history, err := svc.GetOrderDetail(order.ID)
+	_, items, history, _, err := svc.GetOrderDetail(order.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestGetOrderDetail_FallbackAItemsJSONParaPedidoLegacy(t *testing.T) {
 func TestGetOrderDetail_PedidoInexistente(t *testing.T) {
 	db := setupCreateOrderTestDB(t)
 	svc := &EcommerceService{db: db}
-	_, _, _, err := svc.GetOrderDetail(99999)
+	_, _, _, _, err := svc.GetOrderDetail(99999)
 	if err == nil {
 		t.Fatal("un pedido inexistente debe devolver error")
 	}

@@ -27,6 +27,7 @@ func RegisterRoutes(api fiber.Router) {
 	manage := middleware.RequirePermission("ecommerce.manage")
 	ordersView := middleware.RequirePermission("ecommerce.orders_view")
 	ordersConvert := middleware.RequirePermission("ecommerce.orders_convert")
+	ordersDispatch := middleware.RequirePermission("ecommerce.orders_dispatch")
 	ordersTransition := middleware.RequireAnyPermission(
 		"ecommerce.orders_manage", "ecommerce.orders_prepare",
 		"ecommerce.orders_dispatch", "ecommerce.orders_return",
@@ -48,6 +49,9 @@ func RegisterRoutes(api fiber.Router) {
 	api.Get("/ecommerce/orders/:id/print-data", mod, ordersView, h.OrderPrintDataAPI)
 	api.Put("/ecommerce/orders/:id/status", mod, ordersTransition, h.UpdateOrderStatusAPI)
 	api.Post("/ecommerce/orders/:id/convert", mod, ordersConvert, h.ConvertOrderAPI)
+	// Despacho operativo (Fase 8) — permiso fijo (a diferencia de status, esta acción no varía).
+	api.Post("/ecommerce/orders/:id/dispatch", mod, ordersDispatch, h.CreateDispatchAPI)
+	api.Patch("/ecommerce/dispatches/:id", mod, ordersDispatch, h.UpdateDispatchAPI)
 }
 
 // RegisterPublicRoutes rutas de la tienda pública (sin JWT de staff), resueltas por tenant vía

@@ -28,7 +28,7 @@ func setupIsolatedEcommerceServiceDB(t *testing.T) *gorm.DB {
 	}
 	for _, m := range []interface{}{
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
-		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{}, &database.TenantNotification{},
 		&database.TenantProduct{}, &database.TenantProductPresentation{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {
@@ -188,7 +188,7 @@ func TestGetOrderDetail_ItemsJSONLegacy_FuncionaEnEstadoDePreparacion(t *testing
 		t.Fatal(err)
 	}
 
-	_, items, _, err := svc.GetOrderDetail(legacy.ID)
+	_, items, _, _, err := svc.GetOrderDetail(legacy.ID)
 	if err != nil {
 		t.Fatalf("GetOrderDetail: %v", err)
 	}

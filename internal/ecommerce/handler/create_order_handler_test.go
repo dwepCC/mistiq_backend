@@ -25,7 +25,7 @@ func setupCreateOrderHandlerTestDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&database.TenantProduct{}, &database.TenantProductPresentation{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
-		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{}, &database.TenantNotification{},
 	); err != nil {
 		t.Fatal(err)
 	}

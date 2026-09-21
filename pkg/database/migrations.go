@@ -1155,6 +1155,44 @@ type TenantEcommerceOrderStatusHistory struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// TenantEcommerceDispatch despacho operativo de un pedido web (Contrato ecommerce v2 §5/§8, Fase
+// 8). Relación 1:1 con TenantEcommerceOrder (UNIQUE en OrderID — "por defecto: un pedido → un
+// despacho activo", decisión confirmada; si el negocio necesita múltiples despachos por pedido en
+// el futuro, es una decisión de diseño aparte). Deliberadamente NO duplica BranchID, DeliveryMethod
+// ni DeliveryAddressID — Order sigue siendo la única fuente de verdad de esos datos, el despacho
+// los consulta a través de la relación, nunca los copia.
+//
+// CarrierName/TrackingCode son texto libre a propósito (decisión aprobada de Fase 8): no existe
+// ningún catálogo de transportistas reutilizable para este dominio — TenantGreCarrier es
+// específico de guías de remisión SUNAT (internal/fleet, gateado por el módulo "billing") y
+// TenantDeliveryCompany/TenantDeliveryDriver son específicos del delivery de restaurante
+// (internal/restaurant) — mezclar cualquiera de los dos con el despacho ecommerce habría cruzado
+// dominios que Fase 8 mantiene separados a propósito. Un catálogo común reutilizable entre los tres
+// dominios queda como posible decisión arquitectónica futura, no de esta fase.
+//
+// Status es el ciclo de vida del DESPACHO, independiente del Status del pedido (Order.Status
+// puede ser DESPACHADO mientras Dispatch.Status avanza por su cuenta a EN_TRANSITO/ENTREGADO en
+// fases futuras — Fase 8 solo asigna "DESPACHADO" al crear, nunca PENDIENTE_DESPACHO, aunque el
+// valor queda definido en el enum para esa evolución futura, ver order_status.go DispatchStatus*).
+type TenantEcommerceDispatch struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	OrderID      uint       `gorm:"not null;uniqueIndex" json:"order_id"`
+	Status       string     `gorm:"size:20;not null" json:"status"`
+	CarrierName  *string    `gorm:"size:150" json:"carrier_name"`
+	TrackingCode *string    `gorm:"size:100" json:"tracking_code"`
+	PackageCount *int       `json:"package_count"`
+	WeightKg     *float64   `json:"weight_kg"`
+	LengthCm     *float64   `json:"length_cm"`
+	WidthCm      *float64   `json:"width_cm"`
+	HeightCm     *float64   `json:"height_cm"`
+	DispatchedAt *time.Time `json:"dispatched_at"`
+	DeliveredAt  *time.Time `json:"delivered_at"`
+	UserID       *uint      `json:"user_id"`
+	Notes        string     `gorm:"type:text" json:"notes"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
 // TenantNotification notificación interna del panel (Contrato ecommerce v2 §1.7). Fase 3 solo
 // persistía la fila al crear un pedido web; Fase 6 agrega entrega en vivo (pkg/notificationevents,
 // hub SSE con el mismo patrón de pkg/billingevents pero independiente) + API de lectura

@@ -23,6 +23,7 @@ func setupEcommerceServiceDB(t *testing.T) *gorm.DB {
 		&database.TenantEcommerceOrder{},
 		&database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{},
+		&database.TenantEcommerceDispatch{},
 		&database.TenantNotification{},
 		&database.TenantProduct{},
 		&database.TenantProductPresentation{},

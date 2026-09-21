@@ -16,6 +16,22 @@ const (
 	OrderStatusDevuelto          = "DEVUELTO"
 )
 
+// Estados de TenantEcommerceDispatch.Status — Contrato v2 §5/§8, Fase 8. Ciclo de vida del
+// DESPACHO, deliberadamente en constantes SEPARADAS de OrderStatus* aunque algún valor literal
+// coincida ("DESPACHADO" existe en ambos dominios) — nunca se reutiliza la misma constante Go para
+// los dos, así una futura divergencia entre los dos ciclos de vida (p. ej. si el pedido y el
+// despacho llegaran a necesitar palabras distintas) no obliga a tocar el otro dominio.
+// DispatchStatusPendiente queda definido para una evolución futura (Fase 9, un flujo en dos pasos);
+// ningún endpoint de Fase 8 lo asigna — CreateDispatch siempre crea el despacho ya en
+// DispatchStatusDespachado (decisión confirmada explícitamente).
+const (
+	DispatchStatusPendiente  = "PENDIENTE_DESPACHO"
+	DispatchStatusDespachado = "DESPACHADO"
+	DispatchStatusEnTransito = "EN_TRANSITO"
+	DispatchStatusEntregado  = "ENTREGADO"
+	DispatchStatusDevuelto   = "DEVUELTO"
+)
+
 // Permisos de pedidos web — Contrato v2 §7. Reemplazan el uso indiferenciado de "ecommerce.orders"
 // (deprecado, se mantiene solo por compatibilidad — ver v138_ecommerce_orders_rbac_v2.go).
 const (
