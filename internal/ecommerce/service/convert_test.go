@@ -31,7 +31,7 @@ func setupConvertTestDB(t *testing.T) *gorm.DB {
 		&database.TenantBranch{}, &database.TenantProductStock{}, &database.TenantStockMovement{},
 		&database.TenantInventoryOperationType{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
-		&database.TenantEcommerceOrderStatusHistory{},
+		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantNotification{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {
@@ -60,6 +60,7 @@ func seedConvertProduct(t *testing.T, db *gorm.DB, code string, price float64) d
 	p := database.TenantProduct{
 		Code: code, Name: "Producto " + code, Type: "product", Unit: "NIU", SalePrice: price,
 		IgvAffectationType: "10", PriceIncludesIgv: true, ManageStock: false, BranchID: 1, Active: true,
+		ShowInDigitalCatalog: true, // CreateOrder (Fase 3) solo resuelve productos publicados en el catálogo
 	}
 	if err := db.Create(&p).Error; err != nil {
 		t.Fatal(err)
@@ -94,9 +95,9 @@ func TestConvertToSale_NoCierraElPedido(t *testing.T) {
 	series := seedNotaVentaSeries(t, db)
 
 	svc := &EcommerceService{db: db}
-	order, err := svc.CreateOrder(CreateOrderInput{
-		CustomerName: "Ana", CustomerPhone: "999111222",
-		Items: []OrderItemInput{{ProductID: p.ID, Name: p.Name, Quantity: 1, UnitPrice: 25}},
+	order, _, err := svc.CreateOrder(CreateOrderInput{
+		CustomerName: "Ana", CustomerPhone: "999111222", DeliveryMethod: DeliveryMethodPickup,
+		Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1}},
 	})
 	if err != nil {
 		t.Fatalf("CreateOrder: %v", err)
@@ -143,11 +144,11 @@ func TestConvertToSale_LeeDeTenantEcommerceOrderItem(t *testing.T) {
 	series := seedNotaVentaSeries(t, db)
 
 	svc := &EcommerceService{db: db}
-	order, err := svc.CreateOrder(CreateOrderInput{
-		CustomerName: "Luis", CustomerPhone: "999333444",
-		Items: []OrderItemInput{
-			{ProductID: p1.ID, Name: p1.Name, Quantity: 2, UnitPrice: 10},
-			{ProductID: p2.ID, Name: p2.Name, Quantity: 1, UnitPrice: 15},
+	order, _, err := svc.CreateOrder(CreateOrderInput{
+		CustomerName: "Luis", CustomerPhone: "999333444", DeliveryMethod: DeliveryMethodPickup,
+		Items: []CreateOrderItemInput{
+			{ProductID: p1.ID, Quantity: 2},
+			{ProductID: p2.ID, Quantity: 1},
 		},
 	})
 	if err != nil {

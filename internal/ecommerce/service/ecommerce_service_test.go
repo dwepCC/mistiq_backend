@@ -23,6 +23,9 @@ func setupEcommerceServiceDB(t *testing.T) *gorm.DB {
 		&database.TenantEcommerceOrder{},
 		&database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{},
+		&database.TenantNotification{},
+		&database.TenantProduct{},
+		&database.TenantProductPresentation{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatal(err)
@@ -31,14 +34,33 @@ func setupEcommerceServiceDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// seedOrderableProduct producto real, publicado y activo — CreateOrder resuelve nombre/precio
+// SIEMPRE contra filas como esta, nunca contra lo que mande el cliente (Fase 3).
+func seedOrderableProduct(t *testing.T, db *gorm.DB, code, name string, price float64) database.TenantProduct {
+	t.Helper()
+	p := database.TenantProduct{
+		Code: code, Name: name, Type: "product", Unit: "NIU", SalePrice: price,
+		Active: true, ShowInDigitalCatalog: true,
+	}
+	if err := db.Create(&p).Error; err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// mustCreateOrder siembra "Polo" (S/ 25 x2) y "Pantalón" (S/ 60 x1), ambos productos simples, y
+// crea el pedido a través del contrato público real (solo product_id/quantity, sin precio/nombre).
 func mustCreateOrder(t *testing.T, svc *EcommerceService) *database.TenantEcommerceOrder {
 	t.Helper()
-	order, err := svc.CreateOrder(CreateOrderInput{
-		CustomerName:  "Juan Pérez",
-		CustomerPhone: "999888777",
-		Items: []OrderItemInput{
-			{ProductID: 1, Name: "Polo", Quantity: 2, UnitPrice: 25},
-			{ProductID: 2, Name: "Pantalón", Quantity: 1, UnitPrice: 60},
+	polo := seedOrderableProduct(t, svc.db, "POLO", "Polo", 25)
+	pantalon := seedOrderableProduct(t, svc.db, "PANT", "Pantalón", 60)
+	order, _, err := svc.CreateOrder(CreateOrderInput{
+		CustomerName:   "Juan Pérez",
+		CustomerPhone:  "999888777",
+		DeliveryMethod: DeliveryMethodPickup,
+		Items: []CreateOrderItemInput{
+			{ProductID: polo.ID, Quantity: 2},
+			{ProductID: pantalon.ID, Quantity: 1},
 		},
 	})
 	if err != nil {
@@ -122,13 +144,17 @@ func TestUpdateOrderStatus_TransicionValidaConPermisoDelegadoAlCaller(t *testing
 		t.Errorf("BranchID debe asignarse al confirmar si no tenía: %v", updated.BranchID)
 	}
 
+	// 2 filas: la de creación (""->PENDIENTE, escrita por CreateOrder, Fase 3) + esta transición.
 	var hist []database.TenantEcommerceOrderStatusHistory
-	db.Where("order_id = ?", order.ID).Find(&hist)
-	if len(hist) != 1 {
-		t.Fatalf("debe registrar 1 fila en StatusHistory, hay %d", len(hist))
+	db.Where("order_id = ?", order.ID).Order("id ASC").Find(&hist)
+	if len(hist) != 2 {
+		t.Fatalf("debe haber 2 filas en StatusHistory (creación + confirmación), hay %d", len(hist))
 	}
-	if hist[0].FromStatus != OrderStatusPendiente || hist[0].ToStatus != OrderStatusConfirmado {
-		t.Errorf("StatusHistory from/to = %s/%s, quería PENDIENTE/CONFIRMADO", hist[0].FromStatus, hist[0].ToStatus)
+	if hist[0].FromStatus != "" || hist[0].ToStatus != OrderStatusPendiente {
+		t.Errorf("primera fila (creación) from/to = %q/%q, quería \"\"/PENDIENTE", hist[0].FromStatus, hist[0].ToStatus)
+	}
+	if hist[1].FromStatus != OrderStatusPendiente || hist[1].ToStatus != OrderStatusConfirmado {
+		t.Errorf("segunda fila from/to = %s/%s, quería PENDIENTE/CONFIRMADO", hist[1].FromStatus, hist[1].ToStatus)
 	}
 }
 
@@ -168,10 +194,11 @@ func TestUpdateOrderStatus_TransicionInvalida(t *testing.T) {
 	if updated.Status != OrderStatusPendiente {
 		t.Errorf("una transición inválida no debe modificar el status, quedó %q", updated.Status)
 	}
+	// 1 fila (la de creación, de CreateOrder) — la transición rechazada no debe agregar ninguna más.
 	var hist []database.TenantEcommerceOrderStatusHistory
 	db.Where("order_id = ?", order.ID).Find(&hist)
-	if len(hist) != 0 {
-		t.Errorf("una transición rechazada no debe dejar fila en StatusHistory, hay %d", len(hist))
+	if len(hist) != 1 {
+		t.Errorf("una transición rechazada no debe agregar filas a StatusHistory (solo la de creación), hay %d", len(hist))
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	companyservice "tukifac/internal/company/service"
 	productservice "tukifac/internal/products/service"
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 
 	"gorm.io/gorm"
 )
@@ -297,6 +298,9 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 
 // ── Pedidos ──────────────────────────────────────────────────────────
 
+// OrderItemInput representación INTERNA de una línea ya resuelta (nombre/precio reales, no lo que
+// mandó el cliente) — es lo que se serializa en ItemsJSON y lo que lee ConvertToSale/print_data.go.
+// No confundir con CreateOrderItemInput (lo que sí puede mandar el cliente).
 type OrderItemInput struct {
 	ProductID uint    `json:"product_id"`
 	Name      string  `json:"name"`
@@ -304,70 +308,204 @@ type OrderItemInput struct {
 	UnitPrice float64 `json:"unit_price"`
 }
 
-type CreateOrderInput struct {
-	CustomerName  string
-	CustomerPhone string
-	Items         []OrderItemInput
+// CreateOrderItemInput lo único que el cliente público puede enviar por línea: identidad +
+// cantidad. Deliberadamente SIN name/unit_price/subtotal — CreateOrder los resuelve siempre desde
+// el catálogo real del tenant (Contrato v2 Fase 3, "el backend nunca confía en precio/nombre
+// enviado por el cliente").
+type CreateOrderItemInput struct {
+	ProductID uint
+	// PresentationID: nil = producto simple. Si viene informado, debe pertenecer a ProductID,
+	// estar activo, y existir en ESTE tenant — todo se valida contra la BD, nunca se confía en el
+	// nombre/precio que el frontend ya tenía cacheado del catálogo.
+	PresentationID *uint
+	Quantity       float64
 }
 
-func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.TenantEcommerceOrder, error) {
+const (
+	DeliveryMethodPickup   = "RECOJO_TIENDA"
+	DeliveryMethodShipping = "ENVIO_DOMICILIO"
+)
+
+// CreateOrderInput CustomerAccountID/ContactID/DeliveryAddressID: soportados a nivel de servicio
+// para cuando exista checkout autenticado (Fase 4), pero el endpoint público (sin login) nunca los
+// llena — no hay forma de autenticar a un cliente final todavía.
+type CreateOrderInput struct {
+	CustomerName      string
+	CustomerPhone     string
+	DeliveryMethod    string // RECOJO_TIENDA | ENVIO_DOMICILIO
+	GuestAddressLine  string
+	GuestReference    string
+	GuestUbigeo       string
+	CustomerAccountID *uint
+	ContactID         *uint
+	DeliveryAddressID *uint
+	Items             []CreateOrderItemInput
+}
+
+// resolvedOrderLine línea ya validada/resuelta contra el catálogo real — nunca construida a partir
+// de datos crudos del cliente.
+type resolvedOrderLine struct {
+	ProductID      uint
+	PresentationID *uint
+	Name           string
+	Quantity       float64
+	UnitPrice      float64
+	Subtotal       float64
+}
+
+// resolveOrderLine valida y resuelve UNA línea contra el catálogo del tenant actual (s.db, ya
+// scopeado a esa BD — no existe forma de que un product_id de otro tenant "exista" acá, cada
+// tenant vive en su propia base). Reglas: el producto debe existir, estar activo y publicado en el
+// Catálogo Digital (no se puede pedir un producto oculto adivinando su ID); si se manda
+// presentation_id, debe pertenecer a ESE producto y estar activa; si el producto tiene variantes,
+// presentation_id es obligatorio (no se puede pedir "a ciegas" sin elegir una).
+func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput) (resolvedOrderLine, error) {
+	if it.ProductID == 0 {
+		return resolvedOrderLine{}, fmt.Errorf("producto inválido en el pedido")
+	}
+	if !(it.Quantity > 0) {
+		return resolvedOrderLine{}, fmt.Errorf("la cantidad debe ser mayor a cero")
+	}
+	var product database.TenantProduct
+	if err := s.db.Where("id = ? AND active = ? AND show_in_digital_catalog = ?", it.ProductID, true, true).
+		First(&product).Error; err != nil {
+		return resolvedOrderLine{}, fmt.Errorf("uno de los productos del pedido ya no está disponible")
+	}
+
+	name := product.Name
+	unitPrice := product.SalePrice
+	var presentationID *uint
+	if it.PresentationID != nil && *it.PresentationID > 0 {
+		var pres database.TenantProductPresentation
+		if err := s.db.Where("id = ? AND product_id = ? AND active = ?", *it.PresentationID, product.ID, true).
+			First(&pres).Error; err != nil {
+			return resolvedOrderLine{}, fmt.Errorf("la presentación elegida para '%s' ya no está disponible", product.Name)
+		}
+		name = product.Name + " — " + pres.Name
+		unitPrice = pres.SalePrice
+		id := pres.ID
+		presentationID = &id
+	} else if product.HasVariants {
+		return resolvedOrderLine{}, fmt.Errorf("'%s' requiere elegir una presentación", product.Name)
+	}
+	if !(unitPrice > 0) {
+		return resolvedOrderLine{}, fmt.Errorf("'%s' no tiene un precio de venta válido (S/ 0.00)", name)
+	}
+
+	qty := it.Quantity
+	return resolvedOrderLine{
+		ProductID: product.ID, PresentationID: presentationID, Name: name,
+		Quantity: qty, UnitPrice: unitPrice, Subtotal: money.RoundDisplay(qty * unitPrice),
+	}, nil
+}
+
+// CreateOrder crea el pedido y sus líneas dentro de una única transacción: si cualquier
+// validación/resolución falla, no queda ningún registro a medias (nunca un pedido "fantasma" sin
+// líneas, ni líneas sin pedido). Devuelve las líneas ya resueltas para que el caller (handler) las
+// use en la respuesta pública sin tener que releerlas.
+func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.TenantEcommerceOrder, []database.TenantEcommerceOrderItem, error) {
 	if len(input.Items) == 0 {
-		return nil, fmt.Errorf("el pedido no tiene productos")
+		return nil, nil, fmt.Errorf("el pedido no tiene productos")
 	}
 	if strings.TrimSpace(input.CustomerName) == "" {
-		return nil, fmt.Errorf("el nombre del cliente es obligatorio")
+		return nil, nil, fmt.Errorf("el nombre del cliente es obligatorio")
 	}
 	if strings.TrimSpace(input.CustomerPhone) == "" {
-		return nil, fmt.Errorf("el celular del cliente es obligatorio")
+		return nil, nil, fmt.Errorf("el celular del cliente es obligatorio")
 	}
-	total := 0.0
+	deliveryMethod := strings.ToUpper(strings.TrimSpace(input.DeliveryMethod))
+	if deliveryMethod != DeliveryMethodPickup && deliveryMethod != DeliveryMethodShipping {
+		return nil, nil, fmt.Errorf("método de entrega inválido")
+	}
+	hasAuthenticatedAddress := input.DeliveryAddressID != nil && *input.DeliveryAddressID > 0
+	if deliveryMethod == DeliveryMethodShipping && !hasAuthenticatedAddress && strings.TrimSpace(input.GuestAddressLine) == "" {
+		return nil, nil, fmt.Errorf("la dirección de entrega es obligatoria para envío a domicilio")
+	}
+	if ubigeo := strings.TrimSpace(input.GuestUbigeo); ubigeo != "" && len(ubigeo) != 6 {
+		return nil, nil, fmt.Errorf("el ubigeo debe tener 6 dígitos")
+	}
+
+	lines := make([]resolvedOrderLine, 0, len(input.Items))
 	for _, it := range input.Items {
-		// Precio real obligatorio: si no se corrige aquí, el pedido se guarda igual y el error
-		// solo aparece tarde, al convertirlo a venta (SaleService.Create lo rechaza).
-		if !(it.UnitPrice > 0) {
-			label := strings.TrimSpace(it.Name)
-			if label == "" {
-				label = "un producto del pedido"
-			}
-			return nil, fmt.Errorf("'%s' no tiene un precio de venta válido (S/ 0.00)", label)
+		line, err := s.resolveOrderLine(it)
+		if err != nil {
+			return nil, nil, err
 		}
-		total += it.Quantity * it.UnitPrice
+		lines = append(lines, line)
 	}
-	itemsJSON, err := json.Marshal(input.Items)
+
+	total := 0.0
+	for _, l := range lines {
+		total += l.Subtotal
+	}
+	total = money.RoundDisplay(total)
+
+	legacyItems := make([]OrderItemInput, len(lines))
+	for i, l := range lines {
+		legacyItems[i] = OrderItemInput{ProductID: l.ProductID, Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice}
+	}
+	itemsJSON, err := json.Marshal(legacyItems)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
 	order := &database.TenantEcommerceOrder{
-		CustomerName:  strings.TrimSpace(input.CustomerName),
-		CustomerPhone: strings.TrimSpace(input.CustomerPhone),
-		ItemsJSON:     string(itemsJSON), // dual-write: se sigue llenando, ver comentario en el modelo
-		Subtotal:      total,             // sin descuentos/impuestos a nivel de pedido todavía
-		Total:         total,
+		CustomerName:      strings.TrimSpace(input.CustomerName),
+		CustomerPhone:     strings.TrimSpace(input.CustomerPhone),
+		CustomerAccountID: input.CustomerAccountID,
+		ContactID:         input.ContactID,
+		DeliveryMethod:    deliveryMethod,
+		DeliveryAddressID: input.DeliveryAddressID,
+		ItemsJSON:         string(itemsJSON), // dual-write: se sigue llenando, ver comentario en el modelo
+		Subtotal:          total,             // sin descuentos/impuestos a nivel de pedido todavía
+		Total:             total,
 		// PaymentStatus NO se toma de input (CreateOrderInput no lo expone): el cliente público no
 		// puede enviarlo ni modificarlo. Fijo en NO_APLICA mientras no exista pasarela de pago.
 		PaymentStatus: "NO_APLICA",
 		Status:        OrderStatusPendiente,
 	}
+	if !hasAuthenticatedAddress {
+		order.GuestAddressLine = strings.TrimSpace(input.GuestAddressLine)
+		order.GuestReference = strings.TrimSpace(input.GuestReference)
+		order.GuestUbigeo = strings.TrimSpace(input.GuestUbigeo)
+	}
+
+	var createdItems []database.TenantEcommerceOrderItem
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(order).Error; err != nil {
 			return err
 		}
-		items := make([]database.TenantEcommerceOrderItem, 0, len(input.Items))
-		for _, it := range input.Items {
-			items = append(items, database.TenantEcommerceOrderItem{
-				OrderID:   order.ID,
-				ProductID: it.ProductID,
-				Name:      it.Name,
-				Quantity:  it.Quantity,
-				UnitPrice: it.UnitPrice,
-				Subtotal:  it.Quantity * it.UnitPrice,
-			})
+		createdItems = make([]database.TenantEcommerceOrderItem, len(lines))
+		for i, l := range lines {
+			createdItems[i] = database.TenantEcommerceOrderItem{
+				OrderID: order.ID, ProductID: l.ProductID, PresentationID: l.PresentationID,
+				Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice, Subtotal: l.Subtotal,
+			}
 		}
-		return tx.Create(&items).Error
+		if err := tx.Create(&createdItems).Error; err != nil {
+			return err
+		}
+		// FromStatus="" (no "transición" real, es la creación) — igual documenta desde cuándo el
+		// pedido existe en PENDIENTE (Contrato v2 §5, fila "Cliente finaliza checkout").
+		if err := tx.Create(&database.TenantEcommerceOrderStatusHistory{
+			OrderID: order.ID, FromStatus: "", ToStatus: OrderStatusPendiente,
+		}).Error; err != nil {
+			return err
+		}
+		// Notificación interna (Contrato v2 §1.7). Solo la fila: el hub SSE/badge que la entrega en
+		// vivo al panel es Fase 6, todavía no implementado — acá únicamente se persiste.
+		return tx.Create(&database.TenantNotification{
+			Type:     "ecommerce.order.created",
+			Title:    fmt.Sprintf("Nuevo pedido online #%d", order.ID),
+			Body:     fmt.Sprintf("%s — S/ %.2f", order.CustomerName, total),
+			LinkPath: fmt.Sprintf("/sales/pedidos-web?id=%d", order.ID),
+		}).Error
 	}); err != nil {
-		return nil, err
+		// Nada de lo de arriba queda persistido (rollback de la transacción) — jamás se abre
+		// WhatsApp para un pedido que no llegó a existir de verdad.
+		return nil, nil, err
 	}
-	return order, nil
+	return order, createdItems, nil
 }
 
 func (s *EcommerceService) GetOrder(id uint) (*database.TenantEcommerceOrder, error) {

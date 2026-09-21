@@ -1155,6 +1155,23 @@ type TenantEcommerceOrderStatusHistory struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// TenantNotification notificación interna del panel (Contrato ecommerce v2 §1.7, Fase 3: solo se
+// persiste la fila al crear un pedido web; el mecanismo de entrega en vivo —hub SSE reutilizando
+// el patrón de pkg/billingevents, badge/campanita en Header.tsx— es Fase 6, todavía no
+// implementado. Type es un string libre versionado por dominio ("ecommerce.order.created") para
+// que otros módulos puedan emitir sus propios tipos sin migración nueva. UserID nil = visible para
+// cualquier usuario con el permiso correspondiente al Type, no dirigida a alguien puntual.
+type TenantNotification struct {
+	ID        uint       `gorm:"primaryKey" json:"id"`
+	Type      string     `gorm:"size:60;not null;index" json:"type"`
+	Title     string     `gorm:"size:255;not null" json:"title"`
+	Body      string     `gorm:"type:text" json:"body"`
+	LinkPath  string     `gorm:"size:255" json:"link_path"`
+	ReadAt    *time.Time `json:"read_at"`
+	UserID    *uint      `gorm:"index" json:"user_id"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
 // TenantProductSerial rastrea números de serie individuales por producto y sucursal.
 type TenantProductSerial struct {
 	ID             uint      `gorm:"primaryKey" json:"id"`

@@ -509,39 +509,50 @@ func (h *EcommerceHandler) PublicProductsAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": items, "total": total})
 }
 
+// CreatePublicOrderAPI Contrato ecommerce v2 Fase 3: el cliente SOLO puede mandar identidad de
+// producto/presentación + cantidad por línea — nombre/precio/subtotal/total nunca vienen del
+// cliente, EcommerceService.CreateOrder los resuelve siempre contra el catálogo real del tenant.
 func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 	var body struct {
-		CustomerName  string `json:"customer_name"`
-		CustomerPhone string `json:"customer_phone"`
-		Items         []struct {
-			ProductID uint    `json:"product_id"`
-			Name      string  `json:"name"`
-			Quantity  float64 `json:"quantity"`
-			UnitPrice float64 `json:"unit_price"`
+		CustomerName   string `json:"customer_name"`
+		CustomerPhone  string `json:"customer_phone"`
+		DeliveryMethod string `json:"delivery_method"`
+		Address        *struct {
+			AddressLine string `json:"address_line"`
+			Reference   string `json:"reference"`
+			Ubigeo      string `json:"ubigeo"`
+		} `json:"address"`
+		Items []struct {
+			ProductID      uint    `json:"product_id"`
+			PresentationID *uint   `json:"presentation_id"`
+			Quantity       float64 `json:"quantity"`
 		} `json:"items"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
-	items := make([]service.OrderItemInput, 0, len(body.Items))
+	items := make([]service.CreateOrderItemInput, 0, len(body.Items))
 	for _, it := range body.Items {
-		if it.ProductID == 0 || it.Quantity <= 0 {
-			continue
-		}
-		items = append(items, service.OrderItemInput{
-			ProductID: it.ProductID,
-			Name:      it.Name,
-			Quantity:  it.Quantity,
-			UnitPrice: it.UnitPrice,
+		items = append(items, service.CreateOrderItemInput{
+			ProductID:      it.ProductID,
+			PresentationID: it.PresentationID,
+			Quantity:       it.Quantity,
 		})
 	}
-	order, err := service.NewEcommerceService(db(c)).CreateOrder(service.CreateOrderInput{
-		CustomerName:  body.CustomerName,
-		CustomerPhone: body.CustomerPhone,
-		Items:         items,
-	})
+	input := service.CreateOrderInput{
+		CustomerName:   body.CustomerName,
+		CustomerPhone:  body.CustomerPhone,
+		DeliveryMethod: body.DeliveryMethod,
+		Items:          items,
+	}
+	if body.Address != nil {
+		input.GuestAddressLine = body.Address.AddressLine
+		input.GuestReference = body.Address.Reference
+		input.GuestUbigeo = body.Address.Ubigeo
+	}
+	order, orderItems, err := service.NewEcommerceService(db(c)).CreateOrder(input)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.Status(201).JSON(fiber.Map{"data": order, "order_number": order.ID})
+	return c.Status(201).JSON(fiber.Map{"data": order, "items": orderItems, "order_number": order.ID})
 }
