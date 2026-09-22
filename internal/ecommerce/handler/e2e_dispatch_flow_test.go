@@ -281,4 +281,66 @@ func TestE2E_FlujoCompletoDespachoYTracking(t *testing.T) {
 	if afterDeliver.ConvertedSaleID != nil {
 		t.Fatal("(18-venta) REGRESIÓN: el flujo de despacho/tracking no debe crear ni tocar ConvertedSaleID")
 	}
+
+	// ── Fase 11 — Devolución (Deuda #8 cerrada) — continúa el MISMO pedido real vía HTTP ──
+
+	// 19. Ejecutar ENTREGADO -> DEVUELTO vía el endpoint genérico real.
+	returnResp := putStatus(order.ID, "DEVUELTO")
+	if returnResp.StatusCode != http.StatusOK {
+		t.Fatalf("(19) transición a DEVUELTO falló, status=%d", returnResp.StatusCode)
+	}
+
+	// 20. Verificar Order=DEVUELTO y Dispatch sincronizado a DEVUELTO.
+	var afterReturn database.TenantEcommerceOrder
+	db.First(&afterReturn, order.ID)
+	var dispatchAfterReturn database.TenantEcommerceDispatch
+	db.First(&dispatchAfterReturn, dispatchID)
+	if afterReturn.Status != service.OrderStatusDevuelto {
+		t.Fatalf("(20) Order.Status = %q, quería DEVUELTO", afterReturn.Status)
+	}
+	if dispatchAfterReturn.Status != service.DispatchStatusDevuelto {
+		t.Fatalf("(20) Dispatch.Status = %q, quería DEVUELTO (Deuda #8 debía quedar cerrada)", dispatchAfterReturn.Status)
+	}
+
+	// 21. Verificar ambos historiales, sin mezclarse entre dominios.
+	var orderReturnHist database.TenantEcommerceOrderStatusHistory
+	if err := db.Where("order_id = ? AND from_status = ? AND to_status = ?", order.ID, "ENTREGADO", "DEVUELTO").First(&orderReturnHist).Error; err != nil {
+		t.Fatalf("(21) historial de order ENTREGADO->DEVUELTO no encontrado: %v", err)
+	}
+	var dispatchReturnHist database.TenantEcommerceDispatchStatusHistory
+	if err := db.Where("dispatch_id = ? AND from_status = ? AND to_status = ?", dispatchID, "ENTREGADO", "DEVUELTO").First(&dispatchReturnHist).Error; err != nil {
+		t.Fatalf("(21) historial de dispatch ENTREGADO->DEVUELTO no encontrado: %v", err)
+	}
+
+	// 22. Doble click: un segundo intento de devolución se rechaza limpio, sin duplicar nada.
+	if resp := putStatus(order.ID, "DEVUELTO"); resp.StatusCode == http.StatusOK {
+		t.Fatal("(22) un segundo intento de devolución sobre un pedido ya DEVUELTO debía rechazarse")
+	}
+	var orderReturnHistCount int64
+	db.Model(&database.TenantEcommerceOrderStatusHistory{}).Where("order_id = ? AND to_status = ?", order.ID, "DEVUELTO").Count(&orderReturnHistCount)
+	if orderReturnHistCount != 1 {
+		t.Fatalf("(22) REGRESIÓN: debe existir EXACTAMENTE 1 historial de order DEVUELTO, hay %d", orderReturnHistCount)
+	}
+
+	// 23. Consultar como customer: el cliente ve la devolución reflejada.
+	status3, _, custDispatch3 := getCustomerOrder()
+	if status3 != http.StatusOK {
+		t.Fatalf("(23) status=%d", status3)
+	}
+	if custDispatch3.Status != "DEVUELTO" {
+		t.Fatalf("(23) el cliente debía ver DEVUELTO, vio %q", custDispatch3.Status)
+	}
+
+	// 24/25. Stock/kardex siguen intactos después de la devolución — la devolución logística NO
+	// es un ajuste de inventario (fuera de alcance, no se implementó ningún movimiento de stock).
+	var stockAfterReturn database.TenantProductStock
+	db.Where("product_id = ? AND branch_id = ?", product.ID, 1).First(&stockAfterReturn)
+	if stockAfterReturn.Quantity != stockBefore.Quantity {
+		t.Fatalf("(24-stock) REGRESIÓN: stock cambió de %.2f a %.2f — la devolución logística no debe tocar inventario", stockBefore.Quantity, stockAfterReturn.Quantity)
+	}
+	var movementCountAfterReturn int64
+	db.Model(&database.TenantStockMovement{}).Where("product_id = ?", product.ID).Count(&movementCountAfterReturn)
+	if movementCountAfterReturn != 0 {
+		t.Fatalf("(25-kardex) no debía registrarse ningún movimiento de kardex por la devolución, hay %d", movementCountAfterReturn)
+	}
 }
