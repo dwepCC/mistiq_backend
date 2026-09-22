@@ -567,7 +567,7 @@ Verificación: 12 tests nuevos de servicio (transiciones válidas/inválidas, hi
 
 ### Fase 10 — Etiqueta logística. GRE: BLOQUEADA (decisión de negocio pendiente)
 
-Estado: **PARCIAL**. Commits locales `<pendiente de completar tras commit>` (backend) y `<pendiente de completar tras commit>` (frontend), sin push.
+Estado: **PARCIAL**. Commits locales `60af23c` (backend) y `4184353` (frontend), sin push.
 
 **Auditoría previa**: confirmado que no existe infraestructura de generación de PDF en el backend — todos los documentos (`salessvc.PrintData`, reutilizado también por `BuildPrintDataForOrder` del pedido web) se devuelven como JSON vía `GET .../print-data`, y el PDF se genera 100% client-side con `jsPDF` (`mistiq_tenant/src/utils/receiptPdf.ts`/`receiptPdfA4.ts`). Confirmado que el GRE (guía de remisión electrónica SUNAT) es un sistema completo y separado: `TenantDespatch` + `internal/billing/service/despatch_payload.go` + `CreateAndSendDespatch`, que SIEMPRE crea una `TenantSale` sintética internamente para llevar la guía por el mismo pipeline fiscal que facturas/boletas, exige `branch_id`/`series_id`/destinatario (RUC+razón social+dirección+ubigeo)/motivo de traslado/modalidad/fechas/peso/bultos/partida-llegada, y trata transportista/vehículo/conductor como **texto libre en el request** — nunca los valida contra `TenantGreCarrier`/`TenantGreDriver`/`TenantGreVehicle` (esas tablas solo existen como catálogo admin de prellenado en `internal/fleet`, gateado por el módulo "billing", sin ninguna FK real hacia la creación de GRE). No existía ninguna cadena "shipping-label"/"shipping_label" en todo el repo — greenfield confirmado.
 
