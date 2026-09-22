@@ -1,6 +1,6 @@
 # Contrato técnico — Evolución del Ecommerce Mistiq
 
-Estado: **APROBADO — Fase 1, Fase 1.5, Fase 2, Fase 3, Fase 4, Fase 5, Fase 6, Fase 7, Fase 8 y Fase 9 completadas, pendiente de tu revisión antes de Fase 10**. Aprobación general recibida sobre la v2, cerrando las decisiones pendientes: variantes vía `TenantProductPresentation` con nombre compuesto (sin nueva infraestructura), `PaymentStatus` como marcador inerte no editable por el cliente público, y `ecommerce.orders` como permiso legacy deprecado (sin retirar, sin nuevas asignaciones, sin inferencia automática sobre roles personalizados). Ver bitácora de fases al final del documento para el estado real de avance.
+Estado: **Fase 1, Fase 1.5, Fase 2, Fase 3, Fase 4, Fase 5, Fase 6, Fase 7, Fase 8 y Fase 9: APROBADAS. Fase 10: EN IMPLEMENTACIÓN.** Aprobación general recibida sobre la v2, cerrando las decisiones pendientes: variantes vía `TenantProductPresentation` con nombre compuesto (sin nueva infraestructura), `PaymentStatus` como marcador inerte no editable por el cliente público, y `ecommerce.orders` como permiso legacy deprecado (sin retirar, sin nuevas asignaciones, sin inferencia automática sobre roles personalizados). Ver bitácora de fases al final del documento para el estado real de avance.
 
 Referencia de auditoría original: `TenantEcommerceOrder` ([pkg/database/migrations.go:1071](../pkg/database/migrations.go)), `ConvertToSale` ([internal/ecommerce/service/convert.go](../internal/ecommerce/service/convert.go)), RBAC de tenant ([pkg/middleware/tenant_permissions.go](../pkg/middleware/tenant_permissions.go), [internal/users/service/role_service.go](../internal/users/service/role_service.go)), hub SSE de billing ([pkg/billingevents](../pkg/billingevents)), GRE ([internal/billing/service/despatch_payload.go](../internal/billing/service/despatch_payload.go)), patrón PrintData+jsPDF ([internal/ecommerce/service/print_data.go](../internal/ecommerce/service/print_data.go)).
 
@@ -86,9 +86,11 @@ type TenantEcommerceOrderItem struct {
 
 **Aclaración explícita (nueva):** **no se agrega** `PickedQuantity` ni `FulfillmentStatus` por línea en esta fase. La auditoría de esta revisión no encontró ningún caso de uso real en el código actual (POS, Inventario, Restaurante) que dependa de picking parcial persistente por línea — todo lo que existe hoy opera a nivel de documento completo (una transferencia, un ajuste, una venta se confirman como un todo). Introducir persistencia de picking parcial sin un caso de uso real violaría el principio de "no agregar campos porque aparecieron en el brief". `EN_PREPARACION → EMPAQUETADO` representa la preparación del **pedido completo**; cualquier checkbox de picking en la UI del almacenero es **estado de React efímero** (se pierde al recargar la página), nunca se envía al backend como progreso parcial. Si en el futuro el negocio reporta una necesidad real (ej. pedidos con 20+ líneas que se preparan en varias sesiones), se audita y diseña esa pieza como su propia fase — no ahora.
 
-### 1.3 – 1.7 Sin cambios respecto a v1
+### 1.3 – 1.7 Sin cambios respecto a v1, salvo el dominio de despacho (corregido tras Fase 8/9 — ver bitácora)
 
-`TenantEcommerceOrderStatusHistory`, `TenantEcommerceCustomerAccount` (+ regla de vinculación segura 1.4.1/1.4.2), `TenantEcommerceCustomerAddress`, dominio de despacho (`TenantEcommerceDispatch`/`TenantEcommerceCarrier`), `TenantNotification` — se mantienen exactamente como en v1, sin cambios derivados de esta revisión.
+`TenantEcommerceOrderStatusHistory`, `TenantEcommerceCustomerAccount` (+ regla de vinculación segura 1.4.1/1.4.2), `TenantEcommerceCustomerAddress`, `TenantNotification` — se mantienen exactamente como en v1, sin cambios derivados de esta revisión.
+
+**Dominio de despacho — corregido respecto al plan original de v1/v2:** el plan original de esta sección mencionaba `TenantEcommerceDispatch`/`TenantEcommerceCarrier` como par de entidades. La implementación real (Fase 8, decisión aprobada explícitamente) **no crea `TenantEcommerceCarrier`** — no existe ningún catálogo de transportistas para ecommerce. `TenantEcommerceDispatch` tiene `CarrierName`/`TrackingCode` como texto libre. El dominio de despacho real son DOS entidades: `TenantEcommerceDispatch` (Fase 8, migración v142) y `TenantEcommerceDispatchStatusHistory` (Fase 9, migración v143) — historial exclusivo del ciclo de vida del Dispatch, separado de `TenantEcommerceOrderStatusHistory` (exclusivo del ciclo de vida del Order). Ver sección 5 y bitácora de Fases 8/9 para el detalle completo.
 
 ### 1.8 Variantes — resultado de la segunda auditoría dirigida (punto 2 del usuario)
 
@@ -126,24 +128,23 @@ type TenantEcommerceOrderItem struct {
 
 ## 2. Migraciones necesarias
 
-Sin cambios respecto a v1, con dos ajustes:
+Sin cambios respecto a v1 en el principio (todo aditivo, mismo patrón que `v132_permission_catalog_redesign.go`, ninguna migración borra o renombra columnas existentes de `tenant_ecommerce_orders`).
 
-- Se elimina cualquier migración de datos o lógica que dependiera de "cerrar" el pedido al convertir (ya no aplica, sección 4).
-- La migración de permisos (`vNNN_ecommerce_permission_seed.go`) se reemplaza por el diseño de la sección 7 (permisos granulares + backfill de `ecommerce.orders` existente).
+**Tabla actualizada con los números y nombres REALES del registry** (`pkg/database/tenantmigrations/registry.go`) — la tabla original de v2 usaba nombres tentativos `vNNN_*`; se reemplaza acá por la lista real para que este documento no contradiga el código:
 
-| Migración | Contenido |
+| Migración real | Contenido |
 |---|---|
-| `vNNN_ecommerce_order_fields.go` | ALTER `tenant_ecommerce_orders`: agregar `branch_id`, `customer_account_id`, `contact_id`, `delivery_address_id`, `delivery_method`, `payment_status`, `subtotal`, `guest_address_line`, `guest_reference`, `guest_ubigeo`. Sin cambios respecto a v1 |
-| `vNNN_ecommerce_order_status_expand.go` | Ampliar validación de `status` al nuevo enum (sección 3), con backfill documentado en 1.1 de v1 |
-| `vNNN_ecommerce_order_items.go` | CREATE `tenant_ecommerce_order_items` (sin `picked_quantity`/`fulfillment_status`, ver 1.2) |
-| `vNNN_ecommerce_order_status_history.go` | CREATE `tenant_ecommerce_order_status_history` |
-| `vNNN_ecommerce_customer_accounts.go` | CREATE `tenant_ecommerce_customer_accounts`, `tenant_ecommerce_customer_addresses` |
-| `vNNN_ecommerce_dispatch.go` | CREATE `tenant_ecommerce_dispatches`, `tenant_ecommerce_carriers` |
-| `vNNN_tenant_notifications.go` | CREATE `tenant_notifications` |
-| `vNNN_ecommerce_permission_catalog_v2.go` | **Revisado.** Crea `ecommerce.orders_view`, `ecommerce.orders_prepare`, `ecommerce.orders_manage`, `ecommerce.orders_convert`, `ecommerce.orders_dispatch`, `ecommerce.orders_return`. Backfill: todo rol que ya tenía `ecommerce.orders` recibe `orders_view + orders_manage + orders_convert + orders_dispatch` (el superset que preserva el comportamiento actual, donde `ecommerce.orders` daba acceso indiferenciado a todo). `ecommerce.orders` se mantiene en el catálogo marcado `deprecated` (sigue funcionando por compatibilidad, no se elimina ni se oculta de tenants que ya la tengan asignada), pero deja de ofrecerse para asignación nueva desde la pantalla de Roles — la UI de Roles muestra las 6 nuevas |
+| `v134_ecommerce_order_fields.go` | ALTER `tenant_ecommerce_orders`: `branch_id`, `customer_account_id`, `contact_id`, `delivery_address_id`, `delivery_method`, `payment_status`, `subtotal`, `guest_address_line`, `guest_reference`, `guest_ubigeo` |
+| `v135_ecommerce_order_status_expand.go` | Amplía validación de `status` al enum real (sección 3) |
+| `v136_ecommerce_order_items.go` | CREATE `tenant_ecommerce_order_items` (sin `picked_quantity`/`fulfillment_status`, ver 1.2) |
+| `v137_ecommerce_order_status_history.go` | CREATE `tenant_ecommerce_order_status_history` |
+| `v138_ecommerce_orders_rbac_v2.go` | Crea los 6 permisos granulares (sección 7) + backfill de `ecommerce.orders` existente |
+| `v139_tenant_notifications.go` | CREATE `tenant_notifications` (Fase 3 — solo la tabla; API de lectura + SSE es Fase 6) |
+| `v140_ecommerce_customer_accounts.go` | CREATE `tenant_ecommerce_customer_accounts`, `tenant_ecommerce_customer_addresses` |
+| `v141_notification_reads.go` | CREATE `tenant_notification_reads` (Fase 6) + completa índices de `tenant_notifications` que v139 nunca creó para tenants existentes |
+| `v142_ecommerce_dispatch.go` | CREATE `tenant_ecommerce_dispatches` (Fase 8) — **NO** crea `tenant_ecommerce_carriers`: esa tabla nunca existió ni se planea, `CarrierName`/`TrackingCode` son texto libre dentro de `tenant_ecommerce_dispatches` (ver 1.3-1.7 y bitácora de Fase 8) |
+| `v143_dispatch_status_history.go` | CREATE `tenant_ecommerce_dispatch_status_histories` (Fase 9) — historial exclusivo del Dispatch, separado de `tenant_ecommerce_order_status_histories` |
 | — sin migración de datos de producto — | La recomendación de la sección 1.8 no requiere ninguna migración de esquema; es un cambio de API (exponer `presentations`), no de modelo |
-
-Ninguna migración borra o renombra columnas existentes de `tenant_ecommerce_orders` — todo aditivo, mismo patrón que `v132_permission_catalog_redesign.go`.
 
 ---
 
@@ -163,12 +164,22 @@ NO_APLICA (default) | PENDIENTE | PAGADO
 ```
 Inerte en esta fase (decisión aprobada #6).
 
-### 3.3 Dispatch/Fulfillment Status — sin cambios, vive en `TenantEcommerceDispatch.Status`
+### 3.3 Dispatch/Fulfillment Status — implementado en Fase 8/9, vive en `TenantEcommerceDispatch.Status`
 
 ```
 PENDIENTE_DESPACHO → DESPACHADO → EN_TRANSITO → ENTREGADO
 ```
-Alternativo: `DEVUELTO`.
+Alternativo: `DEVUELTO` (definido en el enum, sin código que lo asigne todavía — ver Deuda técnica #8).
+
+**Ciclo de vida INDEPENDIENTE del `Order.Status` (3.1)** — la relación exacta entre ambos, tal como quedó implementada:
+
+| Transición de Dispatch | Efecto en `Order.Status` |
+|---|---|
+| (creación) → `DESPACHADO` (Fase 8) | `Order.Status` pasa `LISTO_PARA_DESPACHO → DESPACHADO` (los dos cambian juntos, en la misma transacción) |
+| `DESPACHADO → EN_TRANSITO` (Fase 9) | **Ningún cambio** — `Order.Status` permanece `DESPACHADO` |
+| `EN_TRANSITO → ENTREGADO` (Fase 9) | `Order.Status` pasa `DESPACHADO → ENTREGADO` (los dos cambian juntos, en la misma transacción, con `DeliveredAt`) |
+
+`PENDIENTE_DESPACHO` queda definido en el enum para una evolución futura (ningún endpoint lo asigna hoy — el despacho siempre nace en `DESPACHADO`).
 
 ---
 
@@ -189,22 +200,24 @@ Alternativo: `DEVUELTO`.
 
 ---
 
-## 5. Tabla de transiciones — REVISADA (permisos granulares, punto 3; flujo de despacho corregido, punto 8; DEVUELTO restringido, punto 4)
+## 5. Tabla de transiciones — REVISADA (permisos granulares, punto 3; flujo de despacho corregido, punto 8; DEVUELTO restringido, punto 4; separación Order/Dispatch corregida tras Fase 8/9)
 
-| Estado actual | Acción | Estado siguiente | Permiso requerido | Efecto colateral |
-|---|---|---|---|---|
-| — | Cliente finaliza checkout | `PENDIENTE` | Público (sin auth) | Crea `TenantEcommerceOrder` + `TenantEcommerceOrderItem[]`; emite `TenantNotification` tipo `ecommerce.order.created` |
-| `PENDIENTE` | Staff confirma y asigna sucursal | `CONFIRMADO` | `ecommerce.orders_manage` | Setea `BranchID`; registra en `StatusHistory` |
-| `PENDIENTE`/`CONFIRMADO` | Staff rechaza | `RECHAZADO` | `ecommerce.orders_manage` | Requiere `Notes` con motivo |
-| `CONFIRMADO` | Almacenero inicia picking | `EN_PREPARACION` | `ecommerce.orders_prepare` | — (sin persistencia por línea, ver 1.2) |
-| `EN_PREPARACION` | Almacenero termina de empacar | `EMPAQUETADO` | `ecommerce.orders_prepare` | — |
-| `EMPAQUETADO` | Staff marca listo para despacho | `LISTO_PARA_DESPACHO` | `ecommerce.orders_prepare` | El Almacenero **puede** ejecutar esta transición — es la última que le corresponde según su alcance (ver §7) |
-| `LISTO_PARA_DESPACHO` | **Botón "Despachar"**: crea `TenantEcommerceDispatch` (transportista/tracking/bultos) | `DESPACHADO` | `ecommerce.orders_dispatch` | Crea el registro de despacho; opcionalmente imprime etiqueta. **El Almacenero NO tiene este permiso** — coincide exactamente con el alcance definido en el punto 3 del usuario |
-| `DESPACHADO` | Actualización de tracking | `DESPACHADO` (sin cambio de order status) | `ecommerce.orders_dispatch` | Actualiza `TenantEcommerceDispatch.Status` |
-| `DESPACHADO` | Confirmación de entrega | `ENTREGADO` | `ecommerce.orders_dispatch` | Setea `TenantEcommerceDispatch.DeliveredAt` |
-| `ENTREGADO` | Reclamo/devolución | `DEVUELTO` | **`ecommerce.orders_return`** (nuevo, exclusivo Administrador/Supervisor) | Registra en `StatusHistory`; no crea todavía flujo de devolución en inventario/ventas — ver sección de riesgos §16 |
-| Cualquiera antes de `DESPACHADO` | Cancelación | `CANCELADO` | `ecommerce.orders_manage` | Requiere `Notes` con motivo; si ya se convirtió a venta, bloquear cancelación del pedido (la venta se anula por el flujo de ventas existente, no aquí — sin cambios respecto a v1) |
-| Cualquier estado `>= CONFIRMADO`, salvo `CANCELADO`/`RECHAZADO` | Conversión a venta | Sin cambio de `Status` (ver §4) | `ecommerce.orders_convert` | Setea `ConvertedSaleID`/`ConvertedAt` únicamente |
+**Nota de reconciliación:** las filas siguientes mezclaban, en el plan original, transiciones de `Order.Status` con transiciones de `Dispatch.Status` sin distinguir el dominio — la implementación real (Fase 8/9) los mantiene en tablas de historial SEPARADAS (`TenantEcommerceOrderStatusHistory` vs. `TenantEcommerceDispatchStatusHistory`, nunca la misma fila para los dos). La columna "Dominio" se agregó acá para dejarlo inequívoco.
+
+| Dominio | Estado actual | Acción | Estado siguiente | Permiso requerido | Efecto colateral |
+|---|---|---|---|---|---|
+| Order | — | Cliente finaliza checkout | `PENDIENTE` | Público (sin auth) | Crea `TenantEcommerceOrder` + `TenantEcommerceOrderItem[]`; emite `TenantNotification` tipo `ecommerce.order.created` |
+| Order | `PENDIENTE` | Staff confirma y asigna sucursal | `CONFIRMADO` | `ecommerce.orders_manage` | Setea `BranchID`; registra en `OrderStatusHistory`; emite `ecommerce.order.confirmed` |
+| Order | `PENDIENTE`/`CONFIRMADO` | Staff rechaza | `RECHAZADO` | `ecommerce.orders_manage` | Requiere `Notes` con motivo; emite `ecommerce.order.cancelled` |
+| Order | `CONFIRMADO` | Almacenero inicia picking | `EN_PREPARACION` | `ecommerce.orders_prepare` | — (sin persistencia por línea, ver 1.2) |
+| Order | `EN_PREPARACION` | Almacenero termina de empacar | `EMPAQUETADO` | `ecommerce.orders_prepare` | — |
+| Order | `EMPAQUETADO` | Staff marca listo para despacho | `LISTO_PARA_DESPACHO` | `ecommerce.orders_prepare` | El Almacenero **puede** ejecutar esta transición — es la última que le corresponde según su alcance (ver §7) |
+| Order **+** Dispatch (creación) | `LISTO_PARA_DESPACHO` | `POST /orders/:id/dispatch` — crea `TenantEcommerceDispatch` (transportista/tracking/bultos, todos opcionales) | Order→`DESPACHADO`, Dispatch→`DESPACHADO` | `ecommerce.orders_dispatch` | Atómico (una transacción, `SELECT...FOR UPDATE`); registra `OrderStatusHistory`. **El Almacenero NO tiene este permiso.** Etiqueta: ver Fase 10 |
+| Dispatch únicamente | `DESPACHADO` | `PUT /dispatches/:id/status {status:"EN_TRANSITO"}` | Dispatch→`EN_TRANSITO` | `ecommerce.orders_dispatch` | **`Order.Status` NO cambia** (permanece `DESPACHADO`); registra `DispatchStatusHistory` — NUNCA `OrderStatusHistory` |
+| Order **+** Dispatch | `EN_TRANSITO` | `PUT /dispatches/:id/status {status:"ENTREGADO"}` | Order→`ENTREGADO`, Dispatch→`ENTREGADO` | `ecommerce.orders_dispatch` | Atómico; setea `Dispatch.DeliveredAt` (reloj del servidor); registra AMBOS historiales (`DispatchStatusHistory` y `OrderStatusHistory`) |
+| Order | `ENTREGADO` | Reclamo/devolución | `DEVUELTO` | **`ecommerce.orders_return`** (exclusivo Administrador/Supervisor) | Registra en `OrderStatusHistory`; no crea todavía flujo de devolución en inventario/ventas (§16); **`Dispatch.Status` NO se sincroniza a `DEVUELTO`** — deuda técnica #8, decisión pendiente |
+| Order | Cualquiera antes de `DESPACHADO` | Cancelación | `CANCELADO` | `ecommerce.orders_manage` | Requiere `Notes` con motivo; si ya se convirtió a venta, bloquear cancelación del pedido (sin cambios respecto a v1) |
+| Order | Cualquier estado `>= CONFIRMADO`, salvo `CANCELADO`/`RECHAZADO` | Conversión a venta | Sin cambio de `Status` (ver §4) | `ecommerce.orders_convert` | Setea `ConvertedSaleID`/`ConvertedAt` únicamente; emite `ecommerce.order.converted` |
 
 ---
 
@@ -214,20 +227,20 @@ Alternativo: `DEVUELTO`.
 
 (catálogo, checkout, auth de cliente, cuenta — igual que v1, sección 6.1 original, sin permisos de tenant involucrados)
 
-### 6.2 Panel tenant — permisos revisados
+### 6.2 Panel tenant — permisos revisados (tabla reconciliada con las rutas REALES de `internal/ecommerce/routes.go`/`internal/notifications/routes.go` tras Fase 5-9)
 
-| Method | Path | Permiso | Notas |
+| Method real | Path | Permiso | Notas |
 |---|---|---|---|
-| GET | `/api/ecommerce/orders` | `ecommerce.orders_view` | — |
-| GET | `/api/ecommerce/orders/:id` | `ecommerce.orders_view` | — |
-| PATCH | `/api/ecommerce/orders/:id/status` | Depende de la transición solicitada — el servicio valida contra la tabla §5 y exige el permiso correspondiente a esa transición específica (no un permiso único para "cambiar estado a lo que sea") | Este es el punto central del punto 3 del usuario: el mismo endpoint puede ser llamado por distintos roles, pero cada transición exige su propio permiso, evaluado server-side |
-| PATCH | `/api/ecommerce/orders/:id/branch` | `ecommerce.orders_manage` | — |
+| GET | `/api/ecommerce/orders` | `ecommerce.orders_view` | Filtros: `status`, `branch_id`, `q`, `date_from`, `date_to` (Fase 5) |
+| GET | `/api/ecommerce/orders/:id` | `ecommerce.orders_view` | Incluye `items`, `history` y `dispatch` (Fase 5/8) |
+| **PUT** | `/api/ecommerce/orders/:id/status` | Depende de la transición solicitada — el servicio valida contra la tabla §5 y exige el permiso correspondiente a esa transición específica (no un permiso único para "cambiar estado a lo que sea") | **Corregido: el método real es `PUT`, no `PATCH`.** El mismo endpoint puede ser llamado por distintos roles, pero cada transición exige su propio permiso, evaluado server-side. No existe (ni existió nunca) un endpoint `/orders/:id/branch` separado — la sucursal se asigna dentro del body de esta misma transición (`PENDIENTE→CONFIRMADO`) |
 | POST | `/api/ecommerce/orders/:id/convert` | `ecommerce.orders_convert` | Ya no fuerza `status` (sección 4) |
-| POST | `/api/ecommerce/orders/:id/dispatch` | `ecommerce.orders_dispatch` | — |
-| PATCH | `/api/ecommerce/dispatches/:id` | `ecommerce.orders_dispatch` | — |
-| GET | `/api/ecommerce/orders/:id/shipping-label` | `ecommerce.orders_dispatch` | Generar la etiqueta es parte del flujo de despacho, no de preparación |
-| CRUD | `/api/ecommerce/carriers` | `ecommerce.manage` | Configuración, no operación diaria |
-| GET/PATCH | `/api/notifications*` | Cualquier usuario autenticado con al menos uno de los permisos `ecommerce.orders_*` ve notificaciones `ecommerce.*` | — |
+| POST | `/api/ecommerce/orders/:id/dispatch` | `ecommerce.orders_dispatch` | Crea el `Dispatch` y pasa `Order`→`DESPACHADO` (Fase 8) |
+| PATCH | `/api/ecommerce/dispatches/:id` | `ecommerce.orders_dispatch` | Solo metadata (carrier/tracking/bultos/peso/dimensiones/notas) — nunca `status` (Fase 8) |
+| **PUT** | `/api/ecommerce/dispatches/:id/status` | `ecommerce.orders_dispatch` | **Nuevo en Fase 9** — único punto de entrada para `DESPACHADO→EN_TRANSITO→ENTREGADO`, separado a propósito de la metadata |
+| GET | `/api/ecommerce/orders/:id/shipping-label` | `ecommerce.orders_dispatch` | Ver bitácora de Fase 10 para el endpoint/método real — no asumir que esta fila ya estaba implementada antes de esa fase |
+| — | ~~CRUD `/api/ecommerce/carriers`~~ | — | **Nunca implementado, decisión revertida en Fase 8**: no existe catálogo de transportistas para ecommerce, `CarrierName`/`TrackingCode` son texto libre dentro de `TenantEcommerceDispatch` |
+| GET/POST | `/api/notifications*` | Cualquier usuario autenticado (sin `RequireModule`) — el filtrado real de qué notificaciones ve cada uno pasa por el mapa `Type→permiso` de `internal/notifications/service`, no por un permiso a nivel de ruta | Implementado en Fase 6: `GET /api/notifications`, `GET /api/notifications/unread-count`, `POST /api/notifications/:id/read`, `POST /api/notifications/read-all`, `GET /api/notifications/events` (SSE) |
 
 **Validación server-side explícita (refuerza el punto 3):** el backend nunca confía en que el frontend solo muestre el botón correcto — cada handler de transición valida el permiso específico de esa transición antes de ejecutar el `Update`, con el mismo mecanismo `RequirePermission`/`RequireAnyPermission` ya existente ([pkg/middleware/permissions.go](../pkg/middleware/permissions.go)), sin necesidad de nueva infraestructura de autorización.
 
@@ -296,16 +309,18 @@ Checkboxes de picking (punto 7): estado local de React (`useState` dentro de `Pe
 
 **v1 tenía una inconsistencia real**: el diagrama de esta sección escribía "DESPACHAR" *antes* de "LISTO_PARA_DESPACHO", contradiciendo la tabla de transiciones (sección 5), que siempre tuvo el orden correcto. Corregido:
 
+**Corregido de nuevo tras Fase 9** (el diagrama todavía combinaba "actualizar tracking" y "confirmar entrega" como si `DESPACHADO→ENTREGADO` fuera una sola transición directa del pedido — la implementación real inserta `EN_TRANSITO` como estado intermedio del **Dispatch**, no del pedido):
+
 ```
 PEDIDOS (/sales/pedidos-web)
-  → CONFIRMAR (asigna sucursal si falta)               [ecommerce.orders_manage]    → CONFIRMADO
-  → PREPARAR (Almacenero, vista de picking)             [ecommerce.orders_prepare]   → EN_PREPARACION
-  → EMPAQUETAR                                          [ecommerce.orders_prepare]   → EMPAQUETADO
-  → MARCAR LISTO PARA DESPACHO                          [ecommerce.orders_prepare]   → LISTO_PARA_DESPACHO
-  → DESPACHAR (crea TenantEcommerceDispatch, imprime etiqueta) [ecommerce.orders_dispatch] → DESPACHADO
-  → ACTUALIZAR TRACKING                                 [ecommerce.orders_dispatch]  → (DESPACHADO, sin cambio de order status)
-  → CONFIRMAR ENTREGA                                   [ecommerce.orders_dispatch]  → ENTREGADO
-  → (excepcional) REGISTRAR DEVOLUCIÓN                  [ecommerce.orders_return]    → DEVUELTO
+  → CONFIRMAR (asigna sucursal si falta)               [ecommerce.orders_manage]    → Order: CONFIRMADO
+  → PREPARAR (Almacenero, vista de picking)             [ecommerce.orders_prepare]   → Order: EN_PREPARACION
+  → EMPAQUETAR                                          [ecommerce.orders_prepare]   → Order: EMPAQUETADO
+  → MARCAR LISTO PARA DESPACHO                          [ecommerce.orders_prepare]   → Order: LISTO_PARA_DESPACHO
+  → DESPACHAR (crea TenantEcommerceDispatch)            [ecommerce.orders_dispatch]  → Order: DESPACHADO, Dispatch: DESPACHADO
+  → MARCAR EN TRÁNSITO                                  [ecommerce.orders_dispatch]  → Order: sin cambio (sigue DESPACHADO), Dispatch: EN_TRANSITO
+  → CONFIRMAR ENTREGA                                   [ecommerce.orders_dispatch]  → Order: ENTREGADO, Dispatch: ENTREGADO (+ DeliveredAt)
+  → (excepcional) REGISTRAR DEVOLUCIÓN                  [ecommerce.orders_return]    → Order: DEVUELTO (Dispatch.Status NO se sincroniza — deuda técnica #8)
 ```
 
 ```
@@ -391,31 +406,31 @@ No quedan decisiones abiertas. Comienza la implementación por la Fase 1.
 
 ### Fase 1 — Modelo de pedido online
 
-Estado: **completada, pendiente de revisión del usuario**. Commit local `bce9625` (sin push). Entregado: migraciones v134-v138, `TenantEcommerceOrderItem`/`TenantEcommerceOrderStatusHistory`, máquina de estados con permiso por transición ([order_status.go](../internal/ecommerce/service/order_status.go)), `ConvertToSale` desacoplado del `Status` del pedido, RBAC granular (`ecommerce.orders_{view,prepare,manage,convert,dispatch,return}`). 14 tests nuevos, todos en verde; sin regresiones en el resto del backend. Reporte de cierre completo entregado en el chat de la sesión de implementación (no duplicado acá para no mantener dos copias de la misma información — este documento es el contrato de diseño, el reporte de fase es el registro de ejecución).
+Estado: **APROBADA**. Commit local `bce9625` (sin push). Entregado: migraciones v134-v138, `TenantEcommerceOrderItem`/`TenantEcommerceOrderStatusHistory`, máquina de estados con permiso por transición ([order_status.go](../internal/ecommerce/service/order_status.go)), `ConvertToSale` desacoplado del `Status` del pedido, RBAC granular (`ecommerce.orders_{view,prepare,manage,convert,dispatch,return}`). 14 tests nuevos, todos en verde; sin regresiones en el resto del backend. Reporte de cierre completo entregado en el chat de la sesión de implementación (no duplicado acá para no mantener dos copias de la misma información — este documento es el contrato de diseño, el reporte de fase es el registro de ejecución).
 
 No implementado en esta fase (explícitamente fuera de alcance, ver §17 de v1 y el punto 7 de la aprobación): picking persistente por línea, `TenantEcommerceDispatch`/`TenantEcommerceCarrier` (Fase 8), endpoint `PATCH /orders/:id/branch` para reasignar sucursal fuera de la confirmación (Fase 5), cualquier UI de frontend.
 
 ### Fase 1.5 — Fix de locking de inventario (independiente del ecommerce)
 
-Estado: **completada, pendiente de revisión del usuario**. Commit local `191403f` (sin push). `RecordMovementTx` ([internal/inventory/service/inventory_service.go](../internal/inventory/service/inventory_service.go)) ahora usa `SELECT ... FOR UPDATE` sobre la fila de stock antes de validar/actualizar el saldo — confirmado como race condition real (no teórica) contra MySQL 8 real antes del fix (30 salidas concurrentes contra un stock de 10 pasaban las 30) y corregido (10/30 tras el fix, stock final en 0). Test de concurrencia real (no simulado) en `internal/inventory/service/inventory_concurrency_test.go`, mismo patrón que `pkg/saas/docusage/concurrency_test.go` (DSN de MySQL opcional por variable de entorno, se salta si no está configurada — sqlite no puede reproducir esta race, serializa escrituras a nivel de archivo completo).
+Estado: **APROBADA**. Commit local `191403f` (sin push). `RecordMovementTx` ([internal/inventory/service/inventory_service.go](../internal/inventory/service/inventory_service.go)) ahora usa `SELECT ... FOR UPDATE` sobre la fila de stock antes de validar/actualizar el saldo — confirmado como race condition real (no teórica) contra MySQL 8 real antes del fix (30 salidas concurrentes contra un stock de 10 pasaban las 30) y corregido (10/30 tras el fix, stock final en 0). Test de concurrencia real (no simulado) en `internal/inventory/service/inventory_concurrency_test.go`, mismo patrón que `pkg/saas/docusage/concurrency_test.go` (DSN de MySQL opcional por variable de entorno, se salta si no está configurada — sqlite no puede reproducir esta race, serializa escrituras a nivel de archivo completo).
 
 Hallazgo documentado, no corregido (fuera de alcance de este fix): `adjustmentInWithSerials`/`adjustmentOutWithSerials` (mismo archivo) tienen el mismo patrón de lectura-sin-lock, pero no tienen ningún caller en todo el repo — código muerto, confirmado por grep. Además, `TenantProductStock`/`TenantProductPresentationStock` no tienen índice único en (product_id, branch_id)/(presentation_id, branch_id) — dos transacciones concurrentes creando la PRIMERA fila de stock de un producto/sucursal (caso raro: solo pasa antes de que exista cualquier movimiento previo) podrían crear filas duplicadas. `FOR UPDATE` no protege contra esto (no hay fila que bloquear todavía). Es un problema distinto (duplicación en la creación inicial, no sobreventa en movimientos), de menor probabilidad real, y su fix correcto requeriría una migración de esquema (constraint único) — se deja documentado como hallazgo pendiente de decisión, no se implementa sin autorización explícita. **Deuda técnica separada, confirmado en la aprobación de Fase 1.5: no se agrega la migración de índice único hasta auditar todas las rutas que crean filas de stock y diseñar la estrategia de INSERT concurrente correspondiente.**
 
 ### Fase 2 — Variantes en catálogo público
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `11259bd` (backend, mistiq_backend) y `ce4e9cc` (frontend, mistiq_tenant), sin push. `ProductReportItem` gana `Presentations []PresentationOption` (id/name/sale_price/stock), poblado en `enrichReport` ([internal/products/service/product_service.go](../internal/products/service/product_service.go)) reutilizando exactamente `TenantProductPresentation`/`TenantProductPresentationStock` — mismas tablas que ya consumen POS e Inventario, sin infraestructura nueva. El catálogo público (`EcommerceService.PublicProducts`) expone esto solo para productos con variantes, respetando "Mostrar stock" (oculta el número, conserva la identidad de la presentación). En el frontend, `ProductDetailModal` agrega el selector de presentación (lista plana, sin cruces de atributos) y `storeCart` pasa a identificar líneas por `(product_id, presentation_id)` en vez de solo `product_id`, para que dos presentaciones del mismo producto no se fusionen. No se tocó `OrderItemInput`/`CreatePublicOrderAPI` (contrato de creación de pedidos), por instrucción explícita — la identidad de la presentación viaja embebida en el nombre de línea hacia WhatsApp/pedido mientras esa pieza no se construye en una fase futura.
+Estado: **APROBADA**. Commits locales `11259bd` (backend, mistiq_backend) y `ce4e9cc` (frontend, mistiq_tenant), sin push. `ProductReportItem` gana `Presentations []PresentationOption` (id/name/sale_price/stock), poblado en `enrichReport` ([internal/products/service/product_service.go](../internal/products/service/product_service.go)) reutilizando exactamente `TenantProductPresentation`/`TenantProductPresentationStock` — mismas tablas que ya consumen POS e Inventario, sin infraestructura nueva. El catálogo público (`EcommerceService.PublicProducts`) expone esto solo para productos con variantes, respetando "Mostrar stock" (oculta el número, conserva la identidad de la presentación). En el frontend, `ProductDetailModal` agrega el selector de presentación (lista plana, sin cruces de atributos) y `storeCart` pasa a identificar líneas por `(product_id, presentation_id)` en vez de solo `product_id`, para que dos presentaciones del mismo producto no se fusionen. No se tocó `OrderItemInput`/`CreatePublicOrderAPI` (contrato de creación de pedidos), por instrucción explícita — la identidad de la presentación viaja embebida en el nombre de línea hacia WhatsApp/pedido mientras esa pieza no se construye en una fase futura.
 
 Verificación: 8 tests nuevos de backend (Go, reales, en verde) cubriendo producto simple/una presentación/múltiples presentaciones/alcance por sucursal/"Mostrar stock"/aislamiento entre tenants. `tsc --noEmit` del frontend sin errores. **Limitación documentada, no se simuló**: no se hizo verificación end-to-end en navegador contra el backend real — el proceso Go que ya corría localmente en el puerto 3000 fue iniciado fuera de esta sesión (por el usuario) y no incluye este código (no hay hot-reload en Go), y reiniciar un proceso que no inicié yo sin preguntar no correspondía; verificar en navegador además requiere resolución de tenant por subdominio, no disponible con `localhost` plano. La verificación de este frontend se apoya en TypeScript + revisión manual del flujo exacto, no en una prueba en vivo.
 
 ### Fase 3 — Checkout + dirección + WhatsApp
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `55b78e6` (backend, mistiq_backend) y `dd084f1` (frontend, mistiq_tenant), sin push. `EcommerceService.CreateOrder` reescrito por completo: el cliente público solo puede enviar `product_id`/`presentation_id`/`quantity` por línea — nombre, precio, subtotal y total se resuelven SIEMPRE contra el catálogo real del tenant vigente en el momento de crear el pedido (nunca lo que el frontend tenía cacheado), dentro de una única transacción que no deja nada a medias si cualquier línea es inválida. `TenantEcommerceOrderItem.PresentationID` pasa de ser solo informativo a ser el dato estructurado real (FK verdadera a `TenantProductPresentation`, validada contra producto/tenant/estado activo). Se agregan `delivery_method` (obligatorio) y dirección (snapshot de invitado o FK autenticada, esta última soportada a nivel de servicio para cuando exista login de cliente en Fase 4). Se persiste la fila de creación en `TenantEcommerceOrderStatusHistory` y una `TenantNotification` (tabla nueva, migración v139 — solo la fila; el hub SSE/badge que la entrega en vivo al panel sigue siendo Fase 6). En el frontend, `StoreCartDrawer` pide método de entrega/dirección y arma el mensaje de WhatsApp con los ítems YA RESUELTOS que devuelve el backend después de persistir el pedido, nunca con datos del carrito del navegador.
+Estado: **APROBADA**. Commits locales `55b78e6` (backend, mistiq_backend) y `dd084f1` (frontend, mistiq_tenant), sin push. `EcommerceService.CreateOrder` reescrito por completo: el cliente público solo puede enviar `product_id`/`presentation_id`/`quantity` por línea — nombre, precio, subtotal y total se resuelven SIEMPRE contra el catálogo real del tenant vigente en el momento de crear el pedido (nunca lo que el frontend tenía cacheado), dentro de una única transacción que no deja nada a medias si cualquier línea es inválida. `TenantEcommerceOrderItem.PresentationID` pasa de ser solo informativo a ser el dato estructurado real (FK verdadera a `TenantProductPresentation`, validada contra producto/tenant/estado activo). Se agregan `delivery_method` (obligatorio) y dirección (snapshot de invitado o FK autenticada, esta última soportada a nivel de servicio para cuando exista login de cliente en Fase 4). Se persiste la fila de creación en `TenantEcommerceOrderStatusHistory` y una `TenantNotification` (tabla nueva, migración v139 — solo la fila; el hub SSE/badge que la entrega en vivo al panel sigue siendo Fase 6). En el frontend, `StoreCartDrawer` pide método de entrega/dirección y arma el mensaje de WhatsApp con los ítems YA RESUELTOS que devuelve el backend después de persistir el pedido, nunca con datos del carrito del navegador.
 
 Verificación: 20 tests nuevos de backend (17 a nivel de servicio + 3 a nivel de HTTP handler), todos reales y en verde — incluye una prueba de seguridad explícita que envía un body con `unit_price`/`subtotal`/`total` falsos y confirma que el pedido se persiste al precio REAL del catálogo, no al inventado por el cliente. `tsc --noEmit` del frontend sin errores; cadena `presentation_id` verificada por revisión estática de código (carrito → checkout → request), no por prueba en navegador — misma limitación de infraestructura ya documentada en Fase 2 (backend local desactualizado respecto al código de esta sesión, resolución de tenant por subdominio no disponible en `localhost`).
 
 ### Fase 4 — Cuenta del cliente
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `27e1dba` (backend, mistiq_backend) y `2b31b97` (frontend, mistiq_tenant), sin push. `TenantEcommerceCustomerAccount`/`TenantEcommerceCustomerAddress` (migración v140) implementan por primera vez lo que la Fase 1 solo había dejado como columnas preparadas — identidad de login del comprador final, completamente separada de `TenantUser` (staff/RBAC) y de `TenantContact` (facturación; sin autocompletar `ContactID` al registrarse, decisión deliberada para no hacer matching peligroso por teléfono).
+Estado: **APROBADA**. Commits locales `27e1dba` (backend, mistiq_backend) y `2b31b97` (frontend, mistiq_tenant), sin push. `TenantEcommerceCustomerAccount`/`TenantEcommerceCustomerAddress` (migración v140) implementan por primera vez lo que la Fase 1 solo había dejado como columnas preparadas — identidad de login del comprador final, completamente separada de `TenantUser` (staff/RBAC) y de `TenantContact` (facturación; sin autocompletar `ContactID` al registrarse, decisión deliberada para no hacer matching peligroso por teléfono).
 
 Auth de cliente aislada de la de staff en **dos** capas: secreto de firma JWT distinto (`EcommerceCustomerJWTSecret`, mismo criterio que ya separaba `SAJWTSecret` de `JWTSecret`) — un token de cliente no solo falla el chequeo de `type`, la firma ni siquiera valida contra el secreto de staff — más bcrypt para password (mismo mecanismo que `TenantUser`). Verificado con tests cruzados reales: token de cliente contra el middleware de staff, y token de staff contra el de cliente, ambos rechazados.
 
@@ -427,7 +442,7 @@ Verificación: 26 tests nuevos de backend (18 servicio + 8 handler), todos reale
 
 ### Fase 5 — Panel interno de pedidos evolucionado
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `7bdd124` (backend, mistiq_backend) y `1799481` (frontend, mistiq_tenant), sin push. Backend: `GET /api/ecommerce/orders/:id` (nuevo — antes solo existía el listado bulk y el print-data) devuelve pedido + líneas normalizadas (con fallback a `ItemsJSON` solo para legacy) + historial real, nunca fabricado. `ListOrders` gana filtros combinables (sucursal, búsqueda por nombre/teléfono/N° de pedido, rango de fechas), mismo patrón incremental de `WHERE` que ya usa el resto del backend.
+Estado: **APROBADA**. Commits locales `7bdd124` (backend, mistiq_backend) y `1799481` (frontend, mistiq_tenant), sin push. Backend: `GET /api/ecommerce/orders/:id` (nuevo — antes solo existía el listado bulk y el print-data) devuelve pedido + líneas normalizadas (con fallback a `ItemsJSON` solo para legacy) + historial real, nunca fabricado. `ListOrders` gana filtros combinables (sucursal, búsqueda por nombre/teléfono/N° de pedido, rango de fechas), mismo patrón incremental de `WHERE` que ya usa el resto del backend.
 
 Frontend: `PedidosWebPage`/`PedidoWebDetailModal` (nuevo) dejan de tratar el pedido con el enum legacy de 4 estados y pasan al ciclo real — cierra la **Deuda 5** de abajo. Acciones de transición gateadas por `hasPermission()` reutilizando el patrón ya establecido en el resto del panel (`ORDER_TRANSITIONS` en `orderTransitions.ts` es un espejo EXACTO del backend, `internal/ecommerce/service/order_status.go`, limitado a las transiciones hasta `LISTO_PARA_DESPACHO` — despacho operativo real sigue siendo Fase 8). Picking: checkboxes efímeros de React, sin persistencia por línea. Convertir a venta reutiliza `ConvertOrderModal` sin cambios, mostrando "Venta generada #X" sin implicar cambio de estado del pedido (el desacople de Fase 3 se mantiene intacto).
 
@@ -437,7 +452,7 @@ Verificación: 6 tests nuevos de backend a nivel de servicio (filtros de listado
 
 ### Fase 6 — Notificaciones internas
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `<pendiente de completar tras commit>` (backend, mistiq_backend) y `<pendiente de completar tras commit>` (frontend, mistiq_tenant), sin push.
+Estado: **APROBADA**. Commits locales `73fa7f7` (backend, mistiq_backend) y `9948d68` (frontend, mistiq_tenant), sin push.
 
 **Auditoría previa (obligatoria antes de tocar código)**: `TenantNotification` ya existía desde Fase 3 (solo el INSERT en `CreateOrder`, sin API de lectura ni entrega en vivo — el propio comentario del struct ya prescribía esta fase). Se confirmó infraestructura SSE real y reutilizable en `pkg/billingevents` (hub in-memory + Redis pub/sub por tenant, handler con `retry:`/keepalive, middleware `?access_token=` ya genérico en `TenantAuthAPI`) — replicada como paquete independiente `pkg/notificationevents` (mismo patrón, canal Redis propio, nunca mezclado con billing). Se confirmó que `PedidosWebPage.tsx` nunca leía el `?id=` que `CreateOrder` ya escribía en `LinkPath` desde Fase 3 — el link quedaba "muerto"; corregido en esta fase (`useSearchParams`, abre `PedidoWebDetailModal` directo).
 
@@ -461,7 +476,7 @@ Verificación: 11 tests nuevos de backend a nivel de servicio (`internal/notific
 
 ### Fase 7 — Preparación/picking operativo
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `<pendiente de completar tras commit>` (backend) y `<pendiente de completar tras commit>` (frontend), sin push.
+Estado: **APROBADA**. Commits locales `830e509` (backend) y `6320fdd` (frontend), sin push.
 
 **Auditoría previa**: `PedidoWebDetailModal.tsx` YA tenía desde Fase 5 el picking efímero (`Set<string>` en React, clave estable `product_id-presentation_id` para no repetir el bug de `item.id` compartido en legacy), las transiciones `CONFIRMADO→EN_PREPARACION→EMPAQUETADO→LISTO_PARA_DESPACHO` gateadas por `ecommerce.orders_prepare`, y el endpoint `PUT /api/ecommerce/orders/:id/status` ya soportaba todo el flujo desde Fase 1. **El backend no necesitó ningún cambio de producción para Fase 7** — la auditoría confirmó que el contrato ya era correcto; lo que faltaba era prueba explícita de ello (nunca se había testeado `UpdateOrderStatusAPI` a nivel de handler) y mejoras de UX en el frontend (progreso visual, advertencia antes de avanzar con líneas sin revisar, accesibilidad, cantidad más legible).
 
@@ -475,7 +490,7 @@ Verificación: 6 tests nuevos de servicio + 5 de handler, todos reales, en verde
 
 ### Fase 8 — Empaquetado y despacho operativo
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `<pendiente de completar tras commit>` (backend) y `<pendiente de completar tras commit>` (frontend), sin push.
+Estado: **APROBADA**. Commits locales `16ebb4b` (implementación) y `2b38de4` (corrección documental posterior) (backend), y `fd91a82` (frontend), sin push.
 
 **Auditoría previa**: `TenantEcommerceDispatch`/`TenantEcommerceCarrier` NO existían en código — solo se mencionaban en este documento como plan. Sí existían otras entidades tipo "carrier" en el repo, pero de dominios distintos: `TenantGreCarrier` (transportistas para guía de remisión SUNAT, `internal/fleet`, gateado por el módulo "billing") y `TenantDeliveryCompany`/`TenantDeliveryDriver` (delivery de restaurante, `internal/restaurant`). Ninguna era reutilizable sin cruzar dominios que esta fase debía mantener separados.
 
@@ -512,7 +527,7 @@ Verificación: 15 tests nuevos de servicio (creación exitosa, rechazo desde los
 
 ### Fase 9 — Tracking / transportista / estado de despacho
 
-Estado: **completada, pendiente de revisión del usuario**. Commits locales `<pendiente de completar tras commit>` (backend) y `<pendiente de completar tras commit>` (frontend), sin push.
+Estado: **APROBADA**. Commits locales `e37bb8e` (implementación) y `9e7b14c` (tests y documentación) (backend), y `996bde7` (frontend), sin push.
 
 **Auditoría previa**: confirmado que no existía ninguna infraestructura de tracking/carrier/EN_TRANSITO/webhook más allá de lo que dejó Fase 8. `order_status.go` ya tenía desde Fase 1 las filas de transición `Order` `{DESPACHADO, DESPACHADO, orders_dispatch}` (comentario histórico: "actualizar tracking, sin cambio de estado") y `{DESPACHADO, ENTREGADO, orders_dispatch}`, pero nunca conectadas a ningún endpoint real — Fase 9 implementa el ciclo de vida del **Dispatch** (separado del Order) en su lugar, siguiendo la autorización explícita del usuario, que prevalece sobre ese comentario histórico.
 
