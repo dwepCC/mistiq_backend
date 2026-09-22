@@ -601,7 +601,7 @@ Verificación: 6 tests nuevos de servicio (generación correcta con datos reales
 
 ### Fase 11 — Cierre y auditoría integral de Ecommerce V1
 
-Estado: **APROBADA. ECOMMERCE V1 COMPLETADO Y CERRADO.** Commit local `0a66f5e`+ (auditoría/hardening, backend), sin push. Fase especial, no agrega funcionalidad: objetivo era auditoría integral, hardening, corrección de bugs reales, resolución de las deudas que pertenecen a Ecommerce V1, y validación de seguridad/multi-tenant/RBAC/concurrencia/compatibilidad histórica/frontend/documentación antes de declarar el cierre formal.
+Estado: **APROBADA. ECOMMERCE V1 COMPLETADO Y CERRADO.** Commit local `a427245` (auditoría/hardening/cierre, backend), sin push. Sin cambios de código en frontend (auditado, ver Parte J de la bitácora — el frontend ya soportaba correctamente todo lo que esta fase corrigió). Fase especial, no agrega funcionalidad: objetivo era auditoría integral, hardening, corrección de bugs reales, resolución de las deudas que pertenecen a Ecommerce V1, y validación de seguridad/multi-tenant/RBAC/concurrencia/compatibilidad histórica/frontend/documentación antes de declarar el cierre formal.
 
 **Auditoría del flujo de extremo a extremo** (CATÁLOGO→PRODUCTO→CARRITO→CHECKOUT→PEDIDO→WHATSAPP→CONFIRMADO→EN_PREPARACION→EMPAQUETADO→LISTO_PARA_DESPACHO→DESPACHADO→EN_TRANSITO→ENTREGADO, con DEVUELTO como salida): cada etapa tiene backend, frontend, endpoint, autorización, validación, historial, tenant isolation, manejo de errores y estado correcto ya cubiertos por las Fases 1-10. No se agregó ninguna etapa nueva.
 
