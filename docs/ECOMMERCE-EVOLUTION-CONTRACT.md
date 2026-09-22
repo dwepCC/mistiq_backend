@@ -143,7 +143,7 @@ Sin cambios respecto a v1 en el principio (todo aditivo, mismo patrón que `v132
 | `v134_ecommerce_order_fields.go` | ALTER `tenant_ecommerce_orders`: `branch_id`, `customer_account_id`, `contact_id`, `delivery_address_id`, `delivery_method`, `payment_status`, `subtotal`, `guest_address_line`, `guest_reference`, `guest_ubigeo` |
 | `v135_ecommerce_order_status_expand.go` | Amplía validación de `status` al enum real (sección 3) |
 | `v136_ecommerce_order_items.go` | CREATE `tenant_ecommerce_order_items` (sin `picked_quantity`/`fulfillment_status`, ver 1.2) |
-| `v137_ecommerce_order_status_history.go` | CREATE `tenant_ecommerce_order_status_history` |
+| `v137_ecommerce_order_status_history.go` | CREATE `tenant_ecommerce_order_status_histories` (nombre corregido en Fase 11 — creaba la tabla en singular, distinto al plural que usa el modelo real en tiempo de ejecución; bug de producción real, ver bitácora de Fase 11) |
 | `v138_ecommerce_orders_rbac_v2.go` | Crea los 6 permisos granulares (sección 7) + backfill de `ecommerce.orders` existente |
 | `v139_tenant_notifications.go` | CREATE `tenant_notifications` (Fase 3 — solo la tabla; API de lectura + SSE es Fase 6) |
 | `v140_ecommerce_customer_accounts.go` | CREATE `tenant_ecommerce_customer_accounts`, `tenant_ecommerce_customer_addresses` |
