@@ -189,3 +189,135 @@ func TestMarkDispatchDelivered_ConcurrentPost_SoloUnaTransicionExitosa(t *testin
 		t.Fatalf("REGRESIÓN/RACE: debe existir EXACTAMENTE 1 historial de order ENTREGADO, hay %d", orderHistCount)
 	}
 }
+
+// TestUpdateOrderStatus_Devuelto_ConcurrentPost_SoloUnaTransicionExitosa Fase 11 (Deuda #8 +
+// Parte H): N requests simultáneos ENTREGADO->DEVUELTO sobre el MISMO pedido deben producir
+// exactamente 1 transición efectiva (Order + Dispatch sincronizados), nunca dos, nunca historial
+// duplicado. Mismo patrón real de MySQL que los tests de arriba (Fase 9) y de CreateDispatch
+// (Fase 8) — sqlite serializa a nivel de archivo y nunca expondría esta race.
+func TestUpdateOrderStatus_Devuelto_ConcurrentPost_SoloUnaTransicionExitosa(t *testing.T) {
+	dsn := os.Getenv("DISPATCH_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("DISPATCH_MYSQL_DSN no configurado")
+	}
+	db := setupDispatchTransitionConcurrencyDB(t, dsn)
+	svc := &EcommerceService{db: db}
+	dispatch := mustCreateDispatchedOrderMySQL(t, svc, "RACE-RETURN")
+	if _, err := svc.MarkDispatchInTransit(dispatch.ID, DispatchTransitionInput{}); err != nil {
+		t.Fatalf("MarkDispatchInTransit: %v", err)
+	}
+	if _, err := svc.MarkDispatchDelivered(dispatch.ID, DispatchTransitionInput{}); err != nil {
+		t.Fatalf("MarkDispatchDelivered: %v", err)
+	}
+
+	const attackers = 20
+	var okCount, rejectedCount, unexpectedErrs int32
+	var wg sync.WaitGroup
+	wg.Add(attackers)
+	for i := 0; i < attackers; i++ {
+		go func() {
+			defer wg.Done()
+			err := svc.UpdateOrderStatus(dispatch.OrderID, UpdateOrderStatusInput{NewStatus: OrderStatusDevuelto, Notes: "devolución concurrente"})
+			switch {
+			case err == nil:
+				atomic.AddInt32(&okCount, 1)
+			case err.Error() == "no se puede pasar de DEVUELTO a DEVUELTO":
+				atomic.AddInt32(&rejectedCount, 1)
+			default:
+				atomic.AddInt32(&unexpectedErrs, 1)
+				t.Logf("error inesperado: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if unexpectedErrs != 0 {
+		t.Fatalf("hubo %d errores inesperados (nunca debe filtrarse un error crudo de SQL)", unexpectedErrs)
+	}
+	if okCount != 1 {
+		t.Fatalf("REGRESIÓN/RACE: se esperaba exactamente 1 devolución exitosa, hubo %d", okCount)
+	}
+	if rejectedCount != attackers-1 {
+		t.Fatalf("se esperaban %d rechazos limpios, hubo %d", attackers-1, rejectedCount)
+	}
+
+	var orderHistCount, dispatchHistCount int64
+	db.Model(&database.TenantEcommerceOrderStatusHistory{}).Where("order_id = ? AND to_status = ?", dispatch.OrderID, OrderStatusDevuelto).Count(&orderHistCount)
+	db.Model(&database.TenantEcommerceDispatchStatusHistory{}).Where("dispatch_id = ? AND to_status = ?", dispatch.ID, DispatchStatusDevuelto).Count(&dispatchHistCount)
+	if orderHistCount != 1 {
+		t.Fatalf("REGRESIÓN/RACE: debe existir EXACTAMENTE 1 historial de order DEVUELTO, hay %d", orderHistCount)
+	}
+	if dispatchHistCount != 1 {
+		t.Fatalf("REGRESIÓN/RACE: debe existir EXACTAMENTE 1 historial de dispatch DEVUELTO, hay %d", dispatchHistCount)
+	}
+
+	var finalOrder database.TenantEcommerceOrder
+	db.First(&finalOrder, dispatch.OrderID)
+	var finalDispatch database.TenantEcommerceDispatch
+	db.First(&finalDispatch, dispatch.ID)
+	if finalOrder.Status != OrderStatusDevuelto || finalDispatch.Status != DispatchStatusDevuelto {
+		t.Fatalf("REGRESIÓN/RACE: estado final inconsistente — Order=%q Dispatch=%q", finalOrder.Status, finalDispatch.Status)
+	}
+}
+
+// TestUpdateOrderStatus_Confirmado_ConcurrentPost_SoloUnaTransicionExitosa Fase 11 (Parte H):
+// antes de esta fase, UpdateOrderStatus leía el pedido FUERA de la transacción y lo actualizaba con
+// un UPDATE ciego adentro, sin SELECT...FOR UPDATE — dos requests concurrentes (p. ej. doble click
+// en "Confirmar") podían leer el mismo estado PENDIENTE, pasar ambas la validación, y las dos
+// escribir historial. Este test cubre la transición MÁS GENÉRICA (no solo Return/DEVUELTO) para
+// probar que el fix de locking aplica a todo UpdateOrderStatus, no solo a la devolución.
+func TestUpdateOrderStatus_Confirmado_ConcurrentPost_SoloUnaTransicionExitosa(t *testing.T) {
+	dsn := os.Getenv("DISPATCH_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("DISPATCH_MYSQL_DSN no configurado")
+	}
+	db := setupDispatchTransitionConcurrencyDB(t, dsn)
+	svc := &EcommerceService{db: db}
+	product := database.TenantProduct{Code: "RACE-CONFIRM", Name: "Producto RACE-CONFIRM", Type: "product", Unit: "NIU", SalePrice: 20, Active: true, ShowInDigitalCatalog: true}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatal(err)
+	}
+	order, _, err := svc.CreateOrder(CreateOrderInput{
+		CustomerName: "Race", CustomerPhone: "999000000", DeliveryMethod: DeliveryMethodPickup,
+		Items: []CreateOrderItemInput{{ProductID: product.ID, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+
+	const attackers = 20
+	var okCount, rejectedCount, unexpectedErrs int32
+	var wg sync.WaitGroup
+	wg.Add(attackers)
+	for i := 0; i < attackers; i++ {
+		go func() {
+			defer wg.Done()
+			err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusConfirmado})
+			switch {
+			case err == nil:
+				atomic.AddInt32(&okCount, 1)
+			case err.Error() == "no se puede pasar de CONFIRMADO a CONFIRMADO":
+				atomic.AddInt32(&rejectedCount, 1)
+			default:
+				atomic.AddInt32(&unexpectedErrs, 1)
+				t.Logf("error inesperado: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if unexpectedErrs != 0 {
+		t.Fatalf("hubo %d errores inesperados (nunca debe filtrarse un error crudo de SQL)", unexpectedErrs)
+	}
+	if okCount != 1 {
+		t.Fatalf("REGRESIÓN/RACE: se esperaba exactamente 1 confirmación exitosa, hubo %d", okCount)
+	}
+	if rejectedCount != attackers-1 {
+		t.Fatalf("se esperaban %d rechazos limpios, hubo %d", attackers-1, rejectedCount)
+	}
+	var histCount int64
+	db.Model(&database.TenantEcommerceOrderStatusHistory{}).Where("order_id = ? AND to_status = ?", order.ID, OrderStatusConfirmado).Count(&histCount)
+	if histCount != 1 {
+		t.Fatalf("REGRESIÓN/RACE: debe existir EXACTAMENTE 1 historial CONFIRMADO, hay %d", histCount)
+	}
+}

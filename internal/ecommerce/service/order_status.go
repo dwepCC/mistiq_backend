@@ -57,10 +57,21 @@ type OrderTransition struct {
 	Permission string
 }
 
-// orderTransitions tabla completa — Contrato v2 §5. La transición LISTO_PARA_DESPACHO->DESPACHADO
-// hoy solo cambia Status (TenantEcommerceDispatch todavía no existe, es Fase 8); cuando esa fase
-// cree el dominio de despacho, esta misma transición pasará a crear también el registro asociado
-// sin cambiar el permiso que ya la protege.
+// orderTransitions tabla completa — Contrato v2 §5. Esta tabla es exclusivamente para transiciones
+// que se ejecutan a través de UpdateOrderStatus/UpdateOrderStatusAPI (el endpoint genérico
+// `PUT /orders/:id/status`).
+//
+// Deliberadamente NO existen filas LISTO_PARA_DESPACHO->DESPACHADO, DESPACHADO->DESPACHADO ni
+// DESPACHADO->ENTREGADO (auditoría de Fase 11, Deuda #8): existieron en versiones anteriores de
+// este archivo como plan previo a Fase 8, pero UpdateOrderStatusAPI nunca filtró esos estados, así
+// que dejarlas habría permitido a cualquier usuario con ecommerce.orders_dispatch mover un pedido
+// a DESPACHADO sin crear ningún TenantEcommerceDispatch (bypass de EcommerceService.CreateDispatch,
+// Fase 8), o de DESPACHADO directamente a ENTREGADO saltándose EN_TRANSITO y sin tocar el Dispatch
+// en absoluto (bypass de EcommerceService.MarkDispatchDelivered, Fase 9) — ambos casos contradicen
+// la decisión aprobada de que esas dos transiciones del pedido se alcanzan EXCLUSIVAMENTE a través
+// de sus servicios dedicados, que sincronizan Order y Dispatch atómicamente. Se eliminaron en
+// Fase 11 para que el código coincida con esa decisión ya aprobada; CreateDispatch y
+// MarkDispatchDelivered siguen actualizando Order.Status directamente, sin pasar por esta tabla.
 var orderTransitions = []OrderTransition{
 	{OrderStatusPendiente, OrderStatusConfirmado, PermOrdersManage},
 	{OrderStatusPendiente, OrderStatusRechazado, PermOrdersManage},
@@ -73,9 +84,6 @@ var orderTransitions = []OrderTransition{
 	{OrderStatusConfirmado, OrderStatusEnPreparacion, PermOrdersPrepare},
 	{OrderStatusEnPreparacion, OrderStatusEmpaquetado, PermOrdersPrepare},
 	{OrderStatusEmpaquetado, OrderStatusListoParaDespacho, PermOrdersPrepare},
-	{OrderStatusListoParaDespacho, OrderStatusDespachado, PermOrdersDispatch},
-	{OrderStatusDespachado, OrderStatusDespachado, PermOrdersDispatch}, // actualizar tracking, sin cambio de estado (§5)
-	{OrderStatusDespachado, OrderStatusEntregado, PermOrdersDispatch},
 	{OrderStatusEntregado, OrderStatusDevuelto, PermOrdersReturn},
 }
 

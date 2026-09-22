@@ -22,8 +22,6 @@ func TestFindOrderTransition_TablaAprobada(t *testing.T) {
 		{OrderStatusConfirmado, OrderStatusEnPreparacion, PermOrdersPrepare, true},
 		{OrderStatusEnPreparacion, OrderStatusEmpaquetado, PermOrdersPrepare, true},
 		{OrderStatusEmpaquetado, OrderStatusListoParaDespacho, PermOrdersPrepare, true},
-		{OrderStatusListoParaDespacho, OrderStatusDespachado, PermOrdersDispatch, true},
-		{OrderStatusDespachado, OrderStatusEntregado, PermOrdersDispatch, true},
 		{OrderStatusEntregado, OrderStatusDevuelto, PermOrdersReturn, true},
 
 		// Flujo de despacho corregido (punto 8): NUNCA se puede saltar directo a DESPACHADO sin
@@ -32,6 +30,15 @@ func TestFindOrderTransition_TablaAprobada(t *testing.T) {
 		{OrderStatusEmpaquetado, OrderStatusDespachado, "", false},
 		{OrderStatusConfirmado, OrderStatusDespachado, "", false},
 		{OrderStatusPendiente, OrderStatusDespachado, "", false},
+
+		// Auditoría de Fase 11 (Deuda #8): LISTO_PARA_DESPACHO->DESPACHADO y DESPACHADO->ENTREGADO
+		// se eliminaron de esta tabla — esas transiciones existen EXCLUSIVAMENTE a través de
+		// EcommerceService.CreateDispatch y MarkDispatchDelivered (Fase 8/9), nunca del endpoint
+		// genérico UpdateOrderStatusAPI, para que nadie pueda saltarse la creación/sincronización
+		// del Dispatch. Ver comentario de orderTransitions.
+		{OrderStatusListoParaDespacho, OrderStatusDespachado, "", false},
+		{OrderStatusDespachado, OrderStatusEntregado, "", false},
+		{OrderStatusDespachado, OrderStatusDespachado, "", false},
 
 		// No se puede saltar etapas de preparación.
 		{OrderStatusConfirmado, OrderStatusEmpaquetado, "", false},

@@ -287,14 +287,11 @@ func TestMarkDispatchDelivered_NoTocaStockNiKardex(t *testing.T) {
 
 // ── Venta sigue independiente ────────────────────────────────────────────
 
-// TestOrderEntregadoADevuelto_TransicionPreexistenteSigueFuncionando Fase 9 §6/§27-C: la
-// transición Order ENTREGADO->DEVUELTO (ecommerce.orders_return) ya existía en order_status.go
-// desde Fase 1 — nunca era alcanzable en la práctica porque nada llegaba a ENTREGADO hasta esta
-// fase. No se modifica ese código (decisión: no rehacer Fases 1-8 sin bug real); esto solo
-// confirma que la infraestructura preexistente sigue funcionando ahora que es alcanzable de
-// verdad. NO se sincroniza Dispatch.Status a DEVUELTO — eso requeriría una decisión nueva no
-// resuelta por el contrato (ver documentación), así que Dispatch se queda en ENTREGADO.
-func TestOrderEntregadoADevuelto_TransicionPreexistenteSigueFuncionando(t *testing.T) {
+// TestOrderEntregadoADevuelto_SincronizaDispatch Deuda técnica #8, cerrada en Fase 11: la
+// transición Order ENTREGADO->DEVUELTO (ecommerce.orders_return) ahora sincroniza el Dispatch
+// asociado a DEVUELTO también, dentro de la misma transacción — ver
+// syncDispatchOnOrderReturned en ecommerce_service.go.
+func TestOrderEntregadoADevuelto_SincronizaDispatch(t *testing.T) {
 	db := setupEcommerceServiceDB(t)
 	svc := &EcommerceService{db: db}
 	order, dispatch := mustCreateDispatchedOrder(t, svc)
@@ -303,7 +300,7 @@ func TestOrderEntregadoADevuelto_TransicionPreexistenteSigueFuncionando(t *testi
 		t.Fatal(err)
 	}
 
-	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusDevuelto, Notes: "cliente rechazó el paquete"}); err != nil {
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusDevuelto, UserID: 7, Notes: "cliente rechazó el paquete"}); err != nil {
 		t.Fatalf("ENTREGADO->DEVUELTO (infraestructura de Fase 1) debía seguir funcionando: %v", err)
 	}
 	after, err := svc.GetOrder(order.ID)
@@ -314,13 +311,89 @@ func TestOrderEntregadoADevuelto_TransicionPreexistenteSigueFuncionando(t *testi
 		t.Fatalf("Order.Status = %q, quería DEVUELTO", after.Status)
 	}
 
-	// Gap documentado a propósito (Fase 9 §6): Dispatch.Status NO se sincroniza automáticamente.
-	stillDispatch, err := svc.GetDispatch(dispatch.ID)
+	// Fase 11 — Deuda #8 cerrada: Dispatch.Status SÍ se sincroniza a DEVUELTO.
+	syncedDispatch, err := svc.GetDispatch(dispatch.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stillDispatch.Status != DispatchStatusEntregado {
-		t.Fatalf("comportamiento inesperado: Dispatch.Status cambió a %q sin que ningún código lo haga — investigar", stillDispatch.Status)
+	if syncedDispatch.Status != DispatchStatusDevuelto {
+		t.Fatalf("Dispatch.Status = %q, quería DEVUELTO (Deuda #8 debía quedar sincronizada)", syncedDispatch.Status)
+	}
+
+	var dispatchHist database.TenantEcommerceDispatchStatusHistory
+	if err := db.Where("dispatch_id = ? AND from_status = ? AND to_status = ?", dispatch.ID, DispatchStatusEntregado, DispatchStatusDevuelto).
+		First(&dispatchHist).Error; err != nil {
+		t.Fatalf("no se registró TenantEcommerceDispatchStatusHistory ENTREGADO->DEVUELTO: %v", err)
+	}
+	if dispatchHist.UserID == nil || *dispatchHist.UserID != 7 {
+		t.Errorf("DispatchStatusHistory.UserID = %v, quería 7 (mismo usuario que ejecutó la devolución)", dispatchHist.UserID)
+	}
+
+	var dispatchHistCount int64
+	db.Model(&database.TenantEcommerceDispatchStatusHistory{}).Where("dispatch_id = ?", dispatch.ID).Count(&dispatchHistCount)
+	if dispatchHistCount != 3 { // DESPACHADO->EN_TRANSITO, EN_TRANSITO->ENTREGADO, ENTREGADO->DEVUELTO
+		t.Fatalf("DispatchStatusHistory tiene %d filas, quería exactamente 3 (una por transición real)", dispatchHistCount)
+	}
+
+	// El historial del PEDIDO nunca debe mezclarse con el del despacho — dominios separados.
+	var orderHistWithDispatchStatus int64
+	db.Model(&database.TenantEcommerceOrderStatusHistory{}).
+		Where("order_id = ? AND (from_status = ? OR to_status = ?)", order.ID, DispatchStatusEnTransito, DispatchStatusEnTransito).
+		Count(&orderHistWithDispatchStatus)
+	if orderHistWithDispatchStatus != 0 {
+		t.Fatalf("OrderStatusHistory no debe contener estados de Dispatch, encontradas %d filas", orderHistWithDispatchStatus)
+	}
+}
+
+// TestOrderEntregadoADevuelto_SinDispatch_NoFalla pedido histórico/legacy sin Dispatch asociado
+// (nunca debería pasar en la práctica ya que ENTREGADO solo se alcanza vía MarkDispatchDelivered,
+// pero se audita como defensa en profundidad, Fase 11 Parte E/I): la devolución del pedido no debe
+// fallar ni inventar un Dispatch.
+func TestOrderEntregadoADevuelto_SinDispatch_NoFalla(t *testing.T) {
+	db := setupEcommerceServiceDB(t)
+	svc := &EcommerceService{db: db}
+	order := database.TenantEcommerceOrder{Status: OrderStatusEntregado, CustomerName: "Sin Dispatch", DeliveryMethod: DeliveryMethodPickup}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusDevuelto, Notes: "sin dispatch"}); err != nil {
+		t.Fatalf("la devolución de un pedido sin Dispatch no debía fallar: %v", err)
+	}
+	after, err := svc.GetOrder(order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != OrderStatusDevuelto {
+		t.Fatalf("Order.Status = %q, quería DEVUELTO", after.Status)
+	}
+}
+
+// TestOrderEntregadoADevuelto_DobleClick_RechazadoLimpio idempotencia (Fase 11 Parte H): un
+// segundo intento de devolución sobre el mismo pedido se rechaza limpio, sin duplicar
+// OrderStatusHistory ni volver a tocar el Dispatch.
+func TestOrderEntregadoADevuelto_DobleClick_RechazadoLimpio(t *testing.T) {
+	db := setupEcommerceServiceDB(t)
+	svc := &EcommerceService{db: db}
+	order, dispatch := mustCreateDispatchedOrder(t, svc)
+	mustMarkInTransit(t, svc, dispatch.ID)
+	if _, err := svc.MarkDispatchDelivered(dispatch.ID, DispatchTransitionInput{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusDevuelto, Notes: "primera devolución"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateOrderStatus(order.ID, UpdateOrderStatusInput{NewStatus: OrderStatusDevuelto, Notes: "segundo intento"}); err == nil {
+		t.Fatal("un segundo intento de devolución sobre un pedido ya DEVUELTO debía rechazarse")
+	}
+	var orderHistCount int64
+	db.Model(&database.TenantEcommerceOrderStatusHistory{}).Where("order_id = ? AND to_status = ?", order.ID, OrderStatusDevuelto).Count(&orderHistCount)
+	if orderHistCount != 1 {
+		t.Fatalf("OrderStatusHistory ENTREGADO->DEVUELTO tiene %d filas, quería exactamente 1", orderHistCount)
+	}
+	var dispatchHistCount int64
+	db.Model(&database.TenantEcommerceDispatchStatusHistory{}).Where("dispatch_id = ? AND to_status = ?", dispatch.ID, DispatchStatusDevuelto).Count(&dispatchHistCount)
+	if dispatchHistCount != 1 {
+		t.Fatalf("DispatchStatusHistory ENTREGADO->DEVUELTO tiene %d filas, quería exactamente 1", dispatchHistCount)
 	}
 }
 

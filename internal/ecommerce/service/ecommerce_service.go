@@ -16,6 +16,7 @@ import (
 	"tukifac/pkg/notificationevents"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type EcommerceService struct {
@@ -664,23 +665,34 @@ func notificationForTransition(orderID uint, fromStatus, newStatus string) *data
 // (qué exige orderTransitions[i].Permission) es responsabilidad del handler, que conoce los claims
 // del usuario autenticado — este método revalida solo la transición en sí (defensa en profundidad:
 // nunca confía en que el caller ya la validó).
+//
+// Auditoría de Fase 11 (Parte H — idempotencia/concurrencia): antes de esta fase, el pedido se leía
+// FUERA de la transacción y se actualizaba con un UPDATE ciego adentro — dos requests concurrentes
+// sobre el MISMO pedido podían leer el mismo estado "viejo", pasar ambas la validación, y las dos
+// escribir un UPDATE + una fila de historial (duplicando TenantEcommerceOrderStatusHistory con un
+// FromStatus potencialmente obsoleto). Se corrigió con el mismo patrón SELECT...FOR UPDATE ya usado
+// en CreateDispatch/MarkDispatchInTransit/MarkDispatchDelivered (Fase 1.5/8/9): el pedido se
+// bloquea y se revalida DENTRO de la transacción, así que la segunda de dos transiciones
+// concurrentes siempre relee el estado ya actualizado por la primera y se rechaza limpio.
 func (s *EcommerceService) UpdateOrderStatus(id uint, input UpdateOrderStatusInput) error {
-	var order database.TenantEcommerceOrder
-	if err := s.db.First(&order, id).Error; err != nil {
-		return fmt.Errorf("pedido no encontrado")
-	}
 	newStatus := strings.ToUpper(strings.TrimSpace(input.NewStatus))
 	if !validOrderStatuses[newStatus] {
 		return fmt.Errorf("estado inválido: %s", newStatus)
 	}
-	if _, ok := FindOrderTransition(order.Status, newStatus); !ok {
-		return fmt.Errorf("no se puede pasar de %s a %s", order.Status, newStatus)
-	}
 	if requiresReasonNotes(newStatus) && strings.TrimSpace(input.Notes) == "" {
 		return fmt.Errorf("indica el motivo")
 	}
-	fromStatus := order.Status
+	var fromStatus string
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		var order database.TenantEcommerceOrder
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&order, id).Error; err != nil {
+			return fmt.Errorf("pedido no encontrado")
+		}
+		fromStatus = order.Status
+		if _, ok := FindOrderTransition(fromStatus, newStatus); !ok {
+			return fmt.Errorf("no se puede pasar de %s a %s", fromStatus, newStatus)
+		}
+
 		updates := map[string]interface{}{"status": newStatus}
 		if newStatus == OrderStatusConfirmado && order.BranchID == nil && input.BranchID != nil {
 			updates["branch_id"] = *input.BranchID
@@ -709,10 +721,67 @@ func (s *EcommerceService) UpdateOrderStatus(id uint, input UpdateOrderStatusInp
 				return err
 			}
 		}
+		// Deuda técnica #8 (Fase 9->11): cuando el pedido se marca DEVUELTO, sincronizar el
+		// Dispatch asociado si existe y sigue ENTREGADO — misma transacción, para que
+		// OrderStatusHistory y DispatchStatusHistory queden consistentes. Ver
+		// syncDispatchOnOrderReturned.
+		if newStatus == OrderStatusDevuelto {
+			if err := syncDispatchOnOrderReturned(tx, id, userID, input.Notes); err != nil {
+				return err
+			}
+		}
 		return nil
 	}); err != nil {
 		return err
 	}
 	notificationevents.PublishChanged(context.Background(), input.CentralTenantID)
 	return nil
+}
+
+// syncDispatchOnOrderReturned Deuda técnica #8 (auditada y corregida en Fase 11) — cuando
+// UpdateOrderStatus mueve el pedido a DEVUELTO, el TenantEcommerceDispatch asociado (si existe y
+// sigue en ENTREGADO) se sincroniza al mismo estado dentro de la MISMA transacción, escribiendo su
+// propio TenantEcommerceDispatchStatusHistory — nunca se mezcla con el historial del pedido (los dos
+// dominios siguen completamente separados, Contrato v2 §1.7/§8).
+//
+// No es una segunda máquina de estados: es la misma decisión que ya rige CreateDispatch/
+// MarkDispatchDelivered (un cambio en un dominio que, cuando corresponde, empuja el cambio
+// correspondiente en el otro dentro de la misma transacción).
+//
+// Casos cubiertos:
+//   - Pedido sin Dispatch (legacy, o recojo en tienda sin despacho registrado): gorm.ErrRecordNotFound,
+//     no hay nada que sincronizar, no es un error.
+//   - Dispatch ya no está en ENTREGADO: no se fuerza el salto — el pedido es la fuente de verdad de
+//     la devolución, nunca se inventa una transición de Dispatch que no corresponde. En la práctica
+//     esto no debería pasar (ENTREGADO del pedido solo se alcanza vía MarkDispatchDelivered, que
+//     siempre deja también el Dispatch en ENTREGADO), pero se revalida igual (defensa en profundidad
+//     ante datos inconsistentes, mismo criterio que MarkDispatchDelivered revalida Order.Status).
+//   - Doble click / retry / concurrencia: idempotente por construcción — el pedido solo puede llegar
+//     a DEVUELTO una vez (no existe DEVUELTO->DEVUELTO en orderTransitions), así que este bloque
+//     nunca vuelve a ejecutarse para el mismo pedido; un segundo intento se rechaza limpio antes de
+//     llegar acá (fromStatus ya no sería ENTREGADO). El SELECT...FOR UPDATE sobre el Dispatch cierra
+//     además la ventana de carrera con cualquier otra operación concurrente sobre el mismo Dispatch.
+func syncDispatchOnOrderReturned(tx *gorm.DB, orderID uint, userID *uint, notes string) error {
+	var dispatch database.TenantEcommerceDispatch
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("order_id = ?", orderID).First(&dispatch).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if dispatch.Status != DispatchStatusEntregado {
+		return nil
+	}
+	if err := tx.Model(&database.TenantEcommerceDispatch{}).Where("id = ?", dispatch.ID).
+		Update("status", DispatchStatusDevuelto).Error; err != nil {
+		return err
+	}
+	return tx.Create(&database.TenantEcommerceDispatchStatusHistory{
+		DispatchID: dispatch.ID,
+		FromStatus: DispatchStatusEntregado,
+		ToStatus:   DispatchStatusDevuelto,
+		UserID:     userID,
+		Notes:      strings.TrimSpace(notes),
+	}).Error
 }
