@@ -55,6 +55,9 @@ func RegisterRoutes(api fiber.Router) {
 	// Tracking/transición de despacho (Fase 9) — DESPACHADO->EN_TRANSITO->ENTREGADO, separado de
 	// PATCH (metadata) a propósito.
 	api.Put("/ecommerce/dispatches/:id/status", mod, ordersDispatch, h.UpdateDispatchStatusAPI)
+	// Etiqueta logística (Fase 10) — GET porque es de solo lectura/regenerable, mismo idioma que
+	// print-data: nunca modifica estado, nunca crea un segundo Dispatch.
+	api.Get("/ecommerce/orders/:id/label", mod, ordersDispatch, h.OrderLabelAPI)
 }
 
 // RegisterPublicRoutes rutas de la tienda pública (sin JWT de staff), resueltas por tenant vía

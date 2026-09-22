@@ -282,6 +282,22 @@ func (h *EcommerceHandler) OrderPrintDataAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"print_data": pd})
 }
 
+// OrderLabelAPI GET /api/ecommerce/orders/:id/label — Fase 10: etiqueta logística interna, NO un
+// documento tributario/GRE (Contrato v2 Fase 10 §4). Exige ecommerce.orders_dispatch (misma
+// autoridad que el resto del flujo de despacho). Solo lectura: nunca modifica Order/Dispatch/
+// stock/venta — regenerable sin límite (reimpresión, §8), nunca crea un segundo Dispatch.
+func (h *EcommerceHandler) OrderLabelAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	label, err := service.BuildLabelDataForOrder(db(c), uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"label": label})
+}
+
 func (h *EcommerceHandler) ConvertOrderAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
