@@ -98,6 +98,8 @@ func RegisterPublicRoutes(app fiber.Router) {
 	g.Get("/price-bounds", h.PublicPriceBoundsAPI)
 	g.Get("/products", h.PublicProductsAPI)
 	g.Get("/carriers", h.PublicCarriersAPI)
+	// Seguimiento del pedido para el cliente (número + celular).
+	g.Get("/track", h.PublicTrackAPI)
 	// Departamento → provincia → distrito para elegir la ciudad de destino del envío.
 	ubi := ubigeo.NewTenantHandler()
 	g.Get("/ubigeo/regiones", ubi.RegionesAPI)

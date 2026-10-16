@@ -333,3 +333,16 @@ func (h *EcommerceHandler) DeleteOrderPaymentAPI(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"success": true})
 }
+
+// PublicTrackAPI GET /api/public/ecommerce/track?order=PW-152&phone=951700442 — seguimiento para el
+// cliente final: se identifica con el número del pedido y el celular con el que pidió.
+func (h *EcommerceHandler) PublicTrackAPI(c fiber.Ctx) error {
+	view, err := service.NewEcommerceService(db(c)).TrackOrder(c.Query("order"), c.Query("phone"))
+	if err != nil {
+		if err == service.ErrTrackNotFound {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.Status(500).JSON(fiber.Map{"error": "no se pudo consultar el pedido"})
+	}
+	return c.JSON(fiber.Map{"data": view})
+}
