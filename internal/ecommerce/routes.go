@@ -2,6 +2,7 @@ package ecommerce
 
 import (
 	"tukifac/internal/ecommerce/handler"
+	"tukifac/internal/ubigeo"
 	"tukifac/pkg/middleware"
 
 	"github.com/gofiber/fiber/v3"
@@ -92,6 +93,11 @@ func RegisterPublicRoutes(app fiber.Router) {
 	g.Get("/price-bounds", h.PublicPriceBoundsAPI)
 	g.Get("/products", h.PublicProductsAPI)
 	g.Get("/carriers", h.PublicCarriersAPI)
+	// Departamento → provincia → distrito para elegir la ciudad de destino del envío.
+	ubi := ubigeo.NewTenantHandler()
+	g.Get("/ubigeo/regiones", ubi.RegionesAPI)
+	g.Get("/ubigeo/provincias", ubi.ProvinciasAPI)
+	g.Get("/ubigeo/distritos", ubi.DistritosAPI)
 	g.Post("/orders", middleware.EcommerceCustomerAuthOptional(), h.CreatePublicOrderAPI)
 	// Meta tags reales para crawlers (WhatsApp/Facebook/Twitter) — ver PublicPreviewAPI.
 	// Nginx reenvía acá SOLO peticiones de bots detectados por User-Agent.
