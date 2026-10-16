@@ -85,8 +85,11 @@ type ShippingRow struct {
 	AgencyArrivedAt    *time.Time `json:"agency_arrived_at"`
 	PickupDeadline     *time.Time `json:"pickup_deadline"`
 	// PickupDaysLeft días que le quedan al cliente para recoger (negativo = vencido). Solo en etapa EN_AGENCIA.
-	PickupDaysLeft *int   `json:"pickup_days_left"`
-	Stage          string `json:"stage"`
+	PickupDaysLeft *int `json:"pickup_days_left"`
+	// ReturnedAt / ReturnReason: cuándo regresó el paquete y el motivo (etapa RETORNO).
+	ReturnedAt   *time.Time `json:"returned_at"`
+	ReturnReason string     `json:"return_reason"`
+	Stage        string     `json:"stage"`
 }
 
 type shippingRowDB struct {
@@ -117,6 +120,8 @@ type shippingRowDB struct {
 	DispatchedAt       *time.Time
 	AgencyArrivedAt    *time.Time
 	PickupDeadline     *time.Time
+	ReturnedAt         *time.Time
+	ReturnReason       string
 	Stage              string
 }
 
@@ -134,6 +139,9 @@ const shippingSelect = `SELECT o.id AS id, o.created_at AS created_at, o.custome
 	o.recipient_doc_number AS recipient_doc_number, o.recipient_phone AS recipient_phone,
 	d.id AS dispatch_id, COALESCE(d.status, '') AS dispatch_status, COALESCE(d.tracking_code, '') AS tracking_code,
 	d.dispatched_at AS dispatched_at, d.agency_arrived_at AS agency_arrived_at, d.pickup_deadline AS pickup_deadline,
+	d.returned_at AS returned_at,
+	COALESCE((SELECT h.notes FROM tenant_ecommerce_dispatch_status_histories h
+		WHERE h.dispatch_id = d.id AND h.to_status = 'DEVUELTO' ORDER BY h.id DESC LIMIT 1), '') AS return_reason,
 	` + stageSQL + ` AS stage
 	FROM tenant_ecommerce_orders o
 	LEFT JOIN tenant_ecommerce_dispatches d ON d.order_id = o.id
@@ -257,6 +265,7 @@ func (s *EcommerceService) ListShippingBoard(p ShippingBoardParams) ([]ShippingR
 			RecipientPhone: r.RecipientPhone, DispatchID: r.DispatchID, DispatchStatus: r.DispatchStatus,
 			TrackingCode: r.TrackingCode, DispatchedAt: r.DispatchedAt,
 			AgencyArrivedAt: r.AgencyArrivedAt, PickupDeadline: r.PickupDeadline, Stage: r.Stage,
+			ReturnedAt: r.ReturnedAt, ReturnReason: r.ReturnReason,
 		}
 		if len(r.DestinationUbigeo) == 6 {
 			row.Department = depNames[r.DestinationUbigeo[:2]]

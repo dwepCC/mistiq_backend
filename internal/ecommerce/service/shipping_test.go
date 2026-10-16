@@ -486,6 +486,10 @@ func TestRetorno_LiberaReservaYPideMotivo(t *testing.T) {
 	if _, err := svc.MarkDispatchReturned(d.ID, DispatchTransitionInput{Notes: "otra vez"}); err == nil {
 		t.Error("no se puede devolver dos veces")
 	}
+	rows, _, _, _ := svc.ListShippingBoard(ShippingBoardParams{Stage: StageRetorno})
+	if len(rows) != 1 || rows[0].ReturnReason != "no lo recogió" || rows[0].ReturnedAt == nil {
+		t.Errorf("el tablero debe mostrar el motivo y la fecha del retorno: %+v", rows)
+	}
 }
 
 // ── Lote y rótulos ───────────────────────────────────────────────────
