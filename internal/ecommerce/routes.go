@@ -2,6 +2,7 @@ package ecommerce
 
 import (
 	"tukifac/internal/ecommerce/handler"
+	"tukifac/internal/ubigeo"
 	"tukifac/pkg/middleware"
 
 	"github.com/gofiber/fiber/v3"
@@ -44,8 +45,29 @@ func RegisterRoutes(api fiber.Router) {
 	api.Delete("/ecommerce/sliders/:id", mod, manage, h.DeleteSliderAPI)
 	api.Post("/ecommerce/sliders/reorder", mod, manage, h.ReorderSlidersAPI)
 
+	carriersManage := middleware.RequireAnyPermission("ecommerce.manage", "ecommerce.orders_manage")
+
 	api.Get("/ecommerce/orders", mod, ordersView, h.ListOrdersAPI)
+	// Rótulos de varios pedidos (impresión masiva). Antes de /orders/:id para que "labels" no se
+	// interprete como un ID.
+	api.Get("/ecommerce/orders/labels", mod, ordersDispatch, h.BulkLabelsAPI)
 	api.Get("/ecommerce/orders/:id", mod, ordersView, h.GetOrderAPI)
+	// Datos de envío del pedido (transportista, agencia, quién recoge, costo, bultos).
+	api.Put("/ecommerce/orders/:id/shipping", mod, ordersTransition, h.UpdateOrderShippingAPI)
+
+	// Envíos: tablero por etapas y transportistas.
+	api.Get("/ecommerce/shipping/board", mod, ordersView, h.ShippingBoardAPI)
+	api.Get("/ecommerce/carriers", mod, ordersView, h.ListCarriersAPI)
+	api.Post("/ecommerce/carriers", mod, carriersManage, h.CreateCarrierAPI)
+	api.Put("/ecommerce/carriers/:id", mod, carriersManage, h.UpdateCarrierAPI)
+	api.Delete("/ecommerce/carriers/:id", mod, carriersManage, h.DeleteCarrierAPI)
+	// Abonos del pedido: registrarlos lo hace quien atiende pedidos; validarlos u observarlos, el que gestiona.
+	api.Get("/ecommerce/orders/:id/payments", mod, ordersView, h.ListOrderPaymentsAPI)
+	api.Post("/ecommerce/orders/:id/payments", mod, ordersTransition, h.AddOrderPaymentAPI)
+	api.Put("/ecommerce/payments/:id/review", mod, middleware.RequirePermission("ecommerce.orders_manage"), h.ReviewOrderPaymentAPI)
+	api.Delete("/ecommerce/payments/:id", mod, ordersTransition, h.DeleteOrderPaymentAPI)
+	// Despacho por lote (varios pedidos con su guía).
+	api.Post("/ecommerce/dispatches/batch", mod, ordersDispatch, h.BatchDispatchAPI)
 	api.Get("/ecommerce/orders/:id/print-data", mod, ordersView, h.OrderPrintDataAPI)
 	api.Put("/ecommerce/orders/:id/status", mod, ordersTransition, h.UpdateOrderStatusAPI)
 	api.Post("/ecommerce/orders/:id/convert", mod, ordersConvert, h.ConvertOrderAPI)
@@ -75,6 +97,14 @@ func RegisterPublicRoutes(app fiber.Router) {
 	g.Get("/categories", h.PublicCategoriesAPI)
 	g.Get("/price-bounds", h.PublicPriceBoundsAPI)
 	g.Get("/products", h.PublicProductsAPI)
+	g.Get("/carriers", h.PublicCarriersAPI)
+	// Seguimiento del pedido para el cliente (número + celular).
+	g.Get("/track", h.PublicTrackAPI)
+	// Departamento → provincia → distrito para elegir la ciudad de destino del envío.
+	ubi := ubigeo.NewTenantHandler()
+	g.Get("/ubigeo/regiones", ubi.RegionesAPI)
+	g.Get("/ubigeo/provincias", ubi.ProvinciasAPI)
+	g.Get("/ubigeo/distritos", ubi.DistritosAPI)
 	g.Post("/orders", middleware.EcommerceCustomerAuthOptional(), h.CreatePublicOrderAPI)
 	// Meta tags reales para crawlers (WhatsApp/Facebook/Twitter) — ver PublicPreviewAPI.
 	// Nginx reenvía acá SOLO peticiones de bots detectados por User-Agent.

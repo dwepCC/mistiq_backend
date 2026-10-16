@@ -9,6 +9,7 @@ import (
 	"tukifac/internal/inventory/service"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
+	"tukifac/pkg/stockreserve"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
@@ -409,6 +410,38 @@ func (h *InventoryHandler) StockSummaryAPI(c fiber.Ctx) error {
 	}
 	out := make(map[string]float64)
 	for k, v := range totals {
+		out[strconv.FormatUint(uint64(k), 10)] = v
+	}
+	return c.JSON(fiber.Map{"data": out})
+}
+
+// ReservedSummaryAPI GET /api/inventory/reserved-summary?product_ids=1,2,3&branch_id=1 — cantidad
+// reservada por pedidos web confirmados, por producto (mapa id → cantidad). Sin branch_id suma todas
+// las sucursales. El disponible es stock − reservado.
+func (h *InventoryHandler) ReservedSummaryAPI(c fiber.Ctx) error {
+	var ids []uint
+	for _, s := range strings.Split(c.Query("product_ids"), ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if n, err := strconv.ParseUint(s, 10, 32); err == nil {
+			ids = append(ids, uint(n))
+		}
+	}
+	out := make(map[string]float64)
+	if len(ids) == 0 {
+		return c.JSON(fiber.Map{"data": out})
+	}
+	var branchID uint
+	if reqB, err := strconv.ParseUint(c.Query("branch_id"), 10, 32); err == nil && reqB > 0 {
+		branchID = branch.ResolveReadBranchFilter(c, uint(reqB))
+	}
+	reserved, err := stockreserve.ReservedByProduct(db(c), branchID, ids)
+	if err != nil {
+		return c.JSON(fiber.Map{"data": out})
+	}
+	for k, v := range reserved {
 		out[strconv.FormatUint(uint64(k), 10)] = v
 	}
 	return c.JSON(fiber.Map{"data": out})

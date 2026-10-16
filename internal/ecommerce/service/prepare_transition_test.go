@@ -29,7 +29,7 @@ func setupIsolatedEcommerceServiceDB(t *testing.T) *gorm.DB {
 	for _, m := range []interface{}{
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{},
-		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{}, &database.TenantNotification{},
 		&database.TenantProduct{}, &database.TenantProductPresentation{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {

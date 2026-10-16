@@ -1046,9 +1046,49 @@ type TenantEcommerceSettings struct {
 	CategoryStyle string `gorm:"size:20;default:'circles'" json:"category_style"`
 	// Muestra "Agotado" en la tienda pública cuando manage_stock y stock_total<=0. Si es false, el
 	// stock (incluido stock_by_branch) no se envía en la respuesta pública de productos.
-	ShowStock bool      `gorm:"column:show_stock;default:true" json:"show_stock"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ShowStock bool `gorm:"column:show_stock;default:true" json:"show_stock"`
+	// Pedidos y envíos: si es true, un abono nace PENDIENTE y alguien con permiso debe validarlo antes
+	// de preparar el pedido (voucher revisado). Si es false, el abono nace ya validado.
+	RequirePaymentValidation bool `gorm:"column:require_payment_validation;default:false" json:"require_payment_validation"`
+	// Si es true, al despachar un pedido se emite su venta (los abonos validados son los pagos y el
+	// saldo queda como crédito pendiente de cobro). EmitSaleTarget: nota_venta | 03 | 01.
+	EmitSaleOnDispatch bool      `gorm:"column:emit_sale_on_dispatch;default:false" json:"emit_sale_on_dispatch"`
+	EmitSaleTarget     string    `gorm:"column:emit_sale_target;size:12;default:'nota_venta'" json:"emit_sale_target"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// Estados de un abono de pedido web.
+const (
+	OrderPaymentPending   = "PENDIENTE"
+	OrderPaymentValidated = "VALIDADO"
+	OrderPaymentObserved  = "OBSERVADO"
+)
+
+// TenantEcommerceOrderPayment abono registrado sobre un pedido web (adelanto para el envío, pago
+// parcial, saldo). Es un registro de control: el dinero entra a caja o bancos cuando el pedido se
+// convierte en venta, momento en que los abonos validados pasan a ser los pagos de esa venta.
+type TenantEcommerceOrderPayment struct {
+	ID      uint    `gorm:"primaryKey" json:"id"`
+	OrderID uint    `gorm:"not null;index" json:"order_id"`
+	Amount  float64 `gorm:"type:decimal(15,2);not null" json:"amount"`
+	// Method: código de TenantPaymentMethod (efectivo, yape, transferencia…).
+	Method string `gorm:"size:50;not null" json:"method"`
+	// Reference: número de operación del voucher.
+	Reference string `gorm:"size:100" json:"reference"`
+	Note      string `gorm:"size:255" json:"note"`
+	// VoucherURL: foto del voucher (opcional).
+	VoucherURL string    `gorm:"size:255" json:"voucher_url"`
+	PaidAt     time.Time `json:"paid_at"`
+	Status     string    `gorm:"size:12;not null;default:'PENDIENTE';index" json:"status"`
+	// ObservedReason: por qué se observó el voucher.
+	ObservedReason string         `gorm:"size:255" json:"observed_reason"`
+	CreatedBy      *uint          `json:"created_by"`
+	ReviewedBy     *uint          `json:"reviewed_by"`
+	ReviewedAt     *time.Time     `json:"reviewed_at"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // TenantEcommerceSlider imagen del carrusel principal de la tienda pública.
@@ -1105,6 +1145,22 @@ type TenantEcommerceOrder struct {
 	GuestAddressLine  string `gorm:"size:255" json:"guest_address_line"`
 	GuestReference    string `gorm:"size:255" json:"guest_reference"`
 	GuestUbigeo       string `gorm:"size:6" json:"guest_ubigeo"`
+	// Envío por agencia (ENVIO_AGENCIA): transportista elegido, agencia de destino y quién recoge.
+	// El destinatario puede ser distinto del comprador; la agencia exige su documento (DNI/CE/RUC).
+	CarrierID          *uint  `gorm:"index" json:"carrier_id"`
+	DestinationUbigeo  string `gorm:"size:6" json:"destination_ubigeo"`
+	DestinationAgency  string `gorm:"size:150" json:"destination_agency"`
+	DestinationAddress string `gorm:"size:255" json:"destination_address"`
+	RecipientName      string `gorm:"size:150" json:"recipient_name"`
+	// RecipientDocType: código SUNAT (1 DNI, 4 CE, 6 RUC), mismo criterio que TenantContact.DocType.
+	RecipientDocType   string `gorm:"size:2" json:"recipient_doc_type"`
+	RecipientDocNumber string `gorm:"size:20" json:"recipient_doc_number"`
+	RecipientPhone     string `gorm:"size:30" json:"recipient_phone"`
+	// ShippingCost lo escribe el negocio por pedido (sin tarifario). Es informativo: NO forma parte
+	// del total ni de la venta.
+	ShippingCost float64  `gorm:"type:decimal(15,2);default:0" json:"shipping_cost"`
+	PackageCount *int     `json:"package_count"`
+	WeightKg     *float64 `json:"weight_kg"`
 	// PaymentStatus: marcador arquitectónico para cuando exista pasarela de pago — inerte hoy.
 	// Fijo en NO_APLICA al crear el pedido; el cliente público no puede enviarlo ni modificarlo
 	// (CreateOrderInput no expone este campo). Sin pagos/webhooks/reservas en esta fase.
@@ -1189,8 +1245,40 @@ type TenantEcommerceDispatch struct {
 	DeliveredAt  *time.Time `json:"delivered_at"`
 	UserID       *uint      `json:"user_id"`
 	Notes        string     `gorm:"type:text" json:"notes"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// Envío por agencia: transportista (catálogo), llegada a la agencia de destino y fecha límite de
+	// recojo (llegada + plazo del transportista), retorno si el cliente no recogió.
+	CarrierID       *uint      `gorm:"index" json:"carrier_id"`
+	AgencyArrivedAt *time.Time `json:"agency_arrived_at"`
+	PickupDeadline  *time.Time `gorm:"index" json:"pickup_deadline"`
+	ReturnedAt      *time.Time `json:"returned_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// TenantCarrier transportista/agencia de encomiendas (Shalom, Olva...) con sus reglas operativas.
+// Sin tarifario ni catálogo de destinos: el costo de envío lo escribe el negocio en cada pedido y la
+// agencia de destino se anota libre en el pedido.
+type TenantCarrier struct {
+	ID   uint   `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"size:150;not null" json:"name"`
+	// Kind: AGENCIA (recojo en agencia del transportista) | DOMICILIO (entrega en la dirección) |
+	// PROPIO (reparto propio del negocio).
+	Kind   string `gorm:"size:20;not null;default:'AGENCIA'" json:"kind"`
+	Active bool   `gorm:"default:true" json:"active"`
+	// DispatchDays días de la semana en que el transportista recoge, ISO 1=lunes … 7=domingo,
+	// separados por coma ("1,3,5"). Vacío = todos los días.
+	DispatchDays string `gorm:"size:20" json:"dispatch_days"`
+	// PickupDeadlineDays días que tiene el cliente para recoger desde que el paquete llega a la agencia.
+	PickupDeadlineDays int `gorm:"default:15" json:"pickup_deadline_days"`
+	// WarnDaysBefore días antes del vencimiento a partir de los cuales se marca "por vencer".
+	WarnDaysBefore int `gorm:"default:5" json:"warn_days_before"`
+	// TrackingURL plantilla con {guia}, p. ej. https://rastrea.ejemplo.pe/?guia={guia}.
+	TrackingURL string         `gorm:"size:255" json:"tracking_url"`
+	ShowInStore bool           `gorm:"default:true" json:"show_in_store"`
+	SortOrder   int            `gorm:"default:0" json:"sort_order"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // TenantEcommerceDispatchStatusHistory historial del DESPACHO (Contrato v2 §5/§8/§9, Fase 9) —

@@ -14,6 +14,7 @@ import (
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
 	"tukifac/pkg/notificationevents"
+	"tukifac/pkg/stockreserve"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -71,6 +72,10 @@ type UpdateSettingsInput struct {
 	CardStyle      *string
 	CategoryStyle  *string
 	ShowStock      *bool
+	// Pedidos y envíos.
+	RequirePaymentValidation *bool
+	EmitSaleOnDispatch       *bool
+	EmitSaleTarget           *string // nota_venta | 03 | 01
 }
 
 func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.TenantEcommerceSettings, error) {
@@ -117,6 +122,19 @@ func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.
 	}
 	if input.ShowStock != nil {
 		upd["show_stock"] = *input.ShowStock
+	}
+	if input.RequirePaymentValidation != nil {
+		upd["require_payment_validation"] = *input.RequirePaymentValidation
+	}
+	if input.EmitSaleOnDispatch != nil {
+		upd["emit_sale_on_dispatch"] = *input.EmitSaleOnDispatch
+	}
+	if input.EmitSaleTarget != nil {
+		t := strings.TrimSpace(*input.EmitSaleTarget)
+		if t != "nota_venta" && t != "03" && t != "01" {
+			return nil, fmt.Errorf("comprobante por defecto inválido: use nota_venta, 03 o 01")
+		}
+		upd["emit_sale_target"] = t
 	}
 	if len(upd) > 0 {
 		if err := s.db.Model(&database.TenantEcommerceSettings{}).Where("id = ?", 1).Updates(upd).Error; err != nil {
@@ -281,7 +299,25 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 	if err != nil {
 		return items, total, err
 	}
+	// El stock que ve el cliente es el DISPONIBLE: lo reservado por pedidos ya confirmados no se
+	// puede ofrecer de nuevo.
+	var reservedByProduct map[uint]float64
+	if showStock {
+		ids := make([]uint, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.ID)
+		}
+		if len(ids) > 0 {
+			reservedByProduct, _ = stockreserve.ReservedByProduct(s.db, 0, ids)
+		}
+	}
 	for i := range items {
+		if showStock && reservedByProduct[items[i].ID] > 0 {
+			items[i].StockTotal -= reservedByProduct[items[i].ID]
+			if items[i].StockTotal < 0 {
+				items[i].StockTotal = 0
+			}
+		}
 		// PurchasePrice (costo/precio de compra) es dato interno del tenant: nunca debe viajar en
 		// esta respuesta pública sin autenticación, sin importar la config de "Mostrar stock".
 		items[i].PurchasePrice = 0
@@ -329,6 +365,9 @@ type CreateOrderItemInput struct {
 const (
 	DeliveryMethodPickup   = "RECOJO_TIENDA"
 	DeliveryMethodShipping = "ENVIO_DOMICILIO"
+	// DeliveryMethodAgency: el paquete viaja con una empresa de encomiendas y el destinatario lo
+	// recoge en su agencia de destino (exige agencia y documento de quien recoge).
+	DeliveryMethodAgency = "ENVIO_AGENCIA"
 )
 
 // CreateOrderInput CustomerAccountID/ContactID/DeliveryAddressID: soportados a nivel de servicio
@@ -341,7 +380,16 @@ type CreateOrderInput struct {
 	GuestAddressLine  string
 	GuestReference    string
 	GuestUbigeo       string
-	CustomerAccountID *uint
+	// Envío por agencia (DeliveryMethod ENVIO_AGENCIA).
+	CarrierID          *uint
+	DestinationUbigeo  string
+	DestinationAgency  string
+	DestinationAddress string
+	RecipientName      string
+	RecipientDocType   string
+	RecipientDocNumber string
+	RecipientPhone     string
+	CustomerAccountID  *uint
 	ContactID         *uint
 	DeliveryAddressID *uint
 	Items             []CreateOrderItemInput
@@ -422,8 +470,16 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 		return nil, nil, fmt.Errorf("el celular del cliente es obligatorio")
 	}
 	deliveryMethod := strings.ToUpper(strings.TrimSpace(input.DeliveryMethod))
-	if deliveryMethod != DeliveryMethodPickup && deliveryMethod != DeliveryMethodShipping {
+	if deliveryMethod != DeliveryMethodPickup && deliveryMethod != DeliveryMethodShipping && deliveryMethod != DeliveryMethodAgency {
 		return nil, nil, fmt.Errorf("método de entrega inválido")
+	}
+	var agency agencyOrderData
+	if deliveryMethod == DeliveryMethodAgency {
+		var err error
+		agency, err = s.validateAgencyCheckout(input)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	hasAuthenticatedAddress := input.DeliveryAddressID != nil && *input.DeliveryAddressID > 0
 	if hasAuthenticatedAddress {
@@ -483,6 +539,16 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 		// puede enviarlo ni modificarlo. Fijo en NO_APLICA mientras no exista pasarela de pago.
 		PaymentStatus: "NO_APLICA",
 		Status:        OrderStatusPendiente,
+	}
+	if deliveryMethod == DeliveryMethodAgency {
+		order.CarrierID = agency.carrierID
+		order.DestinationUbigeo = agency.ubigeo
+		order.DestinationAgency = agency.agency
+		order.DestinationAddress = agency.address
+		order.RecipientName = agency.name
+		order.RecipientDocType = agency.docType
+		order.RecipientDocNumber = agency.docNumber
+		order.RecipientPhone = agency.phone
 	}
 	if !hasAuthenticatedAddress {
 		order.GuestAddressLine = strings.TrimSpace(input.GuestAddressLine)
@@ -696,6 +762,30 @@ func (s *EcommerceService) UpdateOrderStatus(id uint, input UpdateOrderStatusInp
 		updates := map[string]interface{}{"status": newStatus}
 		if newStatus == OrderStatusConfirmado && order.BranchID == nil && input.BranchID != nil {
 			updates["branch_id"] = *input.BranchID
+		}
+		// Con «validar pagos» activo, un pedido con abonos por revisar no pasa a preparación.
+		if newStatus == OrderStatusEnPreparacion {
+			if cfg, cerr := s.GetSettings(); cerr == nil && cfg.RequirePaymentValidation {
+				if pend, perr := s.pendingReview(tx, id); perr == nil && pend {
+					return fmt.Errorf("hay abonos sin validar: valídalos antes de preparar el pedido")
+				}
+			}
+		}
+		// Al confirmar, el pedido RESERVA su mercadería en la sucursal: se valida que alcance el
+		// stock disponible (almacén menos lo reservado por otros pedidos). Sin sucursal todavía no
+		// hay dónde reservar.
+		if newStatus == OrderStatusConfirmado {
+			var branchID uint
+			if order.BranchID != nil {
+				branchID = *order.BranchID
+			} else if input.BranchID != nil {
+				branchID = *input.BranchID
+			}
+			if branchID > 0 {
+				if err := stockreserve.CheckOrder(tx, id, branchID); err != nil {
+					return err
+				}
+			}
 		}
 		if err := tx.Model(&database.TenantEcommerceOrder{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err

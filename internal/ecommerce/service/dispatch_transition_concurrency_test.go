@@ -22,7 +22,7 @@ func setupDispatchTransitionConcurrencyDB(t *testing.T, dsn string) *gorm.DB {
 		&database.TenantProduct{}, &database.TenantProductPresentation{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{},
-		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{}, &database.TenantNotification{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatalf("automigrate %T: %v", m, err)

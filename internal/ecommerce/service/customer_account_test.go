@@ -25,7 +25,7 @@ func setupCustomerAccountTestDB(t *testing.T) *gorm.DB {
 	for _, m := range []interface{}{
 		&database.TenantEcommerceCustomerAccount{}, &database.TenantEcommerceCustomerAddress{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
-		&database.TenantEcommerceDispatch{}, &database.TenantEcommerceDispatchStatusHistory{},
+		&database.TenantEcommerceDispatch{}, &database.TenantEcommerceDispatchStatusHistory{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatal(err)

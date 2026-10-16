@@ -3,10 +3,12 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/stockreserve"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -41,6 +43,10 @@ type MovementInput struct {
 	// Kardex qué números de serie participaron sin inferirlo por referencia/fecha.
 	TransferID *uint
 	SaleItemID *uint
+	// RespectReserved: la salida no puede dejar el stock por debajo de lo reservado por pedidos web
+	// confirmados. Lo usan las transferencias y las salidas manuales; las ventas validan el
+	// disponible antes de llegar aquí (y excluyen la reserva del propio pedido).
+	RespectReserved bool
 }
 
 func (s *InventoryService) resolveMovementOperationType(tx *gorm.DB, input *MovementInput) error {
@@ -110,6 +116,12 @@ func (s *InventoryService) RecordMovementTx(tx *gorm.DB, input MovementInput) er
 		newBalance = currentQty - input.Quantity
 		if newBalance < 0 {
 			return errors.New("stock insuficiente")
+		}
+		if input.RespectReserved && input.Type == "out" {
+			if reserved, rerr := stockreserve.ReservedFor(tx, input.BranchID, 0, input.ProductID, input.PresentationID); rerr == nil && newBalance < reserved {
+				return fmt.Errorf("stock reservado: hay %.2f en almacén y %.2f están reservados en pedidos web (disponible %.2f)",
+					currentQty, reserved, currentQty-reserved)
+			}
 		}
 	case "adjustment":
 		newBalance = input.Quantity
@@ -265,14 +277,15 @@ func (s *InventoryService) Transfer(productID, fromBranchID, toBranchID uint, qu
 
 	ref := "TRANSFER"
 	if err := s.RecordMovement(MovementInput{
-		ProductID:     productID,
-		BranchID:      fromBranchID,
-		Type:          "out",
-		Quantity:      quantity,
-		Reference:     ref,
-		Notes:         notes,
-		UserID:        userID,
-		OperationCode: "TRANSFER",
+		ProductID:       productID,
+		BranchID:        fromBranchID,
+		Type:            "out",
+		Quantity:        quantity,
+		Reference:       ref,
+		Notes:           notes,
+		UserID:          userID,
+		OperationCode:   "TRANSFER",
+		RespectReserved: true,
 	}); err != nil {
 		return err
 	}
@@ -358,7 +371,7 @@ func (s *InventoryService) TransferWithSerials(productID, fromBranchID, toBranch
 		qty := float64(len(serials))
 		ref := "TRANSFER-SERIAL"
 		if err := s.RecordMovementTx(tx, MovementInput{
-			ProductID: productID, BranchID: fromBranchID, Type: "out",
+			ProductID: productID, BranchID: fromBranchID, Type: "out", RespectReserved: true,
 			Quantity: qty, Reference: ref, Notes: notes, UserID: userID,
 			OperationCode: "TRANSFER",
 		}); err != nil {
@@ -538,7 +551,7 @@ func (s *InventoryService) CreateTransferWithLines(fromBranchID, toBranchID, use
 			// Salida en origen
 			if err := s.RecordMovementTx(tx, MovementInput{
 				ProductID: line.ProductID, PresentationID: line.PresentationID, BranchID: fromBranchID, Type: "out",
-				Quantity: qty, Reference: ref, Notes: notes, UserID: userID,
+				RespectReserved: true, Quantity: qty, Reference: ref, Notes: notes, UserID: userID,
 				OperationCode: "TRANSFER", TransferID: &tr.ID,
 			}); err != nil {
 				return err

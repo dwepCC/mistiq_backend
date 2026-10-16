@@ -34,7 +34,7 @@ func TestE2E_EtiquetaLogistica(t *testing.T) {
 		&database.TenantStockMovement{}, &database.TenantBranch{}, &database.TenantCompanyConfig{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{},
-		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{}, &database.TenantNotification{},
 	); err != nil {
 		t.Fatal(err)
 	}
