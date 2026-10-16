@@ -641,7 +641,7 @@ func notificationForTransition(orderID uint, fromStatus, newStatus string) *data
 		return &database.TenantNotification{
 			Type: "ecommerce.order.confirmed", LinkPath: link,
 			Title: fmt.Sprintf("Pedido #%d confirmado", orderID),
-			Body:  "El pedido pasó a preparación.",
+			Body:  "El pedido fue confirmado y está listo para preparar.",
 		}
 	case newStatus == OrderStatusCancelado:
 		return &database.TenantNotification{
