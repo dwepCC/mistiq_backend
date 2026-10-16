@@ -19,31 +19,38 @@ Decisiones técnicas: `docs/ECOMMERCE-EVOLUTION-CONTRACT.md`, sección 13.
 - La venta toma los abonos validados como pagos y deja el saldo a crédito (Cobros pendientes), vencimiento = plazo de recojo; el cliente se crea con el DNI de quien recoge.
 - «Emitir la venta al despachar» (ajuste + comprobante por defecto), con resultado por pedido.
 
+**Combos en la tienda**
+- La tienda ofrece los combos (grupos fijos, «elige uno» y «elige varios», con extras de precio). El cliente los arma en la ficha del producto; el carrito los distingue por la elección hecha.
+- El pedido guarda la elección y el detalle de componentes por línea (`combo_json`, `combo_components_json`, migración **V146**); el precio lo calcula siempre el servidor (`combos.Resolve`).
+- La reserva y la validación al confirmar se hacen **por componente** (`pkg/stockreserve`); al convertir en venta se descuentan los componentes y la línea lleva sus modificadores.
+- Un combo sale «Agotado» en la tienda si no alcanza el stock de alguna de sus opciones obligatorias (con «Mostrar stock» desactivado no se calcula). Sin grupos u opciones, no se ofrece.
+- El panel muestra los componentes bajo la línea (con aviso si falta stock) y el seguimiento público muestra «Incluye: …».
+
 **F3 (parcial)**
 - Seguimiento público `/ecommerce/seguimiento` (número + celular) y enlace en los mensajes de WhatsApp.
 - Exportar la lista a CSV (abre en Excel).
 
-Migraciones: **V144** (envíos) y **V145** (abonos + ajustes). Corren solas en el deploy.
+Migraciones: **V144** (envíos), **V145** (abonos + ajustes) y **V146** (combos en las líneas del pedido). Corren solas en el deploy.
 
 ## Pendiente (por orden sugerido)
 
 1. **Probar con datos reales** (nadie lo ha hecho fuera de la BD de pruebas): despacho con venta, impresión de rótulos, seguimiento desde un celular, abonos con «validar pagos» activado.
-2. **Combos en la tienda** (F3). Hoy la tienda los excluye (`ExcludeCombos` en `EcommerceService.PublicProducts`). Hace falta guardar la elección del combo por línea del pedido (`combo_json`), reservar stock por componente (`stockreserve` solo mira productos) y pasarlo a `ConvertToSale` (`SaleItemInput.ComboJSON`). Empezar solo con combos de componentes fijos.
-3. **Pedido manual**: botón del mockup, para pedidos que llegan por WhatsApp sin pasar por la tienda (crear pedido desde el panel con cliente, destino y productos).
-4. **Foto del voucher** en el abono (hoy solo monto, medio, n.º de operación y fecha). El campo `voucher_url` ya existe en el modelo; falta subir el archivo (usar el patrón de `uploadEcommerceImage`).
-5. **Diseño anterior (`?ui=1`)**: las páginas nuevas existen solo en el diseño nuevo; el menú viejo no las lista.
-6. **Mejoras menores**
+2. **Pedido manual**: botón del mockup, para pedidos que llegan por WhatsApp sin pasar por la tienda (crear pedido desde el panel con cliente, destino y productos).
+3. **Foto del voucher** en el abono (hoy solo monto, medio, n.º de operación y fecha). El campo `voucher_url` ya existe en el modelo; falta subir el archivo (usar el patrón de `uploadEcommerceImage`).
+4. **Diseño anterior (`?ui=1`)**: las páginas nuevas existen solo en el diseño nuevo; el menú viejo no las lista.
+5. **Mejoras menores**
+   - Mostrar los componentes del combo en el rótulo y la nota de preparación impresa (hoy solo van en el detalle del pedido).
    - Exportar a Excel real (.xlsx) en vez de CSV.
    - Insignias con conteos en el menú lateral (por vencer, por despachar).
    - Cobrar el saldo desde el propio pedido (hoy se cobra en Cobros pendientes).
    - Aviso/notificación automática cuando falten N días para que venza el plazo de recojo (el plazo y el aviso previo ya se configuran, solo se muestran en pantalla).
    - Anular la venta desde el retorno (hoy el panel avisa y se anula en Mis ventas).
-7. **Tests que fallan por el entorno** (no por este módulo): billing Greenter (necesita PHP), prepayment, superadmin (timeout de login). Revisar en una máquina con PHP.
+6. **Tests que fallan por el entorno** (no por este módulo): billing Greenter (necesita PHP), prepayment, superadmin (timeout de login). Revisar en una máquina con PHP.
 
 ## Cómo seguir desde otra PC
 
 1. Clonar `mistiq_backend` y `mistiq_tenant` (y los demás repos del proyecto), ambos en `main`.
-2. Backend: `go run . migrate-bump-target` y `go run . migrate-fleet --limit=10 --workers=1` para llevar la BD local a V145.
+2. Backend: `go run . migrate-bump-target` y `go run . migrate-fleet --limit=10 --workers=1` para llevar la BD local a V146.
 3. Para probar rápido, en un tenant de pruebas: crear empresas de envío (Vender → Pedidos y envíos → Empresas de envío), activar «controlar stock» en un producto con stock, y hacer pedidos desde `/ecommerce/` con «A otra ciudad».
 4. Los mockups aprobados están en `docs/pedidos-envios-mockups/` (fuente `.dc.html`, `canvas.json` y `mq.css`) y publicados en el Artifact «Pedidos y envíos — mockups» de claude.ai (el enlace está en el historial de la conversación original).
 5. Panel: `npm run dev`; verificar con `npx tsc --noEmit -p .`, `npm run check:nav` y `npm run build`.

@@ -27,6 +27,8 @@ type TrackItem struct {
 	Name     string  `json:"name"`
 	Quantity float64 `json:"quantity"`
 	Subtotal float64 `json:"subtotal"`
+	// Includes qué trae un combo («2 × Polo, Pantalón»); vacío en los demás productos.
+	Includes string `json:"includes,omitempty"`
 }
 
 // TrackView lo que el cliente final puede ver de su pedido: nunca notas internas, usuarios, ni nada que no
@@ -175,7 +177,7 @@ func (s *EcommerceService) TrackOrder(orderRef, phone string) (*TrackView, error
 	var items []database.TenantEcommerceOrderItem
 	s.db.Where("order_id = ?", id).Order("id ASC").Find(&items)
 	for _, it := range items {
-		v.Items = append(v.Items, TrackItem{Name: it.Name, Quantity: it.Quantity, Subtotal: it.Subtotal})
+		v.Items = append(v.Items, TrackItem{Name: it.Name, Quantity: it.Quantity, Subtotal: it.Subtotal, Includes: comboIncludes(it.ComboComponentsJSON)})
 	}
 
 	v.Headline, v.Message = trackMessage(stage, v, dispatch)

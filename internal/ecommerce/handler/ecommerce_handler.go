@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"os"
@@ -760,6 +761,8 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 			ProductID      uint    `json:"product_id"`
 			PresentationID *uint   `json:"presentation_id"`
 			Quantity       float64 `json:"quantity"`
+			// Combo: elección del cliente en los grupos del combo.
+			Combo json.RawMessage `json:"combo"`
 		} `json:"items"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
@@ -771,6 +774,7 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 			ProductID:      it.ProductID,
 			PresentationID: it.PresentationID,
 			Quantity:       it.Quantity,
+			ComboJSON:      comboSelection(it.Combo),
 		})
 	}
 	input := service.CreateOrderInput{

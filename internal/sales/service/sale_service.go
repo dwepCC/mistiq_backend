@@ -407,6 +407,22 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				}
 			}
 		}
+		// Componentes de combo: el stock sale de ellos, así que también deben alcanzar (descontando lo que
+		// otros pedidos web tienen reservado; el pedido que se está convirtiendo no cuenta contra sí mismo).
+		for _, mv := range input.ExtraStockMovements {
+			if mv.ProductID == 0 || mv.Quantity <= 0 {
+				continue
+			}
+			var comp database.TenantProduct
+			if s.db.First(&comp, mv.ProductID).Error != nil || !comp.ManageStock || productIsCatalogService(&comp) {
+				continue
+			}
+			var stock database.TenantProductStock
+			s.db.Where("product_id = ? AND branch_id = ?", mv.ProductID, input.BranchID).First(&stock)
+			if err := checkAvailableStock(s.db, comp.Name, mv.Quantity, stock.Quantity, input.BranchID, input.ReservedOrderID, mv.ProductID, nil); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Construir lista de pagos: si Payments está vacío, usar PaymentMethod como pago único
