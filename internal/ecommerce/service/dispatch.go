@@ -18,6 +18,8 @@ import (
 // tracking, y ENVIO_DOMICILIO reutiliza la dirección ya persistida en el pedido, nunca pide una
 // nueva acá). UserID: quién ejecuta el despacho, para StatusHistory.
 type CreateDispatchInput struct {
+	// CarrierID: transportista del catálogo; si no viene se toma el del pedido.
+	CarrierID    *uint
 	CarrierName  *string
 	TrackingCode *string
 	PackageCount *int
@@ -98,14 +100,44 @@ func (s *EcommerceService) CreateDispatch(orderID uint, input CreateDispatchInpu
 			return err
 		}
 
+		if err := validateAgencyOrderForDispatch(&order, input.CarrierID); err != nil {
+			return err
+		}
+		if order.DeliveryMethod == DeliveryMethodAgency && trimmedOrNil(input.TrackingCode) == nil {
+			return errors.New("ingresa el número de guía de la agencia")
+		}
+
+		// Transportista: el indicado al despachar o, si no, el elegido en el pedido.
+		carrierID := input.CarrierID
+		if carrierID == nil {
+			carrierID = order.CarrierID
+		}
+		carrierName := trimmedOrNil(input.CarrierName)
+		if carrierName == nil && carrierID != nil {
+			var carrier database.TenantCarrier
+			if err := tx.Unscoped().First(&carrier, *carrierID).Error; err == nil {
+				name := carrier.Name
+				carrierName = &name
+			}
+		}
+		packageCount := input.PackageCount
+		if packageCount == nil {
+			packageCount = order.PackageCount
+		}
+		weightKg := input.WeightKg
+		if weightKg == nil {
+			weightKg = order.WeightKg
+		}
+
 		now := time.Now()
 		dispatch = database.TenantEcommerceDispatch{
 			OrderID:      orderID,
 			Status:       DispatchStatusDespachado,
-			CarrierName:  trimmedOrNil(input.CarrierName),
+			CarrierID:    carrierID,
+			CarrierName:  carrierName,
 			TrackingCode: trimmedOrNil(input.TrackingCode),
-			PackageCount: input.PackageCount,
-			WeightKg:     input.WeightKg,
+			PackageCount: packageCount,
+			WeightKg:     weightKg,
 			LengthCm:     input.LengthCm,
 			WidthCm:      input.WidthCm,
 			HeightCm:     input.HeightCm,
@@ -287,8 +319,10 @@ func (s *EcommerceService) MarkDispatchDelivered(dispatchID uint, input Dispatch
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&dispatch, dispatchID).Error; err != nil {
 			return errors.New("despacho no encontrado")
 		}
-		if dispatch.Status != DispatchStatusEnTransito {
-			return fmt.Errorf("el despacho debe estar EN_TRANSITO para marcarse ENTREGADO (estado actual: %s)", dispatch.Status)
+		fromDispatchStatus := dispatch.Status
+		if fromDispatchStatus != DispatchStatusDespachado && fromDispatchStatus != DispatchStatusEnTransito &&
+			fromDispatchStatus != DispatchStatusEnAgencia {
+			return fmt.Errorf("el despacho debe estar en camino o en la agencia para marcarse ENTREGADO (estado actual: %s)", dispatch.Status)
 		}
 		var order database.TenantEcommerceOrder
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&order, dispatch.OrderID).Error; err != nil {
@@ -314,7 +348,7 @@ func (s *EcommerceService) MarkDispatchDelivered(dispatchID uint, input Dispatch
 			userID = &input.UserID
 		}
 		if err := tx.Create(&database.TenantEcommerceDispatchStatusHistory{
-			DispatchID: dispatchID, FromStatus: DispatchStatusEnTransito, ToStatus: DispatchStatusEntregado,
+			DispatchID: dispatchID, FromStatus: fromDispatchStatus, ToStatus: DispatchStatusEntregado,
 			UserID: userID, Notes: strings.TrimSpace(input.Notes),
 		}).Error; err != nil {
 			return err

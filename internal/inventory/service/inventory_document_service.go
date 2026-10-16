@@ -653,6 +653,7 @@ func applyDocumentLineMovement(
 		UserID:              userID,
 		OperationTypeID:     &opTypeID,
 		InventoryDocumentID: &docRefID,
+		RespectReserved:     movType == "out",
 	}
 
 	if product.ManageSeries {

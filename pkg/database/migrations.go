@@ -1105,6 +1105,22 @@ type TenantEcommerceOrder struct {
 	GuestAddressLine  string `gorm:"size:255" json:"guest_address_line"`
 	GuestReference    string `gorm:"size:255" json:"guest_reference"`
 	GuestUbigeo       string `gorm:"size:6" json:"guest_ubigeo"`
+	// Envío por agencia (ENVIO_AGENCIA): transportista elegido, agencia de destino y quién recoge.
+	// El destinatario puede ser distinto del comprador; la agencia exige su documento (DNI/CE/RUC).
+	CarrierID          *uint  `gorm:"index" json:"carrier_id"`
+	DestinationUbigeo  string `gorm:"size:6" json:"destination_ubigeo"`
+	DestinationAgency  string `gorm:"size:150" json:"destination_agency"`
+	DestinationAddress string `gorm:"size:255" json:"destination_address"`
+	RecipientName      string `gorm:"size:150" json:"recipient_name"`
+	// RecipientDocType: código SUNAT (1 DNI, 4 CE, 6 RUC), mismo criterio que TenantContact.DocType.
+	RecipientDocType   string `gorm:"size:2" json:"recipient_doc_type"`
+	RecipientDocNumber string `gorm:"size:20" json:"recipient_doc_number"`
+	RecipientPhone     string `gorm:"size:30" json:"recipient_phone"`
+	// ShippingCost lo escribe el negocio por pedido (sin tarifario). Es informativo: NO forma parte
+	// del total ni de la venta.
+	ShippingCost float64  `gorm:"type:decimal(15,2);default:0" json:"shipping_cost"`
+	PackageCount *int     `json:"package_count"`
+	WeightKg     *float64 `json:"weight_kg"`
 	// PaymentStatus: marcador arquitectónico para cuando exista pasarela de pago — inerte hoy.
 	// Fijo en NO_APLICA al crear el pedido; el cliente público no puede enviarlo ni modificarlo
 	// (CreateOrderInput no expone este campo). Sin pagos/webhooks/reservas en esta fase.
@@ -1189,8 +1205,40 @@ type TenantEcommerceDispatch struct {
 	DeliveredAt  *time.Time `json:"delivered_at"`
 	UserID       *uint      `json:"user_id"`
 	Notes        string     `gorm:"type:text" json:"notes"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// Envío por agencia: transportista (catálogo), llegada a la agencia de destino y fecha límite de
+	// recojo (llegada + plazo del transportista), retorno si el cliente no recogió.
+	CarrierID       *uint      `gorm:"index" json:"carrier_id"`
+	AgencyArrivedAt *time.Time `json:"agency_arrived_at"`
+	PickupDeadline  *time.Time `gorm:"index" json:"pickup_deadline"`
+	ReturnedAt      *time.Time `json:"returned_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// TenantCarrier transportista/agencia de encomiendas (Shalom, Olva...) con sus reglas operativas.
+// Sin tarifario ni catálogo de destinos: el costo de envío lo escribe el negocio en cada pedido y la
+// agencia de destino se anota libre en el pedido.
+type TenantCarrier struct {
+	ID   uint   `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"size:150;not null" json:"name"`
+	// Kind: AGENCIA (recojo en agencia del transportista) | DOMICILIO (entrega en la dirección) |
+	// PROPIO (reparto propio del negocio).
+	Kind   string `gorm:"size:20;not null;default:'AGENCIA'" json:"kind"`
+	Active bool   `gorm:"default:true" json:"active"`
+	// DispatchDays días de la semana en que el transportista recoge, ISO 1=lunes … 7=domingo,
+	// separados por coma ("1,3,5"). Vacío = todos los días.
+	DispatchDays string `gorm:"size:20" json:"dispatch_days"`
+	// PickupDeadlineDays días que tiene el cliente para recoger desde que el paquete llega a la agencia.
+	PickupDeadlineDays int `gorm:"default:15" json:"pickup_deadline_days"`
+	// WarnDaysBefore días antes del vencimiento a partir de los cuales se marca "por vencer".
+	WarnDaysBefore int `gorm:"default:5" json:"warn_days_before"`
+	// TrackingURL plantilla con {guia}, p. ej. https://rastrea.ejemplo.pe/?guia={guia}.
+	TrackingURL string         `gorm:"size:255" json:"tracking_url"`
+	ShowInStore bool           `gorm:"default:true" json:"show_in_store"`
+	SortOrder   int            `gorm:"default:0" json:"sort_order"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // TenantEcommerceDispatchStatusHistory historial del DESPACHO (Contrato v2 §5/§8/§9, Fase 9) —

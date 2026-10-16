@@ -213,6 +213,8 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 		Items:             saleItems,
 		TaxConfig:         taxCfg,
 		CentralTenantID:   input.CentralTenant,
+		// La reserva de este pedido es justo la mercadería que la venta va a descontar.
+		ReservedOrderID: order.ID,
 	})
 	if err != nil {
 		return nil, err

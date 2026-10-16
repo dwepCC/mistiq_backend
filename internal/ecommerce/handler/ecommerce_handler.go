@@ -263,11 +263,37 @@ func (h *EcommerceHandler) GetOrderAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	order, items, history, dispatch, err := service.NewEcommerceService(db(c)).GetOrderDetail(uint(id))
+	svc := service.NewEcommerceService(db(c))
+	order, items, history, dispatch, err := svc.GetOrderDetail(uint(id))
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": order, "items": items, "history": history, "dispatch": dispatch})
+	// Disponibilidad de cada línea en la sucursal del pedido (o la indicada, si aún no tiene):
+	// almacén, reservado por otros pedidos y disponible.
+	var branchID uint
+	if order.BranchID != nil {
+		branchID = *order.BranchID
+	} else if v, perr := strconv.ParseUint(c.Query("branch_id"), 10, 32); perr == nil {
+		branchID = uint(v)
+	}
+	var stock interface{}
+	if branchID > 0 {
+		if lines, serr := svc.OrderStockLines(order.ID, branchID); serr == nil {
+			stock = lines
+		}
+	}
+	carrierName := ""
+	if order.CarrierID != nil {
+		if carrier, cerr := svc.GetCarrier(*order.CarrierID); cerr == nil {
+			carrierName = carrier.Name
+		}
+	}
+	dep, prov, dist := svc.UbigeoNames(order.DestinationUbigeo)
+	return c.JSON(fiber.Map{
+		"data": order, "items": items, "history": history, "dispatch": dispatch, "stock": stock,
+		"carrier_name": carrierName,
+		"destination":  fiber.Map{"department": dep, "province": prov, "district": dist},
+	})
 }
 
 func (h *EcommerceHandler) OrderPrintDataAPI(c fiber.Ctx) error {
@@ -350,6 +376,7 @@ func (h *EcommerceHandler) CreateDispatchAPI(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	var body struct {
+		CarrierID    *uint    `json:"carrier_id"`
 		CarrierName  *string  `json:"carrier_name"`
 		TrackingCode *string  `json:"tracking_code"`
 		PackageCount *int     `json:"package_count"`
@@ -363,7 +390,7 @@ func (h *EcommerceHandler) CreateDispatchAPI(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
 	dispatch, err := service.NewEcommerceService(db(c)).CreateDispatch(uint(id), service.CreateDispatchInput{
-		CarrierName: body.CarrierName, TrackingCode: body.TrackingCode,
+		CarrierID: body.CarrierID, CarrierName: body.CarrierName, TrackingCode: body.TrackingCode,
 		PackageCount: body.PackageCount, WeightKg: body.WeightKg,
 		LengthCm: body.LengthCm, WidthCm: body.WidthCm, HeightCm: body.HeightCm,
 		Notes: body.Notes, UserID: orderUserID(c),
@@ -425,6 +452,8 @@ func (h *EcommerceHandler) UpdateDispatchStatusAPI(c fiber.Ctx) error {
 	var body struct {
 		Status string `json:"status"`
 		Notes  string `json:"notes"`
+		// ArrivedAt (YYYY-MM-DD) solo para EN_AGENCIA: día en que el paquete llegó a la agencia.
+		ArrivedAt string `json:"arrived_at"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -437,6 +466,20 @@ func (h *EcommerceHandler) UpdateDispatchStatusAPI(c fiber.Ctx) error {
 		dispatch, err = svc.MarkDispatchInTransit(uint(id), input)
 	case service.DispatchStatusEntregado:
 		dispatch, err = svc.MarkDispatchDelivered(uint(id), input)
+	case service.DispatchStatusEnAgencia:
+		arrival := service.AgencyArrivalInput{DispatchTransitionInput: input}
+		if day := strings.TrimSpace(body.ArrivedAt); day != "" {
+			t, perr := time.ParseInLocation("2006-01-02", day, limaLocation())
+			if perr != nil {
+				return c.Status(400).JSON(fiber.Map{"error": "fecha de llegada inválida"})
+			}
+			// Mediodía del día indicado: evita desfases de huso horario al calcular el plazo.
+			t = time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, t.Location())
+			arrival.ArrivedAt = &t
+		}
+		dispatch, err = svc.MarkDispatchInAgency(uint(id), arrival)
+	case service.DispatchStatusDevuelto:
+		dispatch, err = svc.MarkDispatchReturned(uint(id), input)
 	default:
 		return c.Status(422).JSON(fiber.Map{"error": "transición de despacho no soportada"})
 	}
@@ -682,7 +725,18 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 		CustomerPhone     string `json:"customer_phone"`
 		DeliveryMethod    string `json:"delivery_method"`
 		DeliveryAddressID *uint  `json:"delivery_address_id"` // solo válido con sesión de cliente
-		Address           *struct {
+		// Envío por agencia (delivery_method ENVIO_AGENCIA).
+		Shipping *struct {
+			CarrierID          *uint  `json:"carrier_id"`
+			Ubigeo             string `json:"ubigeo"`
+			Agency             string `json:"agency"`
+			AgencyAddress      string `json:"agency_address"`
+			RecipientName      string `json:"recipient_name"`
+			RecipientDocType   string `json:"recipient_doc_type"`
+			RecipientDocNumber string `json:"recipient_doc_number"`
+			RecipientPhone     string `json:"recipient_phone"`
+		} `json:"shipping"`
+		Address *struct {
 			AddressLine string `json:"address_line"`
 			Reference   string `json:"reference"`
 			Ubigeo      string `json:"ubigeo"`
@@ -718,6 +772,16 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 		if body.DeliveryAddressID != nil {
 			input.DeliveryAddressID = body.DeliveryAddressID
 		}
+	}
+	if sh := body.Shipping; sh != nil {
+		input.CarrierID = sh.CarrierID
+		input.DestinationUbigeo = sh.Ubigeo
+		input.DestinationAgency = sh.Agency
+		input.DestinationAddress = sh.AgencyAddress
+		input.RecipientName = sh.RecipientName
+		input.RecipientDocType = sh.RecipientDocType
+		input.RecipientDocNumber = sh.RecipientDocNumber
+		input.RecipientPhone = sh.RecipientPhone
 	}
 	if body.Address != nil {
 		input.GuestAddressLine = body.Address.AddressLine

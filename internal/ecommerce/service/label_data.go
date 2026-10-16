@@ -31,6 +31,32 @@ type EcommerceLabelData struct {
 	PackageCount   *int     `json:"package_count"`
 	WeightKg       *float64 `json:"weight_kg"`
 	DispatchedAt   string   `json:"dispatched_at"`
+
+	// Envío por agencia: quién recoge, adónde va y qué lleva el paquete.
+	RecipientName      string `json:"recipient_name"`
+	RecipientDocType   string `json:"recipient_doc_type"`
+	RecipientDocNumber string `json:"recipient_doc_number"`
+	RecipientPhone     string `json:"recipient_phone"`
+	Department         string `json:"department"`
+	Province           string `json:"province"`
+	District           string `json:"district"`
+	AgencyName         string `json:"agency_name"`
+	AgencyAddress      string `json:"agency_address"`
+	// Items productos del paquete (la etiqueta decide cuántos caben según su formato).
+	Items     []EcommerceLabelItem `json:"items"`
+	ItemCount int                  `json:"item_count"`
+}
+
+// EcommerceLabelItem una línea del contenido del paquete.
+type EcommerceLabelItem struct {
+	Name     string  `json:"name"`
+	Quantity float64 `json:"quantity"`
+}
+
+// labelStatuses el rótulo se imprime cuando el pedido está listo para salir (el paquete ya está
+// armado) y se puede reimprimir mientras viaja o después de entregado.
+var labelStatuses = map[string]bool{
+	OrderStatusListoParaDespacho: true, OrderStatusDespachado: true, OrderStatusEntregado: true,
 }
 
 // BuildLabelDataForOrder Fase 10: mismo idioma que BuildPrintDataForOrder (GET devuelve JSON, el
@@ -43,32 +69,62 @@ func BuildLabelDataForOrder(db *gorm.DB, orderID uint) (*EcommerceLabelData, err
 		return nil, fmt.Errorf("pedido no encontrado")
 	}
 
+	if !labelStatuses[order.Status] {
+		return nil, fmt.Errorf("el rótulo se imprime cuando el pedido está listo para despachar")
+	}
+
 	svc := &EcommerceService{db: db}
 	dispatch, err := svc.GetDispatchByOrderID(orderID)
 	if err != nil {
 		return nil, err
 	}
-	if dispatch == nil {
-		return nil, fmt.Errorf("el pedido todavía no tiene un despacho registrado")
-	}
 
 	label := &EcommerceLabelData{
-		OrderID:        order.ID,
-		OrderNumber:    "PW-" + strconv.FormatUint(uint64(order.ID), 10),
-		CustomerName:   order.CustomerName,
-		CustomerPhone:  order.CustomerPhone,
-		DeliveryMethod: order.DeliveryMethod,
-		PackageCount:   dispatch.PackageCount,
-		WeightKg:       dispatch.WeightKg,
+		OrderID:            order.ID,
+		OrderNumber:        "PW-" + strconv.FormatUint(uint64(order.ID), 10),
+		CustomerName:       order.CustomerName,
+		CustomerPhone:      order.CustomerPhone,
+		DeliveryMethod:     order.DeliveryMethod,
+		PackageCount:       order.PackageCount,
+		WeightKg:           order.WeightKg,
+		RecipientName:      order.RecipientName,
+		RecipientDocType:   order.RecipientDocType,
+		RecipientDocNumber: order.RecipientDocNumber,
+		RecipientPhone:     order.RecipientPhone,
+		AgencyName:         order.DestinationAgency,
+		AgencyAddress:      order.DestinationAddress,
 	}
-	if dispatch.CarrierName != nil {
-		label.CarrierName = *dispatch.CarrierName
+	if order.CarrierID != nil {
+		var carrier database.TenantCarrier
+		if db.Unscoped().First(&carrier, *order.CarrierID).Error == nil {
+			label.CarrierName = carrier.Name
+		}
 	}
-	if dispatch.TrackingCode != nil {
-		label.TrackingCode = *dispatch.TrackingCode
+	if dispatch != nil {
+		if dispatch.PackageCount != nil {
+			label.PackageCount = dispatch.PackageCount
+		}
+		if dispatch.WeightKg != nil {
+			label.WeightKg = dispatch.WeightKg
+		}
+		if dispatch.CarrierName != nil {
+			label.CarrierName = *dispatch.CarrierName
+		}
+		if dispatch.TrackingCode != nil {
+			label.TrackingCode = *dispatch.TrackingCode
+		}
+		if dispatch.DispatchedAt != nil {
+			label.DispatchedAt = dispatch.DispatchedAt.Format("02/01/2006") + " " + datespe.IssueTime(*dispatch.DispatchedAt)
+		}
 	}
-	if dispatch.DispatchedAt != nil {
-		label.DispatchedAt = dispatch.DispatchedAt.Format("02/01/2006") + " " + datespe.IssueTime(*dispatch.DispatchedAt)
+	label.Department, label.Province, label.District = svc.UbigeoNames(order.DestinationUbigeo)
+
+	var lines []database.TenantEcommerceOrderItem
+	if err := db.Where("order_id = ?", order.ID).Order("id ASC").Find(&lines).Error; err == nil {
+		for _, l := range lines {
+			label.Items = append(label.Items, EcommerceLabelItem{Name: l.Name, Quantity: l.Quantity})
+		}
+		label.ItemCount = len(lines)
 	}
 
 	// Dirección: misma resolución que ya usa el pedido — snapshot de invitado o la dirección real
@@ -104,4 +160,36 @@ func BuildLabelDataForOrder(db *gorm.DB, orderID uint) (*EcommerceLabelData, err
 	}
 
 	return label, nil
+}
+
+// LabelResult rótulo de un pedido dentro de una impresión masiva; los que no se pueden imprimir
+// vienen con su motivo en lugar de tumbar toda la impresión.
+type LabelResult struct {
+	OrderID uint                `json:"order_id"`
+	Label   *EcommerceLabelData `json:"label,omitempty"`
+	Error   string              `json:"error,omitempty"`
+}
+
+const maxBulkLabels = 200
+
+// BuildLabelsForOrders datos de rótulo de varios pedidos, en el mismo orden pedido.
+func BuildLabelsForOrders(db *gorm.DB, orderIDs []uint) ([]LabelResult, error) {
+	if len(orderIDs) == 0 {
+		return nil, fmt.Errorf("elige al menos un pedido")
+	}
+	if len(orderIDs) > maxBulkLabels {
+		return nil, fmt.Errorf("máximo %d rótulos por impresión", maxBulkLabels)
+	}
+	out := make([]LabelResult, 0, len(orderIDs))
+	for _, id := range orderIDs {
+		res := LabelResult{OrderID: id}
+		label, err := BuildLabelDataForOrder(db, id)
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.Label = label
+		}
+		out = append(out, res)
+	}
+	return out, nil
 }

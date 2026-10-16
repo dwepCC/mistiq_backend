@@ -144,14 +144,14 @@ func TestMarkDispatchDelivered_Exitoso(t *testing.T) {
 	}
 }
 
-func TestMarkDispatchDelivered_SinPasarPorEnTransito_Rechazado(t *testing.T) {
+func TestMarkDispatchDelivered_DesdeDespachado_Aceptado(t *testing.T) {
 	db := setupEcommerceServiceDB(t)
 	svc := &EcommerceService{db: db}
 	_, dispatch := mustCreateDispatchedOrder(t, svc)
 
-	// dispatch sigue DESPACHADO — nunca pasó por EN_TRANSITO.
-	if _, err := svc.MarkDispatchDelivered(dispatch.ID, DispatchTransitionInput{}); err == nil {
-		t.Fatal("no se debe poder marcar ENTREGADO sin pasar antes por EN_TRANSITO")
+	// dispatch sigue DESPACHADO — EN_TRANSITO es opcional (entrega propia / sin ese paso).
+	if _, err := svc.MarkDispatchDelivered(dispatch.ID, DispatchTransitionInput{}); err != nil {
+		t.Fatalf("debe poder entregarse directo desde DESPACHADO: %v", err)
 	}
 }
 

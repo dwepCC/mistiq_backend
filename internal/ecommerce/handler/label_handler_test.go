@@ -52,10 +52,11 @@ func TestOrderLabelAPI_ConPermisoAceptado(t *testing.T) {
 	order := createReadyForDispatchOrder(t, db)
 	app := newLabelTestApp(db, []string{"ecommerce.orders_dispatch"})
 
-	// Sin Dispatch todavía — debe rechazarse con 404, no 403 (el permiso sí lo tiene).
+	// Listo para despachar y sin Dispatch todavía: el rótulo se imprime ANTES de despachar (se pega
+	// en el paquete), con los datos del pedido.
 	resp1 := getLabel(t, app, order.ID)
-	if resp1.StatusCode != http.StatusNotFound {
-		t.Fatalf("sin despacho aún, status=%d (quería 404)", resp1.StatusCode)
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("rótulo anticipado de un pedido listo para despachar, status=%d (quería 200)", resp1.StatusCode)
 	}
 
 	dispatchApp := newDispatchTestApp(db, []string{"ecommerce.orders_dispatch"})

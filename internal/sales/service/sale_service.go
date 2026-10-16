@@ -148,6 +148,9 @@ type CreateSaleInput struct {
 	SkipInventory           bool
 	SkipPaymentDistribution bool
 	IssuedFromNotaSaleID    *uint // ID de la NV origen; se guarda en la nueva venta 01/03
+	// ReservedOrderID: pedido web que se está convirtiendo en esta venta. Su propia reserva no
+	// cuenta contra el stock disponible (es justo la mercadería que se va a descontar).
+	ReservedOrderID uint
 	IssuedFromQuotationID   *uint // ID de la cotización origen
 	CentralTenantID         uint  // tenant SaaS (cupo de documentos electrónicos)
 	FiscalContext           *salecontext.FiscalContextInput
@@ -370,14 +373,14 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				if product.HasVariants && item.PresentationID != nil && *item.PresentationID > 0 {
 					var pstock database.TenantProductPresentationStock
 					s.db.Where("presentation_id = ? AND branch_id = ?", *item.PresentationID, input.BranchID).First(&pstock)
-					if pstock.Quantity < item.Quantity {
-						return nil, fmt.Errorf("stock insuficiente para %s: requiere %.2f, hay %.2f", item.Description, item.Quantity, pstock.Quantity)
+					if err := checkAvailableStock(s.db, item.Description, item.Quantity, pstock.Quantity, input.BranchID, input.ReservedOrderID, *item.ProductID, item.PresentationID); err != nil {
+						return nil, err
 					}
 				} else {
 					var stock database.TenantProductStock
 					s.db.Where("product_id = ? AND branch_id = ?", *item.ProductID, input.BranchID).First(&stock)
-					if stock.Quantity < item.Quantity {
-						return nil, fmt.Errorf("stock insuficiente para %s: requiere %.2f, hay %.2f", item.Description, item.Quantity, stock.Quantity)
+					if err := checkAvailableStock(s.db, item.Description, item.Quantity, stock.Quantity, input.BranchID, input.ReservedOrderID, *item.ProductID, nil); err != nil {
+						return nil, err
 					}
 				}
 			}

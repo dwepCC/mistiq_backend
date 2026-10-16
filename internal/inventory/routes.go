@@ -40,6 +40,7 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/inventory/documents/:id/confirm", mod, confirmDoc, h.DocumentConfirmAPI)
 	api.Post("/inventory/documents/:id/void", mod, voidDoc, h.DocumentVoidAPI)
 	api.Get("/inventory/stock-summary", mod, loadRest, viewOrRestaurant, h.StockSummaryAPI)
+	api.Get("/inventory/reserved-summary", mod, loadRest, viewOrRestaurant, h.ReservedSummaryAPI)
 	api.Get("/inventory/stock/:productId", mod, loadRest, viewOrRestaurant, h.StockAPI)
 	api.Get("/inventory/movements", mod, loadRest, viewOrRestaurant, h.MovementsAPI)
 	api.Get("/inventory/transfers", mod, view, h.TransfersListAPI)

@@ -28,6 +28,9 @@ const (
 	DispatchStatusPendiente  = "PENDIENTE_DESPACHO"
 	DispatchStatusDespachado = "DESPACHADO"
 	DispatchStatusEnTransito = "EN_TRANSITO"
+	// DispatchStatusEnAgencia: el paquete llegó a la agencia de destino y espera al cliente
+	// (corre el plazo de recojo del transportista).
+	DispatchStatusEnAgencia = "EN_AGENCIA"
 	DispatchStatusEntregado  = "ENTREGADO"
 	DispatchStatusDevuelto   = "DEVUELTO"
 )

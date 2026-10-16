@@ -151,28 +151,28 @@ func TestUpdateDispatchStatusAPI_FlujoCompletoViaHTTP(t *testing.T) {
 }
 
 // TestUpdateDispatchStatusAPI_StatusArbitrario_422: no se acepta cualquier valor de status — solo
-// EN_TRANSITO/ENTREGADO son destinos válidos desde este endpoint.
+// EN_TRANSITO/EN_AGENCIA/ENTREGADO/DEVUELTO son destinos válidos desde este endpoint.
 func TestUpdateDispatchStatusAPI_StatusArbitrario_422(t *testing.T) {
 	db := setupDispatchHandlerTestDB(t)
 	dispatch := createDispatchedOrderForTransitionTests(t, db)
 	app := newDispatchTransitionTestApp(db, []string{"ecommerce.orders_dispatch"})
 
-	resp := putDispatchStatus(t, app, dispatch.ID, "DEVUELTO")
+	resp := putDispatchStatus(t, app, dispatch.ID, "CANCELADO")
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("un status no soportado por este endpoint debe rechazarse con 422, status=%d", resp.StatusCode)
 	}
 }
 
-// TestUpdateDispatchStatusAPI_SaltarEnTransito_Rechazado: ir directo a ENTREGADO sin pasar por
-// EN_TRANSITO debe rechazarse (400), aunque el usuario tenga todos los permisos.
-func TestUpdateDispatchStatusAPI_SaltarEnTransito_Rechazado(t *testing.T) {
+// TestUpdateDispatchStatusAPI_EntregarDesdeDespachado: EN_TRANSITO ya no es obligatorio (entrega
+// propia, o el negocio no lleva ese paso): se puede entregar directo desde DESPACHADO.
+func TestUpdateDispatchStatusAPI_EntregarDesdeDespachado(t *testing.T) {
 	db := setupDispatchHandlerTestDB(t)
 	dispatch := createDispatchedOrderForTransitionTests(t, db)
 	app := newDispatchTransitionTestApp(db, []string{"ecommerce.manage"})
 
 	resp := putDispatchStatus(t, app, dispatch.ID, "ENTREGADO")
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("saltar EN_TRANSITO debe rechazarse (400), status=%d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("entregar desde DESPACHADO debe aceptarse (200), status=%d", resp.StatusCode)
 	}
 }
 
