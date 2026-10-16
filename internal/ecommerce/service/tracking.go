@@ -214,7 +214,8 @@ func trackMessage(stage string, v *TrackView, d *database.TenantEcommerceDispatc
 				msg += " Te quedan " + strconv.Itoa(*v.PickupDaysLeft) + " días."
 			}
 		}
-		if v.Balance > 0 {
+		// Solo se habla de saldo cuando el cliente ya abonó algo: sin abonos registrados no se sabe qué debe.
+		if v.Paid > 0 && v.Balance > 0 {
 			msg += " Al recoger pagas el saldo de S/ " + strconv.FormatFloat(v.Balance, 'f', 2, 64) + "."
 		}
 		return head, msg
