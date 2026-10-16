@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Despacho de hoy</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="shell" style="width: 1440px; height: 1060px; overflow: hidden; background: #f1f5f8">
+  <aside class="sidebar">
+    <div class="row" style="padding: 4px 8px 12px"><span class="avatar" style="background: var(--ink); color: #fff; border-radius: 12px">M</span><div><b class="disp" style="font-size: 17px">Demo Mistiq</b><div class="note">Local principal</div></div></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/></svg>Hoy</div>
+    <div class="nav on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12l1 13H5zM9 7a3 3 0 016 0"/></svg>Vender</div>
+    <div class="nav-group" style="padding-left: 44px">Mostrador</div>
+    <div class="sub-nav">Cobrar</div>
+    <div class="sub-nav">Emitir factura</div>
+    <div class="sub-nav">Mis ventas</div>
+    <div class="sub-nav">Cobros pendientes</div>
+    <div class="nav-group" style="padding-left: 44px">Pedidos y envíos</div>
+    <div class="sub-nav">Tablero<span class="badge">24</span></div>
+    <div class="sub-nav">Pedidos web<span class="badge hot">5</span></div>
+    <div class="sub-nav on">Despacho de hoy<span class="badge">9</span></div>
+    <div class="sub-nav">En agencia<span class="badge hot">3</span></div>
+    <div class="sub-nav">Retornos<span class="badge">1</span></div>
+    <div class="sub-nav">Transportistas</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8"/></svg>Mercadería</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 8a4 4 0 10-8 0 4 4 0 008 0M4 21a8 8 0 0116 0"/></svg>Clientes</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h2l2 11h10l2-8H7"/></svg>Comprar</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h17a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1zM3 7l3-3h12"/></svg>Dinero</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Informes</div>
+  </aside>
+  <div class="content">
+    <header class="top">
+      <div class="grow"><b class="disp">Pedidos y envíos</b><small>Viernes 16 de octubre · día de despacho</small></div>
+      <span class="aa">A<span style="font-size: 12px">A</span></span>
+      <span class="iconbtn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 004 0"/></svg></span>
+      <span class="avatar">AD</span>
+    </header>
+    <div class="tabs">
+      <span class="tab">Tablero</span><span class="tab">Pedidos web<span class="n">5</span></span><span class="tab on">Despacho de hoy</span><span class="tab">En agencia<span class="n">3</span></span><span class="tab">Retornos</span><span class="tab">Transportistas</span>
+    </div>
+    <div class="page">
+      <div class="row wrap">
+        <div class="grow"><h1 class="h1 disp">Despacho de hoy</h1><div class="sub">Los pedidos empaquetados que salen hoy. Escribe o escanea la guía de la agencia y listo.</div></div>
+        <div class="seg"><span class="on">Shalom · 6</span><span>Olva · 2</span><span>Propio · 1</span></div>
+      </div>
+
+      <div class="callout ac"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6h11v10H2zM13 9h4l3 3v4h-7M6 19a2 2 0 100-4 2 2 0 000 4zM17 19a2 2 0 100-4 2 2 0 000 4z"/></svg><div class="grow"><b>Shalom recoge lunes, miércoles y viernes.</b> Hoy es viernes: todo lo que no despaches ahora sale el lunes. El cliente tiene 15 días para recoger desde que llega a la agencia.</div></div>
+
+      <div class="card" style="padding: 4px 8px; overflow-x: auto">
+        <table class="tbl">
+          <thead><tr><th style="width: 36px"><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span></th><th>Pedido</th><th>Destinatario</th><th>Agencia de destino</th><th>Bultos · peso</th><th>N.º de guía</th><th>Cobrar en destino</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span></td>
+              <td><b class="mono">PW-0150</b><div class="row" style="margin-top: 2px"><span class="pill info">Combo</span></div></td>
+              <td><b>Bodega Don Lucho SAC</b><div class="mut" style="font-size: 13.5px">RUC 20601234567 · 987 654 321</div></td>
+              <td>Piura<div class="mut" style="font-size: 13.5px">Shalom Castilla</div></td>
+              <td>2 bultos · 6.4 kg</td>
+              <td><div class="input sm mono" style="width: 170px; border-color: var(--ac)">SH-48203311</div></td>
+              <td><span class="pill ok">Nada · pagado</span></td>
+              <td class="r"><button class="btn sm">Rótulo</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span></td>
+              <td><b class="mono">PW-0148</b></td>
+              <td><b>Jessica Flores Rivas</b><div class="mut" style="font-size: 13.5px">DNI 45128803 · 954 220 118</div></td>
+              <td>Huancayo<div class="mut" style="font-size: 13.5px">Shalom Real</div></td>
+              <td>4 bultos · 3.2 kg</td>
+              <td><div class="input sm mono" style="width: 170px; border-color: var(--ac)">SH-48203312</div></td>
+              <td><span class="pill ok">Nada · pagado</span></td>
+              <td class="r"><button class="btn sm">Rótulo</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span></td>
+              <td><b class="mono">PW-0147</b></td>
+              <td><b>Ana Paredes Luján</b><div class="mut" style="font-size: 13.5px">DNI 40977212 · 944 118 330</div></td>
+              <td>Trujillo<div class="mut" style="font-size: 13.5px">Shalom Larco</div></td>
+              <td>1 bulto · 1.1 kg</td>
+              <td><div class="input sm mono" style="width: 170px; border-color: var(--ac)">SH-48203313</div></td>
+              <td><span class="pill ok">Nada · pagado</span></td>
+              <td class="r"><button class="btn sm">Rótulo</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span></td>
+              <td><b class="mono">PW-0146</b></td>
+              <td><b>Walter Chambi Huaylla</b><div class="mut" style="font-size: 13.5px">DNI 29330145 · 951 700 442</div></td>
+              <td>Cusco<div class="mut" style="font-size: 13.5px">Shalom Av. El Sol</div></td>
+              <td>1 bulto · 2.0 kg</td>
+              <td><div class="input sm mono" style="width: 170px; border-color: var(--ac)">SH-48203314</div></td>
+              <td><span class="pill warn">Saldo S/ 120 al recoger</span></td>
+              <td class="r"><button class="btn sm">Rótulo</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0142</b></td>
+              <td><b>Fanny Soto Mamani</b><div class="mut" style="font-size: 13.5px">DNI 70211989 · 962 118 007</div></td>
+              <td>Juliaca<div class="mut" style="font-size: 13.5px">Shalom Terminal</div></td>
+              <td>1 bulto · 0.8 kg</td>
+              <td><div class="input sm" style="width: 170px; color: var(--mut)">Escanea o escribe…</div></td>
+              <td><span class="pill ok">Nada · pagado</span></td>
+              <td class="r"><button class="btn sm">Rótulo</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0141</b></td>
+              <td><b>Rocío Mendoza Paz</b><div class="mut" style="font-size: 13.5px">DNI 47890021 · 976 540 019</div></td>
+              <td>Cajamarca<div class="mut" style="font-size: 13.5px">Shalom Centro</div></td>
+              <td>3 bultos · 5.5 kg</td>
+              <td><div class="input sm" style="width: 170px; color: var(--mut)">Escanea o escribe…</div></td>
+              <td><span class="pill ok">Nada · pagado</span></td>
+              <td class="r"><button class="btn sm">Rótulo</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="row wrap" style="gap: 14px; align-items: stretch">
+        <div class="card col grow" style="min-width: 320px">
+          <h3>Resumen de la salida</h3>
+          <div class="row wrap" style="gap: 28px"><div><div class="lbl">Pedidos</div><b class="disp num" style="font-size: 26px">4 de 6</b></div><div><div class="lbl">Bultos</div><b class="disp num" style="font-size: 26px">8</b></div><div><div class="lbl">Peso</div><b class="disp num" style="font-size: 26px">12.7 kg</b></div><div><div class="lbl">Cobrar en destino</div><b class="disp num" style="font-size: 26px">S/ 120</b></div></div>
+          <div class="note">Al despachar: cada pedido pasa a «En camino» con su guía, se emite su venta (el stock reservado sale definitivamente y el saldo queda en Cobros pendientes) y luego puedes enviarle la guía por WhatsApp con un toque.</div>
+        </div>
+        <div class="col" style="width: 360px">
+          <button class="btn pri lg" style="width: 100%"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6h11v10H2zM13 9h4l3 3v4h-7"/></svg>Despachar 4 y emitir ventas</button>
+          <button class="btn lg" style="width: 100%"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9V3h10v6M7 17H4v-6h16v6h-3M7 14h10v7H7z"/></svg>Imprimir 4 rótulos (A4)</button>
+          <button class="btn" style="width: 100%">Imprimir hoja de salida para la agencia</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1060}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

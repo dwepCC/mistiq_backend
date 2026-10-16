@@ -1,0 +1,178 @@
+{
+  "v": 3,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-10-16T15:00:00Z"
+  },
+  "title": "Pedidos y envíos — mockups",
+  "launch": {
+    "view": "canvas"
+  },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 1060,
+      "title": "1 · Tablero de envíos"
+    },
+    "Pedidos.dc.html": {
+      "x": 1520,
+      "y": 0,
+      "w": 1440,
+      "h": 1060,
+      "title": "2 · Lista de pedidos web"
+    },
+    "ImprimirRotulos.dc.html": {
+      "x": 3040,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "2b · Imprimir rótulos (varios por hoja)"
+    },
+    "Despacho.dc.html": {
+      "x": 0,
+      "y": 1180,
+      "w": 1440,
+      "h": 1060,
+      "title": "3 · Despacho de hoy"
+    },
+    "Detalle.dc.html": {
+      "x": 1520,
+      "y": 1180,
+      "w": 1440,
+      "h": 1160,
+      "title": "4 · Detalle del pedido"
+    },
+    "EnAgencia.dc.html": {
+      "x": 0,
+      "y": 2460,
+      "w": 1440,
+      "h": 1000,
+      "title": "5 · En agencia y retornos"
+    },
+    "Transportistas.dc.html": {
+      "x": 1520,
+      "y": 2460,
+      "w": 1440,
+      "h": 1060,
+      "title": "6 · Transportistas"
+    },
+    "MovilTablero.dc.html": {
+      "x": 0,
+      "y": 3640,
+      "w": 390,
+      "h": 1000,
+      "title": "7 · Teléfono — tablero"
+    },
+    "MovilPedidos.dc.html": {
+      "x": 470,
+      "y": 3640,
+      "w": 390,
+      "h": 1000,
+      "title": "7b · Teléfono — selección múltiple"
+    },
+    "MovilDetalle.dc.html": {
+      "x": 940,
+      "y": 3640,
+      "w": 390,
+      "h": 1000,
+      "title": "8 · Teléfono — pedido"
+    },
+    "MovilDespacho.dc.html": {
+      "x": 1410,
+      "y": 3640,
+      "w": 390,
+      "h": 1000,
+      "title": "9 · Teléfono — despachar"
+    },
+    "TiendaEnvio.dc.html": {
+      "x": 1880,
+      "y": 3640,
+      "w": 390,
+      "h": 1000,
+      "title": "10 · Tienda — datos de envío"
+    },
+    "TiendaSeguimiento.dc.html": {
+      "x": 2350,
+      "y": 3640,
+      "w": 390,
+      "h": 1000,
+      "title": "11 · Tienda — seguimiento"
+    },
+    "Rotulo.dc.html": {
+      "x": 0,
+      "y": 4900,
+      "w": 794,
+      "h": 1123,
+      "title": "12 · Rótulo — 1 por hoja A4",
+      "paper": "a4"
+    },
+    "HojaA4.dc.html": {
+      "x": 874,
+      "y": 4900,
+      "w": 794,
+      "h": 1123,
+      "title": "12b · Hoja A4 — 4 rótulos",
+      "paper": "a4"
+    },
+    "Abono.dc.html": {
+      "x": 3040,
+      "y": 1180,
+      "w": 1440,
+      "h": 900,
+      "title": "4b · Registrar abono"
+    },
+    "StockReservado.dc.html": {
+      "x": 3040,
+      "y": 2460,
+      "w": 1440,
+      "h": 900,
+      "title": "5b · Stock reservado y disponible"
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Pedidos.dc.html",
+    "ImprimirRotulos.dc.html",
+    "Despacho.dc.html",
+    "Detalle.dc.html",
+    "Abono.dc.html",
+    "EnAgencia.dc.html",
+    "Transportistas.dc.html",
+    "StockReservado.dc.html",
+    "MovilTablero.dc.html",
+    "MovilPedidos.dc.html",
+    "MovilDetalle.dc.html",
+    "MovilDespacho.dc.html",
+    "TiendaEnvio.dc.html",
+    "TiendaSeguimiento.dc.html",
+    "Rotulo.dc.html",
+    "HojaA4.dc.html"
+  ],
+  "notes": {
+    "t1": {
+      "x": 0,
+      "y": -260,
+      "text": "Ventas → Pedidos y envíos (escritorio)",
+      "kind": "title1",
+      "maxW": 4480
+    },
+    "t2": {
+      "x": 0,
+      "y": 3380,
+      "text": "Teléfono y tienda",
+      "kind": "title1",
+      "maxW": 2740
+    },
+    "t3": {
+      "x": 0,
+      "y": 4640,
+      "text": "Rótulos para imprimir",
+      "kind": "title1",
+      "maxW": 1668
+    }
+  },
+  "designSystems": []
+}

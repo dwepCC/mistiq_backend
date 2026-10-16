@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Tablero de envíos</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="shell" style="width: 1440px; height: 1060px; overflow: hidden; background: #f1f5f8">
+  <aside class="sidebar">
+    <div class="row" style="padding: 4px 8px 12px"><span class="avatar" style="background: var(--ink); color: #fff; border-radius: 12px">M</span><div><b class="disp" style="font-size: 17px">Demo Mistiq</b><div class="note">Local principal</div></div></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/></svg>Hoy</div>
+    <div class="nav on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12l1 13H5zM9 7a3 3 0 016 0"/></svg>Vender</div>
+    <div class="nav-group" style="padding-left: 44px">Mostrador</div>
+    <div class="sub-nav">Cobrar</div>
+    <div class="sub-nav">Emitir factura</div>
+    <div class="sub-nav">Mis ventas</div>
+    <div class="sub-nav">Cobros pendientes</div>
+    <div class="nav-group" style="padding-left: 44px">Pedidos y envíos</div>
+    <div class="sub-nav on">Tablero<span class="badge">24</span></div>
+    <div class="sub-nav">Pedidos web<span class="badge hot">5</span></div>
+    <div class="sub-nav">Despacho de hoy<span class="badge">9</span></div>
+    <div class="sub-nav">En agencia<span class="badge hot">3</span></div>
+    <div class="sub-nav">Retornos<span class="badge">1</span></div>
+    <div class="sub-nav">Transportistas</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8"/></svg>Mercadería</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 8a4 4 0 10-8 0 4 4 0 008 0M4 21a8 8 0 0116 0"/></svg>Clientes</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h2l2 11h10l2-8H7"/></svg>Comprar</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h17a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1zM3 7l3-3h12"/></svg>Dinero</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Informes</div>
+  </aside>
+  <div class="content">
+    <header class="top">
+      <div class="grow"><b class="disp">Pedidos y envíos</b><small>Viernes 16 de octubre · día de despacho</small></div>
+      <span class="aa">A<span style="font-size: 12px">A</span></span>
+      <span class="iconbtn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 004 0"/></svg></span>
+      <span class="avatar">AD</span>
+    </header>
+    <div class="tabs">
+      <span class="tab on">Tablero</span><span class="tab">Pedidos web<span class="n">5</span></span><span class="tab">Despacho de hoy</span><span class="tab">En agencia<span class="n">3</span></span><span class="tab">Retornos</span><span class="tab">Transportistas</span>
+    </div>
+    <div class="page">
+      <div class="row wrap">
+        <div class="grow"><h1 class="h1 disp">¿Qué pasa con mis pedidos?</h1><div class="sub">Cada columna es una etapa. Toca un pedido para ver el detalle o avanzarlo.</div></div>
+        <button class="btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Pedido manual</button>
+        <button class="btn pri lg"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6h11v10H2zM13 9h4l3 3v4h-7M6 19a2 2 0 100-4 2 2 0 000 4zM17 19a2 2 0 100-4 2 2 0 000 4z"/></svg>Ir a despachar hoy (9)</button>
+      </div>
+
+      <div class="callout warn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4M12 17h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg><div class="grow"><b>3 pedidos están por vencer en la agencia.</b> El cliente tiene 15 días desde que llegó; si no lo recoge, regresa a tu almacén.</div><button class="btn sm">Verlos</button></div>
+
+      <div class="kpis">
+        <div class="kpi navy"><span class="lbl" style="color: #b6d3df">Por despachar</span><b class="disp num">9</b><span class="mut">Hoy sale a Shalom y Olva</span></div>
+        <div class="kpi"><span class="lbl">Por preparar</span><b class="disp num">5</b><span class="mut">Faltan armar o empaquetar</span></div>
+        <div class="kpi"><span class="lbl">En camino</span><b class="disp num">7</b><span class="mut">Con guía, rumbo a agencia</span></div>
+        <div class="kpi warn"><span class="lbl">En agencia</span><b class="disp num">3</b><span class="mut">1 vence en 2 días</span></div>
+        <div class="kpi bad"><span class="lbl">Con problema</span><b class="disp num">2</b><span class="mut">Pago por validar · retorno</span></div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; align-items: start">
+        <section class="col" style="background: #e8eef2; border-radius: 16px; padding: 12px; gap: 10px">
+          <div class="row"><b class="grow">Por preparar</b><span class="pill">5</span></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0152</b><span class="pill ok" style="margin-left: auto">Pagado</span></div><div style="margin-top: 6px"><b>Carlos Quispe</b></div><div class="mut" style="font-size: 13.5px">Cusco · Shalom Av. Collasuyo</div><div class="mut" style="font-size: 13.5px; margin-top: 4px">2 impresoras térmicas + 1 cajón</div><div class="row" style="margin-top: 10px"><span class="note">Hace 2 h</span><b class="num" style="margin-left: auto">S/ 640.00</b></div></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0151</b><span class="pill warn" style="margin-left: auto">Abono · saldo 185</span></div><div style="margin-top: 6px"><b>Rosa Huanca</b></div><div class="mut" style="font-size: 13.5px">Arequipa · Olva Courier</div><div class="mut" style="font-size: 13.5px; margin-top: 4px">3 lectores de código de barras</div><div class="row" style="margin-top: 10px"><span class="note">Hace 5 h</span><b class="num" style="margin-left: auto">S/ 285.00</b></div></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0150</b><span class="pill ok" style="margin-left: auto">Pagado</span></div><div style="margin-top: 6px"><b>Bodega Don Lucho SAC</b></div><div class="mut" style="font-size: 13.5px">Piura · Shalom Castilla</div><div class="row" style="margin-top: 6px"><span class="pill info">Combo</span><span class="note">Punto de venta completo</span></div><div class="row" style="margin-top: 10px"><span class="note">Ayer</span><b class="num" style="margin-left: auto">S/ 1,450.00</b></div></div>
+        </section>
+        <section class="col" style="background: #e8eef2; border-radius: 16px; padding: 12px; gap: 10px">
+          <div class="row"><b class="grow">Listo para despachar</b><span class="pill ac">9</span></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0148</b><span class="pill ok" style="margin-left: auto">Pagado</span></div><div style="margin-top: 6px"><b>Jessica Flores</b></div><div class="mut" style="font-size: 13.5px">Huancayo · Shalom Real</div><div class="row" style="margin-top: 8px"><span class="pill ac">4 bultos · 3.2 kg</span></div><div class="row" style="margin-top: 10px"><span class="note">Sale hoy</span><b class="num" style="margin-left: auto">S/ 910.00</b></div></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0147</b><span class="pill ok" style="margin-left: auto">Pagado</span></div><div style="margin-top: 6px"><b>Ana Paredes</b></div><div class="mut" style="font-size: 13.5px">Trujillo · Shalom Larco</div><div class="row" style="margin-top: 8px"><span class="pill ac">1 bulto · 1.1 kg</span></div><div class="row" style="margin-top: 10px"><span class="note">Sale hoy</span><b class="num" style="margin-left: auto">S/ 320.00</b></div></div>
+          <div class="card" style="padding: 12px 14px; text-align: center; color: var(--mut); border-style: dashed">+ 7 pedidos más<br><span class="note">Ábrelos en «Despacho de hoy»</span></div>
+        </section>
+        <section class="col" style="background: #e8eef2; border-radius: 16px; padding: 12px; gap: 10px">
+          <div class="row"><b class="grow">En camino</b><span class="pill info">7</span></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0145</b><span class="pill info" style="margin-left: auto">Shalom</span></div><div style="margin-top: 6px"><b>Mario Torres</b></div><div class="mut" style="font-size: 13.5px">Ayacucho · guía <span class="mono">SH-48201937</span></div><div class="bar" style="margin-top: 10px"><i style="width: 55%"></i></div><div class="row" style="margin-top: 6px"><span class="note">Salió el miércoles · hace 2 días</span></div></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0143</b><span class="pill info" style="margin-left: auto">Olva</span></div><div style="margin-top: 6px"><b>Elena Vargas</b></div><div class="mut" style="font-size: 13.5px">Tacna · guía <span class="mono">OL-7721045</span></div><div class="bar" style="margin-top: 10px"><i style="width: 80%"></i></div><div class="row" style="margin-top: 6px"><span class="note">Salió el jueves · hace 1 día</span></div></div>
+          <div class="card" style="padding: 12px 14px; text-align: center; color: var(--mut); border-style: dashed">+ 5 pedidos más</div>
+        </section>
+        <section class="col" style="background: #fff4d6; border-radius: 16px; padding: 12px; gap: 10px">
+          <div class="row"><b class="grow">En agencia</b><span class="pill warn">3</span></div>
+          <div class="card" style="padding: 12px 14px; border-color: #f4b6b6"><div class="row"><b class="mono">PW-0138</b><span class="pill bad" style="margin-left: auto">Vence en 2 días</span></div><div style="margin-top: 6px"><b>Mario Condori</b></div><div class="mut" style="font-size: 13.5px">Puno · Shalom Juliaca</div><div class="bar bad" style="margin-top: 10px"><i style="width: 87%"></i></div><div class="row" style="margin-top: 8px"><button class="btn sm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 16px; height: 16px"><path d="M4 5h16v11H8l-4 4z"/></svg>Avisar por WhatsApp</button></div></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0140</b><span class="pill warn" style="margin-left: auto">Quedan 8 días</span></div><div style="margin-top: 6px"><b>Pedro Salas</b></div><div class="mut" style="font-size: 13.5px">Tacna · Olva Centro</div><div class="bar warn" style="margin-top: 10px"><i style="width: 47%"></i></div></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0141</b><span class="pill ok" style="margin-left: auto">Quedan 13 días</span></div><div style="margin-top: 6px"><b>Rocío Mendoza</b></div><div class="mut" style="font-size: 13.5px">Cajamarca · Shalom Centro</div><div class="bar" style="margin-top: 10px"><i style="width: 13%"></i></div></div>
+        </section>
+        <section class="col" style="background: #e8eef2; border-radius: 16px; padding: 12px; gap: 10px">
+          <div class="row"><b class="grow">Entregado</b><span class="pill ok">Esta semana 11</span></div>
+          <div class="card" style="padding: 12px 14px"><div class="row"><b class="mono">PW-0136</b><span class="pill ok" style="margin-left: auto">Entregado</span></div><div style="margin-top: 6px"><b>Luis Ramos</b></div><div class="mut" style="font-size: 13.5px">Chiclayo · Shalom Centro</div><div class="note" style="margin-top: 8px">Recogido el jueves · saldo cobrado</div></div>
+          <div class="card" style="padding: 12px 14px; border-color: #f4b6b6; background: #fff5f5"><div class="row"><b class="mono">PW-0133</b><span class="pill bad" style="margin-left: auto">Retorno</span></div><div style="margin-top: 6px"><b>Iris Chávez</b></div><div class="mut" style="font-size: 13.5px">Iquitos · no recogió</div><div class="note" style="margin-top: 8px">Falta reingresar 2 productos al stock</div></div>
+          <div class="card" style="padding: 12px 14px; text-align: center; color: var(--mut); border-style: dashed">Ver entregados</div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1060}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

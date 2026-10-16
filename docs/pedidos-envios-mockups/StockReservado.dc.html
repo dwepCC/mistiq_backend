@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Cuánto me queda — con reservado</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="content" style="width: 1440px; height: 900px; overflow: hidden; background: #f1f5f8">
+  <header class="top"><div class="grow"><b class="disp">Mercadería</b><small>Cuánto me queda</small></div><span class="aa">A<span style="font-size: 12px">A</span></span><span class="avatar">AD</span></header>
+  <div class="page">
+    <div class="row wrap"><div class="grow"><h1 class="h1 disp">Cuánto me queda</h1><div class="sub">Lo que tienes, lo que ya está comprometido en pedidos web y lo que puedes vender ahora.</div></div><div class="input" style="min-width: 280px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><span class="mut">Buscar producto</span></div></div>
+    <div class="kpis">
+      <div class="kpi"><span class="lbl">Productos</span><b class="disp num">128</b></div>
+      <div class="kpi warn"><span class="lbl">Con stock reservado</span><b class="disp num">14</b><span class="mut">En 9 pedidos web</span></div>
+      <div class="kpi bad"><span class="lbl">Sin disponible</span><b class="disp num">3</b><span class="mut">Todo está reservado</span></div>
+    </div>
+    <div class="card" style="padding: 4px 8px; overflow-x: auto">
+      <table class="tbl">
+        <thead><tr><th>Producto</th><th class="r">En almacén</th><th class="r">Reservado</th><th class="r">Disponible</th><th>Reservado por</th><th></th></tr></thead>
+        <tbody>
+          <tr><td><b>Impresora térmica 80 mm USB</b><div class="note">IMP-80U</div></td><td class="r num">6</td><td class="r num" style="color: var(--warn)"><b>3</b></td><td class="r num"><b>3</b></td><td><span class="mono">PW-0152</span> · <span class="mono">PW-0146</span></td><td><span class="pill ok">Alcanza</span></td></tr>
+          <tr><td><b>Lector de código de barras láser</b><div class="note">LEC-L2</div></td><td class="r num">5</td><td class="r num" style="color: var(--warn)"><b>5</b></td><td class="r num" style="color: var(--bad)"><b>0</b></td><td><span class="mono">PW-0151</span> · <span class="mono">PW-0146</span></td><td><span class="pill bad">Todo reservado</span></td></tr>
+          <tr><td><b>Cajón monedero 4 billetes</b><div class="note">CAJ-04</div></td><td class="r num">9</td><td class="r num" style="color: var(--warn)"><b>2</b></td><td class="r num"><b>7</b></td><td><span class="mono">PW-0152</span> · <span class="mono">PW-0146</span></td><td><span class="pill ok">Alcanza</span></td></tr>
+          <tr><td><b>Rollos térmicos 80 mm (pack 10)</b><div class="note">ROL-80</div></td><td class="r num">40</td><td class="r num">0</td><td class="r num"><b>40</b></td><td class="mut">—</td><td><span class="pill ok">Alcanza</span></td></tr>
+          <tr><td><b>Balanza electrónica 30 kg</b><div class="note">BAL-30</div></td><td class="r num">2</td><td class="r num" style="color: var(--warn)"><b>1</b></td><td class="r num"><b>1</b></td><td><span class="mono">PW-0147</span></td><td><span class="pill warn">Queda poco</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout ac"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4M12 17h.01"/></svg><div class="grow">Un pedido web <b>reserva</b> su stock al confirmarse. El mostrador, las transferencias entre locales y las salidas manuales solo pueden usar el <b>disponible</b>. Al emitir la venta, lo reservado sale definitivamente; si se cancela el pedido, se libera.</div></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Lista de pedidos web</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="shell" style="width: 1440px; height: 1060px; overflow: hidden; background: #f1f5f8">
+  <aside class="sidebar">
+    <div class="row" style="padding: 4px 8px 12px"><span class="avatar" style="background: var(--ink); color: #fff; border-radius: 12px">M</span><div><b class="disp" style="font-size: 17px">Demo Mistiq</b><div class="note">Local principal</div></div></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/></svg>Hoy</div>
+    <div class="nav on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12l1 13H5zM9 7a3 3 0 016 0"/></svg>Vender</div>
+    <div class="nav-group" style="padding-left: 44px">Mostrador</div>
+    <div class="sub-nav">Cobrar</div>
+    <div class="sub-nav">Emitir factura</div>
+    <div class="sub-nav">Mis ventas</div>
+    <div class="sub-nav">Cobros pendientes</div>
+    <div class="nav-group" style="padding-left: 44px">Pedidos y envíos</div>
+    <div class="sub-nav">Tablero<span class="badge">24</span></div>
+    <div class="sub-nav on">Pedidos web<span class="badge hot">5</span></div>
+    <div class="sub-nav">Despacho de hoy<span class="badge">9</span></div>
+    <div class="sub-nav">En agencia<span class="badge hot">3</span></div>
+    <div class="sub-nav">Retornos<span class="badge">1</span></div>
+    <div class="sub-nav">Transportistas</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8"/></svg>Mercadería</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 8a4 4 0 10-8 0 4 4 0 008 0M4 21a8 8 0 0116 0"/></svg>Clientes</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h2l2 11h10l2-8H7"/></svg>Comprar</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h17a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1zM3 7l3-3h12"/></svg>Dinero</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Informes</div>
+  </aside>
+  <div class="content">
+    <header class="top">
+      <div class="grow"><b class="disp">Pedidos y envíos</b><small>Viernes 16 de octubre · día de despacho</small></div>
+      <span class="aa">A<span style="font-size: 12px">A</span></span>
+      <span class="iconbtn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 004 0"/></svg></span>
+      <span class="avatar">AD</span>
+    </header>
+    <div class="tabs">
+      <span class="tab">Tablero</span><span class="tab on">Pedidos web<span class="n">5</span></span><span class="tab">Despacho de hoy</span><span class="tab">En agencia<span class="n">3</span></span><span class="tab">Retornos</span><span class="tab">Transportistas</span>
+    </div>
+    <div class="page">
+      <div class="row wrap">
+        <div class="grow"><h1 class="h1 disp">Pedidos web</h1><div class="sub">Todo lo que tus clientes piden en la tienda, con su pago y su envío en una sola fila.</div></div>
+        <button class="btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M4 20h16"/></svg>Exportar a Excel</button>
+        <button class="btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V9M7 13l5-5 5 5M4 4h16"/></svg>Importar pedidos</button>
+        <button class="btn pri"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Pedido manual</button>
+      </div>
+
+      <div class="card col" style="gap: 12px">
+        <div class="row wrap">
+          <div class="input grow" style="min-width: 280px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><span class="mut">Buscar por cliente, DNI/RUC, N.º de pedido o guía</span></div>
+          <div class="input" style="min-width: 190px">Todas las agencias<svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="margin-left: auto"><path d="M6 9l6 6 6-6"/></svg></div>
+          <div class="input" style="min-width: 190px">Todos los destinos<svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="margin-left: auto"><path d="M6 9l6 6 6-6"/></svg></div>
+          <div class="input" style="min-width: 170px">Últimos 30 días<svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="margin-left: auto"><path d="M6 9l6 6 6-6"/></svg></div>
+        </div>
+        <div class="row wrap" style="gap: 8px">
+          <span class="tab on" style="min-height: 36px">Todos 48</span>
+          <span class="tab" style="min-height: 36px">Por confirmar <span class="n">5</span></span>
+          <span class="tab" style="min-height: 36px">Por preparar 5</span>
+          <span class="tab" style="min-height: 36px">Por despachar 9</span>
+          <span class="tab" style="min-height: 36px">En camino 7</span>
+          <span class="tab" style="min-height: 36px">En agencia <span class="n">3</span></span>
+          <span class="tab" style="min-height: 36px">Entregados 21</span>
+          <span class="tab" style="min-height: 36px">Con saldo 6</span>
+          <span class="tab" style="min-height: 36px">Retornos 1</span>
+        </div>
+      </div>
+
+      <div class="card" style="padding: 4px 8px; overflow-x: auto">
+        <table class="tbl">
+          <thead><tr><th style="width: 36px"><span class="chk"></span></th><th>Pedido</th><th>Cliente y destino</th><th>Agencia · guía</th><th>Avance</th><th>Pago</th><th class="r">Total</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0152</b><div class="note">Hoy 09:12</div></td>
+              <td><b>Carlos Quispe Mamani</b><div class="mut" style="font-size: 13.5px">Cusco · Wanchaq · Av. Collasuyo</div></td>
+              <td>Shalom<div class="note">Sin guía todavía</div></td>
+              <td><div class="steps"><i class="cur"></i><u></u><i></i><u></u><i></i><u></u><i></i></div><div class="note" style="margin-top: 4px">Por preparar</div></td>
+              <td><span class="pill ok">Pagado</span></td>
+              <td class="r num"><b>S/ 640.00</b></td>
+              <td class="r"><button class="btn sm">Preparar</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0151</b><div class="note">Hoy 06:40</div></td>
+              <td><b>Rosa Huanca Ccori</b><div class="mut" style="font-size: 13.5px">Arequipa · Cercado · Olva Courier</div></td>
+              <td>Olva<div class="note">Sin guía todavía</div></td>
+              <td><div class="steps"><i class="d"></i><u class="d"></u><i class="cur"></i><u></u><i></i><u></u><i></i></div><div class="note" style="margin-top: 4px">Armando pedido</div></td>
+              <td><span class="pill warn">Abono 100 · saldo 185</span></td>
+              <td class="r num"><b>S/ 285.00</b></td>
+              <td class="r"><button class="btn sm">Continuar</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0150</b><div class="note">Ayer 17:55</div></td>
+              <td><b>Bodega Don Lucho SAC</b> <span class="pill info">Combo</span><div class="mut" style="font-size: 13.5px">Piura · Castilla · Shalom</div></td>
+              <td>Shalom<div class="note">Sin guía todavía</div></td>
+              <td><div class="steps"><i class="d"></i><u class="d"></u><i class="d"></i><u class="d"></u><i class="cur"></i><u></u><i></i></div><div class="note" style="margin-top: 4px">Listo para despachar</div></td>
+              <td><span class="pill ok">Pagado</span></td>
+              <td class="r num"><b>S/ 1,450.00</b></td>
+              <td class="r"><button class="btn sm pri">Despachar</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0145</b><div class="note">Mié 11:20</div></td>
+              <td><b>Mario Torres Quispe</b><div class="mut" style="font-size: 13.5px">Ayacucho · Huamanga · Shalom</div></td>
+              <td>Shalom<div class="mono" style="color: var(--acd)">SH-48201937</div></td>
+              <td><div class="steps"><i class="d"></i><u class="d"></u><i class="d"></i><u class="d"></u><i class="d"></i><u class="d"></u><i class="cur"></i></div><div class="note" style="margin-top: 4px">En camino · salió el miércoles</div></td>
+              <td><span class="pill ok">Pagado</span></td>
+              <td class="r num"><b>S/ 520.00</b></td>
+              <td class="r"><button class="btn sm">Ver guía</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0138</b><div class="note">Hace 14 días</div></td>
+              <td><b>Mario Condori Apaza</b><div class="mut" style="font-size: 13.5px">Puno · Juliaca · Shalom</div></td>
+              <td>Shalom<div class="mono" style="color: var(--acd)">SH-47998120</div></td>
+              <td><span class="pill bad">En agencia · vence en 2 días</span></td>
+              <td><span class="pill warn">Saldo 190 por cobrar</span></td>
+              <td class="r num"><b>S/ 380.00</b></td>
+              <td class="r"><button class="btn sm">Avisar</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0144</b><div class="note">Mié 08:05</div></td>
+              <td><b>Pedro Salas Ticona</b><div class="mut" style="font-size: 13.5px">Tacna · Cercado · Olva</div></td>
+              <td>Olva<div class="note">Sin guía todavía</div></td>
+              <td><span class="pill bad">Pago por validar</span></td>
+              <td><span class="pill bad">Voucher observado</span></td>
+              <td class="r num"><b>S/ 215.00</b></td>
+              <td class="r"><button class="btn sm">Revisar pago</button></td>
+            </tr>
+            <tr>
+              <td><span class="chk"></span></td>
+              <td><b class="mono">PW-0136</b><div class="note">Hace 9 días</div></td>
+              <td><b>Luis Ramos Díaz</b><div class="mut" style="font-size: 13.5px">Chiclayo · Shalom Centro</div></td>
+              <td>Shalom<div class="mono" style="color: var(--acd)">SH-47810663</div></td>
+              <td><span class="pill ok">Entregado · jueves</span></td>
+              <td><span class="pill ok">Pagado</span></td>
+              <td class="r num"><b>S/ 760.00</b></td>
+              <td class="r"><button class="btn sm ghost">Ver</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="row wrap">
+        <span class="mut">Mostrando 1–7 de 48 pedidos</span>
+        <div class="row" style="margin-left: auto"><button class="btn sm">Anterior</button><button class="btn sm pri">1</button><button class="btn sm">2</button><button class="btn sm">3</button><button class="btn sm">Siguiente</button></div>
+      </div>
+
+      <div class="callout ac"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg><div class="grow"><b>Con 2 pedidos marcados</b> puedes: imprimir rótulos · pasarlos a «Despacho de hoy» · exportarlos a Excel.</div><button class="btn sm">Imprimir rótulos</button><button class="btn sm pri">Pasar a despacho</button></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1060}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

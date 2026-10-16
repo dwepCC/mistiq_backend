@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Registrar abono</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div style="width: 1440px; height: 900px; overflow: hidden; background: #0b2736; display: flex; align-items: center; justify-content: center">
+  <div style="width: 960px; background: #fff; border-radius: 20px; overflow: hidden">
+    <div class="row" style="padding: 18px 24px; border-bottom: 1px solid var(--ln)">
+      <div class="grow"><h2 class="disp" style="margin: 0; font-size: 24px">Registrar abono</h2><div class="mut">Pedido PW-0151 · Rosa Huanca · Arequipa</div></div>
+      <span class="iconbtn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+    </div>
+    <div style="display: grid; grid-template-columns: minmax(0, 1fr) 340px">
+      <div class="col" style="padding: 22px 24px; gap: 16px">
+        <div><div class="lbl">¿Cuánto abona?</div><div class="input" style="margin-top: 6px; min-height: 56px"><span class="mut">S/</span><b class="disp num" style="font-size: 26px">100.00</b></div><div class="row wrap" style="margin-top: 8px; gap: 8px"><span class="tab" style="min-height: 36px">Mitad · 142.50</span><span class="tab" style="min-height: 36px">Todo · 285.00</span></div></div>
+        <div><div class="lbl">¿Cómo pagó?</div><div class="row wrap" style="margin-top: 6px; gap: 8px"><span class="tab on">Yape</span><span class="tab">Plin</span><span class="tab">Transferencia</span><span class="tab">Efectivo</span><span class="tab">Depósito</span></div></div>
+        <div class="row wrap"><div class="grow"><div class="lbl">N.º de operación</div><div class="input" style="margin-top: 6px">0482913</div></div><div class="grow"><div class="lbl">Fecha del pago</div><div class="input" style="margin-top: 6px">Hoy, 16/10/2026</div></div></div>
+        <div><div class="lbl">Captura o voucher (opcional)</div><div class="card" style="margin-top: 6px; border-style: dashed; text-align: center; color: var(--mut); padding: 18px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5M7 9l5-5 5 5M4 20h16"/></svg><div>Toca para subir o tomar foto</div></div></div>
+      </div>
+      <div class="col" style="padding: 22px 24px; gap: 12px; background: #f6f9fb; border-left: 1px solid var(--ln)">
+        <div class="lbl">Cómo queda el pedido</div>
+        <div class="row"><span class="grow">Total</span><b class="num">S/ 285.00</b></div>
+        <div class="row"><span class="grow">Ya abonado</span><b class="num">S/ 0.00</b></div>
+        <div class="row"><span class="grow">Este abono</span><b class="num" style="color: var(--ok)">− S/ 100.00</b></div>
+        <hr class="sep">
+        <div class="row"><b class="grow" style="font-size: 17px">Saldo</b><b class="disp num" style="font-size: 28px; color: var(--warn)">S/ 185.00</b></div>
+        <div class="callout ac" style="padding: 10px 14px; font-size: 14px">El saldo se cobra cuando el cliente recoja el paquete: queda en <b>Cobros pendientes</b>.</div>
+        <div class="callout warn" style="padding: 10px 14px; font-size: 14px">Un supervisor debe validar este abono antes de preparar el pedido.</div>
+      </div>
+    </div>
+    <div class="row" style="padding: 16px 24px; border-top: 1px solid var(--ln); justify-content: flex-end">
+      <button class="btn lg">Cancelar</button><button class="btn pri lg">Guardar abono</button>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

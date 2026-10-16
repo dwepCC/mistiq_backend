@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Tienda — seguimiento</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div style="width: 390px; height: 1000px; overflow: hidden; background: #f1f5f8; display: flex; flex-direction: column">
+  <header class="top" style="padding: 0 16px; flex: none"><div class="grow"><b class="disp">Demo Mistiq</b><small>Seguimiento de tu pedido</small></div></header>
+  <div style="flex: 1; overflow: hidden; padding: 16px; display: flex; flex-direction: column; gap: 14px">
+    <div class="card" style="background: var(--ink); border-color: var(--ink); color: #fff; padding: 18px">
+      <div class="row"><span class="pill" style="background: #ffffff22; color: #fff">Pedido PW-0146</span></div>
+      <div class="disp" style="font-size: 26px; margin-top: 10px">Ya llegó a la agencia de Cusco</div>
+      <div style="margin-top: 6px; color: #cfe4ec">Puedes recogerlo con tu DNI. Te quedan <b style="color: #fff">12 días</b>.</div>
+    </div>
+
+    <div class="card col" style="gap: 8px; padding: 14px 16px">
+      <div class="lbl">Dónde recogerlo</div>
+      <div class="row"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ac)"><path d="M12 21s-7-6-7-11a7 7 0 0114 0c0 5-7 11-7 11zM12 12a2 2 0 100-4 2 2 0 000 4z"/></svg><div><b>Shalom · Av. El Sol 745</b><div class="mut" style="font-size: 13.5px">Cusco · Lun a sáb 8:00–19:00</div></div></div>
+      <div class="row"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ac)"><path d="M4 6h16v12H4zM8 10h4M8 14h8"/></svg><div><b>Guía <span class="mono">SH-48203314</span></b><div class="mut" style="font-size: 13.5px">Dila en ventanilla junto con tu DNI</div></div></div>
+      <div class="callout warn" style="padding: 8px 12px; font-size: 14px">Al recoger pagas el saldo: <b>S/ 120.00</b></div>
+    </div>
+
+    <div class="card col" style="gap: 12px; padding: 14px 16px">
+      <div class="lbl">Recorrido</div>
+      <div class="row" style="align-items: flex-start"><i style="width: 12px; height: 12px; border-radius: 50%; background: var(--ac); margin-top: 5px; flex: none; box-shadow: 0 0 0 4px var(--acs)"></i><div><b>En la agencia de Cusco</b><div class="note">Hoy · te avisamos por WhatsApp</div></div></div>
+      <div class="row" style="align-items: flex-start"><i style="width: 12px; height: 12px; border-radius: 50%; background: var(--ac); margin-top: 5px; flex: none"></i><div><b>En camino con Shalom</b><div class="note">Mié 16:30 · salió de Lima</div></div></div>
+      <div class="row" style="align-items: flex-start"><i style="width: 12px; height: 12px; border-radius: 50%; background: var(--ac); margin-top: 5px; flex: none"></i><div><b>Empaquetado y listo</b><div class="note">Mié 15:20</div></div></div>
+      <div class="row" style="align-items: flex-start"><i style="width: 12px; height: 12px; border-radius: 50%; background: var(--ac); margin-top: 5px; flex: none"></i><div><b>Pago confirmado</b><div class="note">Mar 10:05</div></div></div>
+      <div class="row" style="align-items: flex-start"><i style="width: 12px; height: 12px; border-radius: 50%; background: var(--ac); margin-top: 5px; flex: none"></i><div><b>Pedido recibido</b><div class="note">Mar 09:40</div></div></div>
+    </div>
+
+    <button class="btn lg" style="width: 100%"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z"/></svg>Escribir a la tienda</button>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

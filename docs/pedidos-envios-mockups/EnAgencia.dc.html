@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>En agencia y retornos</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="shell" style="width: 1440px; height: 1000px; overflow: hidden; background: #f1f5f8">
+  <aside class="sidebar">
+    <div class="row" style="padding: 4px 8px 12px"><span class="avatar" style="background: var(--ink); color: #fff; border-radius: 12px">M</span><div><b class="disp" style="font-size: 17px">Demo Mistiq</b><div class="note">Local principal</div></div></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/></svg>Hoy</div>
+    <div class="nav on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12l1 13H5zM9 7a3 3 0 016 0"/></svg>Vender</div>
+    <div class="nav-group" style="padding-left: 44px">Mostrador</div>
+    <div class="sub-nav">Cobrar</div>
+    <div class="sub-nav">Emitir factura</div>
+    <div class="sub-nav">Mis ventas</div>
+    <div class="sub-nav">Cobros pendientes</div>
+    <div class="nav-group" style="padding-left: 44px">Pedidos y envíos</div>
+    <div class="sub-nav">Tablero<span class="badge">24</span></div>
+    <div class="sub-nav">Pedidos web<span class="badge hot">5</span></div>
+    <div class="sub-nav">Despacho de hoy<span class="badge">9</span></div>
+    <div class="sub-nav on">En agencia<span class="badge hot">3</span></div>
+    <div class="sub-nav">Retornos<span class="badge">1</span></div>
+    <div class="sub-nav">Transportistas</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8"/></svg>Mercadería</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 8a4 4 0 10-8 0 4 4 0 008 0M4 21a8 8 0 0116 0"/></svg>Clientes</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h2l2 11h10l2-8H7"/></svg>Comprar</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h17a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1zM3 7l3-3h12"/></svg>Dinero</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Informes</div>
+  </aside>
+  <div class="content">
+    <header class="top">
+      <div class="grow"><b class="disp">Pedidos y envíos</b><small>Viernes 16 de octubre · día de despacho</small></div>
+      <span class="aa">A<span style="font-size: 12px">A</span></span>
+      <span class="iconbtn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 004 0"/></svg></span>
+      <span class="avatar">AD</span>
+    </header>
+    <div class="tabs">
+      <span class="tab">Tablero</span><span class="tab">Pedidos web<span class="n">5</span></span><span class="tab">Despacho de hoy</span><span class="tab on">En agencia<span class="n">3</span></span><span class="tab">Retornos</span><span class="tab">Transportistas</span>
+    </div>
+    <div class="page">
+      <div class="row wrap">
+        <div class="grow"><h1 class="h1 disp">Esperando al cliente en la agencia</h1><div class="sub">El reloj corre desde que el paquete llegó. Avisa a tiempo y evita devoluciones.</div></div>
+        <button class="btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z"/></svg>Avisar a todos los que vencen pronto</button>
+      </div>
+
+      <div class="card" style="padding: 4px 8px; overflow-x: auto">
+        <table class="tbl">
+          <thead><tr><th>Pedido</th><th>Cliente</th><th>Agencia · guía</th><th>Llegó</th><th style="width: 240px">Plazo de recojo (15 días)</th><th>Saldo</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><b class="mono">PW-0138</b></td>
+              <td><b>Mario Condori Apaza</b><div class="mut" style="font-size: 13.5px">951 220 003 · Puno</div></td>
+              <td>Shalom Juliaca<div class="mono" style="color: var(--acd)">SH-47998120</div></td>
+              <td>Hace 13 días</td>
+              <td><div class="row"><span class="pill bad">Quedan 2 días</span></div><div class="bar bad" style="margin-top: 8px"><i style="width: 87%"></i></div></td>
+              <td><span class="pill warn">S/ 190</span></td>
+              <td class="r"><div class="row" style="justify-content: flex-end"><button class="btn sm">Avisar</button><button class="btn sm pri">Entregado</button></div></td>
+            </tr>
+            <tr>
+              <td><b class="mono">PW-0140</b></td>
+              <td><b>Pedro Salas Ticona</b><div class="mut" style="font-size: 13.5px">962 118 774 · Tacna</div></td>
+              <td>Olva Centro<div class="mono" style="color: var(--acd)">OL-7719982</div></td>
+              <td>Hace 7 días</td>
+              <td><div class="row"><span class="pill warn">Quedan 8 días</span></div><div class="bar warn" style="margin-top: 8px"><i style="width: 47%"></i></div></td>
+              <td><span class="pill ok">Pagado</span></td>
+              <td class="r"><div class="row" style="justify-content: flex-end"><button class="btn sm">Avisar</button><button class="btn sm pri">Entregado</button></div></td>
+            </tr>
+            <tr>
+              <td><b class="mono">PW-0141</b></td>
+              <td><b>Rocío Mendoza Paz</b><div class="mut" style="font-size: 13.5px">976 540 019 · Cajamarca</div></td>
+              <td>Shalom Centro<div class="mono" style="color: var(--acd)">SH-48010447</div></td>
+              <td>Hace 2 días</td>
+              <td><div class="row"><span class="pill ok">Quedan 13 días</span></div><div class="bar" style="margin-top: 8px"><i style="width: 13%"></i></div></td>
+              <td><span class="pill ok">Pagado</span></td>
+              <td class="r"><div class="row" style="justify-content: flex-end"><button class="btn sm">Avisar</button><button class="btn sm pri">Entregado</button></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="row wrap" style="margin-top: 6px">
+        <div class="grow"><h2 class="disp" style="margin: 0; font-size: 22px">Retornos</h2><div class="sub">Paquetes que regresaron a tu almacén. Reingresa los productos y decide qué hacer con el pago.</div></div>
+        <div class="seg"><span class="on">Por reingresar · 1</span><span>Reingresados · 4</span></div>
+      </div>
+
+      <div class="card col" style="gap: 14px; border-color: #f4b6b6">
+        <div class="row wrap">
+          <div><b class="mono">PW-0133</b> <span class="pill bad">Retorno · no recogió</span></div>
+          <div class="mut">Iris Chávez · Iquitos · Shalom Centro · guía <span class="mono">SH-47601288</span></div>
+          <span class="grow"></span><span class="note">Llegó a tu almacén el miércoles</span>
+        </div>
+        <table class="tbl">
+          <thead><tr><th>Producto</th><th class="r">Enviado</th><th class="r">Reingresa</th><th>Estado al volver</th></tr></thead>
+          <tbody>
+            <tr><td><b>Impresora de etiquetas 4"</b></td><td class="r num">1</td><td class="r"><div class="input sm" style="width: 70px; margin-left: auto; justify-content: center">1</div></td><td><span class="pill ok">Bueno · vuelve al stock</span></td></tr>
+            <tr><td><b>Rollos de etiquetas (pack 5)</b></td><td class="r num">2</td><td class="r"><div class="input sm" style="width: 70px; margin-left: auto; justify-content: center">2</div></td><td><span class="pill ok">Bueno · vuelve al stock</span></td></tr>
+          </tbody>
+        </table>
+        <div class="row wrap">
+          <span class="note" style="flex-basis: 100%">Este pedido ya se convirtió en venta (nota de venta N001-00214): al anularla, el stock vuelve solo. Si no se hubiera convertido, no hay nada que reingresar.</span><span class="lbl">Con el dinero</span>
+          <div class="seg"><span class="on">Devolver al cliente</span><span>Quedar a favor</span><span>Reenviar</span></div>
+          <span class="grow"></span>
+          <button class="btn">Anular pedido</button><button class="btn pri">Anular venta y reponer stock</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

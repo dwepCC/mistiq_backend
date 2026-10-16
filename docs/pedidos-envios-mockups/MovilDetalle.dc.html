@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Teléfono — pedido</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div style="width: 390px; height: 1000px; overflow: hidden; background: #f1f5f8; display: flex; flex-direction: column">
+  <header class="top" style="padding: 0 12px; flex: none"><span class="iconbtn" style="border: 0"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></span><div class="grow"><b class="disp">PW-0146</b><small>Walter Chambi · Cusco</small></div><span class="pill warn">Saldo 120</span></header>
+  <div style="flex: 1; overflow: hidden; padding: 16px; display: flex; flex-direction: column; gap: 14px">
+    <div class="card" style="padding: 14px 16px">
+      <div class="row"><b class="disp" style="font-size: 18px">Listo para despachar</b></div>
+      <div class="steps" style="margin-top: 12px"><i class="d"></i><u class="d" style="flex: 1"></u><i class="d"></i><u class="d" style="flex: 1"></u><i class="d"></i><u class="d" style="flex: 1"></u><i class="cur"></i><u style="flex: 1"></u><i></i><u style="flex: 1"></u><i></i></div>
+      <div class="row" style="margin-top: 8px; justify-content: space-between"><span class="note">Pedido</span><span class="note">Pago</span><span class="note">Listo</span><span class="note" style="color: var(--ac); font-weight: 800">Sale hoy</span><span class="note">Agencia</span><span class="note">Entrega</span></div>
+    </div>
+
+    <div class="card col" style="gap: 10px; padding: 14px 16px">
+      <div class="lbl">Envío</div>
+      <div class="row"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ac)"><path d="M12 21s-7-6-7-11a7 7 0 0114 0c0 5-7 11-7 11zM12 12a2 2 0 100-4 2 2 0 000 4z"/></svg><div><b>Shalom · Av. El Sol 745</b><div class="mut" style="font-size: 13.5px">Cusco · Wanchaq</div></div></div>
+      <div class="row"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ac)"><path d="M16 8a4 4 0 10-8 0 4 4 0 008 0M4 21a8 8 0 0116 0"/></svg><div><b>Walter Chambi Huaylla</b><div class="mut" style="font-size: 13.5px">DNI 29330145 · 951 700 442</div></div></div>
+      <div class="row"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ac)"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/></svg><div><b>1 bulto · 2.0 kg</b><div class="mut" style="font-size: 13.5px">7 productos revisados</div></div></div>
+    </div>
+
+    <div class="card col" style="gap: 8px; padding: 14px 16px">
+      <div class="lbl">Pagos</div>
+      <div class="row"><span class="grow">Total</span><b class="num">S/ 681.00</b></div>
+      <div class="row"><span class="grow">Abonos (2)</span><b class="num" style="color: var(--ok)">− S/ 561.00</b></div>
+      <hr class="sep">
+      <div class="row"><b class="grow">Saldo</b><b class="disp num" style="font-size: 22px; color: var(--warn)">S/ 120.00</b></div>
+      <div class="callout ok" style="padding: 8px 12px; font-size: 14px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg>Pago validado por Carla</div>
+    </div>
+
+    <div class="card col" style="gap: 8px; padding: 14px 16px">
+      <div class="lbl">N.º de guía de Shalom</div>
+      <div class="row"><div class="input grow" style="border-color: var(--ac)"><span class="mono" style="font-size: 15px">SH-48203314</span></div><span class="iconbtn" style="border-radius: 13px; width: 48px; height: 44px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3M4 12h16"/></svg></span></div>
+      <div class="note">Escribe la guía o escanea el código con la cámara.</div>
+    </div>
+  </div>
+  <div style="flex: none; background: #fff; border-top: 1px solid var(--ln); padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 8px">
+    <button class="btn pri lg" style="width: 100%; min-height: 56px">Despachar y emitir venta</button>
+    <div class="row"><button class="btn grow">Rótulo</button><button class="btn grow">Cobrar saldo</button><button class="btn grow">WhatsApp</button></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

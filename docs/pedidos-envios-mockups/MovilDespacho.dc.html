@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Teléfono — despachar</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div style="width: 390px; height: 1000px; overflow: hidden; background: #f1f5f8; display: flex; flex-direction: column">
+  <header class="top" style="padding: 0 12px; flex: none"><span class="iconbtn" style="border: 0"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></span><div class="grow"><b class="disp">Despacho de hoy</b><small>Shalom · viernes</small></div><span class="pill ac">4 de 6</span></header>
+  <div style="flex: 1; overflow: hidden; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+    <div class="bar" style="height: 10px"><i style="width: 66%"></i></div>
+    <div class="note" style="margin-top: -4px">4 con guía · faltan 2. Escanea el código de la guía y se asigna solo al pedido.</div>
+
+    <div class="card" style="padding: 12px 14px; border-color: var(--ac); background: var(--acs)">
+      <div class="row"><b class="mono">PW-0142</b><span class="pill warn" style="margin-left: auto">Falta guía</span></div>
+      <div style="margin-top: 4px"><b>Fanny Soto Mamani</b></div>
+      <div class="mut" style="font-size: 13.5px">Juliaca · Shalom Terminal · 1 bulto</div>
+      <div class="row" style="margin-top: 10px"><button class="btn pri grow" style="min-height: 52px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3M4 12h16"/></svg>Escanear guía</button><button class="btn" style="min-height: 52px">Escribir</button></div>
+    </div>
+    <div class="card" style="padding: 12px 14px">
+      <div class="row"><b class="mono">PW-0141</b><span class="pill warn" style="margin-left: auto">Falta guía</span></div>
+      <div style="margin-top: 4px"><b>Rocío Mendoza Paz</b></div>
+      <div class="mut" style="font-size: 13.5px">Cajamarca · Shalom Centro · 3 bultos</div>
+    </div>
+    <div class="card" style="padding: 12px 14px">
+      <div class="row"><b class="mono">PW-0150</b><span class="pill ok" style="margin-left: auto">SH-48203311</span></div>
+      <div style="margin-top: 4px"><b>Bodega Don Lucho SAC</b></div>
+      <div class="mut" style="font-size: 13.5px">Piura · Shalom Castilla · 2 bultos</div>
+    </div>
+    <div class="card" style="padding: 12px 14px">
+      <div class="row"><b class="mono">PW-0148</b><span class="pill ok" style="margin-left: auto">SH-48203312</span></div>
+      <div style="margin-top: 4px"><b>Jessica Flores Rivas</b></div>
+      <div class="mut" style="font-size: 13.5px">Huancayo · Shalom Real · 4 bultos</div>
+    </div>
+    <div class="card" style="padding: 12px 14px">
+      <div class="row"><b class="mono">PW-0147</b><span class="pill ok" style="margin-left: auto">SH-48203313</span></div>
+      <div style="margin-top: 4px"><b>Ana Paredes Luján</b></div>
+      <div class="mut" style="font-size: 13.5px">Trujillo · Shalom Larco · 1 bulto</div>
+    </div>
+  </div>
+  <div style="flex: none; background: #fff; border-top: 1px solid var(--ln); padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 8px">
+    <button class="btn pri lg" style="width: 100%; min-height: 56px">Despachar los 4 y emitir ventas</button>
+    <button class="btn" style="width: 100%">Imprimir rótulos</button>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

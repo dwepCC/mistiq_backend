@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Transportistas y destinos</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./mq.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="shell" style="width: 1440px; height: 1060px; overflow: hidden; background: #f1f5f8">
+  <aside class="sidebar">
+    <div class="row" style="padding: 4px 8px 12px"><span class="avatar" style="background: var(--ink); color: #fff; border-radius: 12px">M</span><div><b class="disp" style="font-size: 17px">Demo Mistiq</b><div class="note">Local principal</div></div></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/></svg>Hoy</div>
+    <div class="nav on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12l1 13H5zM9 7a3 3 0 016 0"/></svg>Vender</div>
+    <div class="nav-group" style="padding-left: 44px">Mostrador</div>
+    <div class="sub-nav">Cobrar</div>
+    <div class="sub-nav">Emitir factura</div>
+    <div class="sub-nav">Mis ventas</div>
+    <div class="sub-nav">Cobros pendientes</div>
+    <div class="nav-group" style="padding-left: 44px">Pedidos y envíos</div>
+    <div class="sub-nav">Tablero<span class="badge">24</span></div>
+    <div class="sub-nav">Pedidos web<span class="badge hot">5</span></div>
+    <div class="sub-nav">Despacho de hoy<span class="badge">9</span></div>
+    <div class="sub-nav">En agencia<span class="badge hot">3</span></div>
+    <div class="sub-nav">Retornos<span class="badge">1</span></div>
+    <div class="sub-nav on">Transportistas</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8"/></svg>Mercadería</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 8a4 4 0 10-8 0 4 4 0 008 0M4 21a8 8 0 0116 0"/></svg>Clientes</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h2l2 11h10l2-8H7"/></svg>Comprar</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h17a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1zM3 7l3-3h12"/></svg>Dinero</div>
+    <div class="nav"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Informes</div>
+  </aside>
+  <div class="content">
+    <header class="top">
+      <div class="grow"><b class="disp">Pedidos y envíos</b><small>Viernes 16 de octubre · día de despacho</small></div>
+      <span class="aa">A<span style="font-size: 12px">A</span></span>
+      <span class="iconbtn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0112 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 004 0"/></svg></span>
+      <span class="avatar">AD</span>
+    </header>
+    <div class="tabs">
+      <span class="tab">Tablero</span><span class="tab">Pedidos web<span class="n">5</span></span><span class="tab">Despacho de hoy</span><span class="tab">En agencia<span class="n">3</span></span><span class="tab">Retornos</span><span class="tab on">Transportistas</span>
+    </div>
+    <div class="page">
+      <div class="row wrap">
+        <div class="grow"><h1 class="h1 disp">Transportistas</h1><div class="sub">Se configura una sola vez. La tienda y el despacho usan estos datos para ofrecer y calcular el envío.</div></div>
+        <button class="btn pri"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Agregar transportista</button>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 18px; align-items: start">
+        <div class="col">
+          <div class="card" style="border-color: var(--ac); background: var(--acs)"><div class="row"><b class="grow" style="font-size: 17px">Shalom</b><span class="pill ok">Activo</span></div><div class="mut" style="margin-top: 4px">Agencias en todo el país</div><div class="note" style="margin-top: 6px">Sale lun · mié · vie</div></div>
+          <div class="card"><div class="row"><b class="grow" style="font-size: 17px">Olva Courier</b><span class="pill ok">Activo</span></div><div class="mut" style="margin-top: 4px">Agencias y domicilio</div><div class="note" style="margin-top: 6px">Sale lun a sáb</div></div>
+          <div class="card"><div class="row"><b class="grow" style="font-size: 17px">Entrega propia</b><span class="pill ok">Activo</span></div><div class="mut" style="margin-top: 4px">Solo Lima y Callao</div><div class="note" style="margin-top: 6px">Moto del negocio</div></div>
+          <div class="card" style="border-style: dashed; color: var(--mut); text-align: center">+ Marlin, Cruz del Sur, Flores…</div>
+        </div>
+
+        <div class="col" style="gap: 18px">
+          <div class="card col" style="gap: 16px">
+            <div class="row"><h3 class="grow">Shalom · reglas de envío</h3><button class="btn sm pri">Guardar cambios</button></div>
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px">
+              <div><div class="lbl">Días en que despachas</div><div class="row wrap" style="margin-top: 6px; gap: 6px"><span class="tab on" style="min-height: 38px; padding: 0 12px">Lun</span><span class="tab" style="min-height: 38px; padding: 0 12px">Mar</span><span class="tab on" style="min-height: 38px; padding: 0 12px">Mié</span><span class="tab" style="min-height: 38px; padding: 0 12px">Jue</span><span class="tab on" style="min-height: 38px; padding: 0 12px">Vie</span><span class="tab" style="min-height: 38px; padding: 0 12px">Sáb</span></div></div>
+              <div><div class="lbl">Plazo para que el cliente recoja</div><div class="input" style="margin-top: 6px">15 <span class="mut">días desde que llega a la agencia</span></div></div>
+              <div><div class="lbl">Aviso antes de que venza</div><div class="input" style="margin-top: 6px">5 <span class="mut">días antes</span></div></div>
+              <div><div class="lbl">Cómo se rastrea</div><div class="input" style="margin-top: 6px"><span class="mono" style="font-size: 12.5px">https://rastrea.shalom.pe/?guia={guia}</span></div></div>
+            </div>
+            <hr class="sep">
+            <div class="row wrap" style="gap: 24px">
+              <div class="row"><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span><span>Mostrar en la tienda</span></div>
+              <div class="row"><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span><span>Permitir pagar el saldo al recoger</span></div>
+            </div>
+          </div>
+
+          <div class="card col" style="gap: 10px">
+            <div class="row"><h3 class="grow">Agencias de destino que ya usaste con Shalom</h3><div class="input sm" style="min-width: 240px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 16px; height: 16px"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><span class="mut">Buscar departamento o agencia</span></div></div>
+            <table class="tbl">
+              <thead><tr><th>Departamento</th><th>Agencia</th><th>Dirección</th><th class="r">Pedidos</th><th></th></tr></thead>
+              <tbody>
+                <tr><td><b>Cusco</b></td><td>Shalom Av. El Sol</td><td class="mut">Av. El Sol 745</td><td class="r num">9</td><td class="r"><button class="btn sm ghost">Editar</button></td></tr>
+                <tr><td><b>Arequipa</b></td><td>Shalom Cercado</td><td class="mut">Av. Parra 410</td><td class="r num">7</td><td class="r"><button class="btn sm ghost">Editar</button></td></tr>
+                <tr><td><b>Piura</b></td><td>Shalom Castilla</td><td class="mut">Av. Sánchez Cerro 1020</td><td class="r num">4</td><td class="r"><button class="btn sm ghost">Editar</button></td></tr>
+                <tr><td><b>Puno</b></td><td>Shalom Juliaca</td><td class="mut">Jr. Lampa 330</td><td class="r num">3</td><td class="r"><button class="btn sm ghost">Editar</button></td></tr>
+              </tbody>
+            </table>
+            <div class="note">No hay que cargar nada de antemano: la agencia se escribe al despachar y queda guardada para sugerirla la próxima vez. El costo del envío lo pones tú en cada pedido.</div>
+          </div>
+          <div class="card col" style="gap: 12px">
+            <h3>Ajustes generales de pedidos</h3>
+            <div class="row"><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span><span>Emitir la venta al despachar · comprobante por defecto: <b>Nota de venta</b></span></div>
+            <div class="row"><span class="chk"></span><span>Exigir que alguien valide el pago antes de preparar el pedido</span></div>
+            <div class="row"><span class="chk on"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width: 14px; height: 14px; stroke-width: 3"><path d="M5 12l5 5 9-10"/></svg></span><span>Avisarme cuando un paquete esté por vencer en la agencia</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1060}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
