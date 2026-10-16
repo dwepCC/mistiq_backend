@@ -298,7 +298,7 @@ func (h *EcommerceHandler) GetOrderAPI(c fiber.Ctx) error {
 	dep, prov, dist := svc.UbigeoNames(order.DestinationUbigeo)
 	payments, paySummary, _ := svc.ListOrderPayments(order.ID)
 	return c.JSON(fiber.Map{
-		"payments": payments, "payment_summary": paySummary,
+		"payments": payments, "payment_summary": paySummary, "settings": svc.ShippingSettings(),
 		"data": order, "items": items, "history": history, "dispatch": dispatch, "stock": stock,
 		"carrier_name": carrierName,
 		"destination":  fiber.Map{"department": dep, "province": prov, "district": dist},

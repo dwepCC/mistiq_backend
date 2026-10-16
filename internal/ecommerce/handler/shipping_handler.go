@@ -131,11 +131,12 @@ func (h *EcommerceHandler) ShippingBoardAPI(c fiber.Ctx) error {
 			p.DateTo = &end
 		}
 	}
-	rows, total, summary, err := service.NewEcommerceService(db(c)).ListShippingBoard(p)
+	svc := service.NewEcommerceService(db(c))
+	rows, total, summary, err := svc.ListShippingBoard(p)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": rows, "total": total, "summary": summary})
+	return c.JSON(fiber.Map{"data": rows, "total": total, "summary": summary, "settings": svc.ShippingSettings()})
 }
 
 // ── Envío del pedido ─────────────────────────────────────────────────

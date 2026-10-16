@@ -657,3 +657,32 @@ Puntos identificados durante la auditoría de fases anteriores — registrar ac�
 7. **`useBillingEvents.ts` no cierra el SSE en logout de shell nativo** (encontrado en Fase 6, fuera de su alcance; re-confirmado en Fase 11 que `useNotificationEvents.ts` no tiene el mismo problema): deuda de Billing, no de Ecommerce — sin tocar.
 8. ~~**`Dispatch.Status` nunca se sincroniza con `DEVUELTO`**~~ — **CERRADA en Fase 11**: `UpdateOrderStatus` ahora sincroniza `Dispatch.Status` a `DEVUELTO` (si el Dispatch existe y sigue `ENTREGADO`) dentro de la misma transacción que la devolución del pedido, con su propio `DispatchStatusHistory`. Ver bitácora de Fase 11 y `syncDispatchOnOrderReturned` en `ecommerce_service.go`.
 9. ~~**GRE no integrada con despacho ecommerce**~~ — **Fuera de alcance de Ecommerce V1** (decisión de negocio confirmada en Fase 10, re-confirmada en Fase 11): las Guías de Remisión se continúan gestionando manualmente desde Billing → Guías. No existe integración Ecommerce → GRE en V1. Integración GRE futura, si el negocio posteriormente la solicita, es una decisión nueva para una iniciativa aparte (Ecommerce V2), no una continuación automática de este contrato.
+
+
+---
+
+## 13. Addendum (octubre 2026) — Pedidos y envíos
+
+Esta sección **reemplaza** las decisiones anteriores de "sin reserva de stock" (§1.6 punto 6, §12): el negocio decidió
+habilitar la reserva y la gestión de envíos por agencia. Todo lo demás del contrato sigue vigente.
+
+**Reserva de stock (derivada, sin tabla).** Un pedido reserva su mercadería desde que se **confirma** (tiene sucursal)
+hasta que se convierte en venta, se cancela, se rechaza o se devuelve. `pkg/stockreserve` calcula el reservado a partir
+de los ítems de los pedidos en CONFIRMADO…ENTREGADO con `converted_sale_id IS NULL`. `disponible = stock − reservado`.
+Se valida en: confirmar el pedido (`UpdateOrderStatus`), ventas de cualquier canal (`sale_service`, excluyendo el propio
+pedido vía `CreateSaleInput.ReservedOrderID`), transferencias y salidas manuales (`MovementInput.RespectReserved`).
+Los ajustes por conteo físico no se bloquean. Crear el pedido y despacharlo siguen sin tocar el stock.
+
+**Envíos.** `tenant_carriers` (empresas de envío con días de despacho, plazo de recojo, aviso previo y enlace de rastreo),
+destino/agencia/destinatario (DNI, CE o RUC) y costo del envío informativo en el pedido (no entra al total ni a la venta),
+`ENVIO_AGENCIA` como método de entrega y `EN_AGENCIA` como estado del despacho (llegada + fecha límite de recojo).
+Un envío por agencia exige guía, agencia y documento de quien recoge. El retorno (`DEVUELTO` desde DESPACHADO o EN_AGENCIA)
+exige motivo y libera la reserva; si el pedido ya era venta, la venta se anula aparte (eso repone el stock).
+La entrega se puede confirmar desde DESPACHADO, EN_TRANSITO o EN_AGENCIA. El rótulo se imprime desde LISTO_PARA_DESPACHO.
+
+**Abonos.** `tenant_ecommerce_order_payments`: varios por pedido; con `require_payment_validation` nacen PENDIENTE y
+bloquean la preparación hasta validarse u observarse (permiso `ecommerce.orders_manage`). Al convertir en venta, los abonos
+VALIDADOS son los pagos y el saldo queda como crédito (una cuota, vencimiento = plazo de recojo) visible en Cobros pendientes;
+sin abonos se mantiene el comportamiento previo (cobrado completo) salvo `pay_on_pickup`. El comprobante se emite por el total,
+sin tratar los abonos como anticipos SUNAT. Con `emit_sale_on_dispatch`, el despacho por lote emite también la venta
+(si falla, el despacho queda hecho y el error se informa por pedido).

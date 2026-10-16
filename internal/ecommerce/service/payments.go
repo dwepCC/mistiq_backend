@@ -289,3 +289,27 @@ func (s *EcommerceService) pendingReview(tx *gorm.DB, orderID uint) (bool, error
 		Where("order_id = ? AND status <> ?", orderID, database.OrderPaymentValidated).Count(&n).Error
 	return n > 0, err
 }
+
+// ShippingSettingsView los ajustes de pedidos que la pantalla de pedidos necesita conocer, sin exigir el
+// permiso de configurar la tienda.
+type ShippingSettingsView struct {
+	RequirePaymentValidation bool   `json:"require_payment_validation"`
+	EmitSaleOnDispatch       bool   `json:"emit_sale_on_dispatch"`
+	EmitSaleTarget           string `json:"emit_sale_target"`
+}
+
+func (s *EcommerceService) ShippingSettings() ShippingSettingsView {
+	cfg, err := s.GetSettings()
+	if err != nil || cfg == nil {
+		return ShippingSettingsView{EmitSaleTarget: "nota_venta"}
+	}
+	target := cfg.EmitSaleTarget
+	if target == "" {
+		target = "nota_venta"
+	}
+	return ShippingSettingsView{
+		RequirePaymentValidation: cfg.RequirePaymentValidation,
+		EmitSaleOnDispatch:       cfg.EmitSaleOnDispatch,
+		EmitSaleTarget:           target,
+	}
+}
