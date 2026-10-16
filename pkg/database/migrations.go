@@ -1194,7 +1194,12 @@ type TenantEcommerceOrderItem struct {
 	Quantity       float64   `gorm:"type:decimal(15,3);not null" json:"quantity"`
 	UnitPrice      float64   `gorm:"type:decimal(15,2);not null" json:"unit_price"`
 	Subtotal       float64   `gorm:"type:decimal(15,2);not null" json:"subtotal"`
-	CreatedAt      time.Time `json:"created_at"`
+	// Combo: lo que el cliente eligió en cada grupo (ComboJSON, el mismo formato que usa la venta) y el
+	// detalle ya resuelto de sus componentes (ComboComponentsJSON, snapshot). El combo no tiene stock
+	// propio: lo que reserva y descuenta son sus componentes.
+	ComboJSON           string    `gorm:"type:text" json:"combo_json,omitempty"`
+	ComboComponentsJSON string    `gorm:"type:text" json:"combo_components_json,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 // TenantEcommerceOrderStatusHistory bitácora de transiciones de TenantEcommerceOrder.Status —

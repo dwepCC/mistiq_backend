@@ -9,6 +9,8 @@
 package stockreserve
 
 import (
+	"encoding/json"
+
 	"gorm.io/gorm"
 )
 
@@ -37,16 +39,23 @@ type reservedRow struct {
 // valida su disponibilidad). productIDs vacío = todos los productos con reserva.
 func Reserved(db *gorm.DB, branchID, excludeOrderID uint, productIDs []uint) (map[Key]float64, error) {
 	out := map[Key]float64{}
-	q := db.Table("tenant_ecommerce_order_items AS i").
+	base := func() *gorm.DB {
+		q := db.Table("tenant_ecommerce_order_items AS i").
+			Joins("JOIN tenant_ecommerce_orders AS o ON o.id = i.order_id").
+			Where("o.status IN ? AND o.converted_sale_id IS NULL AND o.branch_id IS NOT NULL", reservingStatuses)
+		if branchID > 0 {
+			q = q.Where("o.branch_id = ?", branchID)
+		}
+		if excludeOrderID > 0 {
+			q = q.Where("o.id <> ?", excludeOrderID)
+		}
+		return q
+	}
+
+	// Líneas normales (productos y variantes).
+	q := base().
 		Select("i.product_id AS product_id, COALESCE(i.presentation_id, 0) AS presentation_id, SUM(i.quantity) AS qty").
-		Joins("JOIN tenant_ecommerce_orders AS o ON o.id = i.order_id").
-		Where("o.status IN ? AND o.converted_sale_id IS NULL AND o.branch_id IS NOT NULL", reservingStatuses)
-	if branchID > 0 {
-		q = q.Where("o.branch_id = ?", branchID)
-	}
-	if excludeOrderID > 0 {
-		q = q.Where("o.id <> ?", excludeOrderID)
-	}
+		Where("(i.combo_components_json IS NULL OR i.combo_components_json = '')")
 	if len(productIDs) > 0 {
 		q = q.Where("i.product_id IN ?", productIDs)
 	}
@@ -57,7 +66,50 @@ func Reserved(db *gorm.DB, branchID, excludeOrderID uint, productIDs []uint) (ma
 	for _, r := range rows {
 		out[Key{ProductID: r.ProductID, PresentationID: r.PresentationID}] = r.Qty
 	}
+
+	// Combos: no tienen stock propio, reservan lo que llevan dentro (sus componentes).
+	var comboRows []struct {
+		Quantity   float64
+		Components string `gorm:"column:components"`
+	}
+	if err := base().
+		Select("i.quantity AS quantity, i.combo_components_json AS components").
+		Where("i.combo_components_json IS NOT NULL AND i.combo_components_json <> ''").
+		Scan(&comboRows).Error; err != nil {
+		return nil, err
+	}
+	want := map[uint]bool{}
+	for _, id := range productIDs {
+		want[id] = true
+	}
+	for _, cr := range comboRows {
+		for _, c := range ParseComponents(cr.Components) {
+			if len(want) > 0 && !want[c.ProductID] {
+				continue
+			}
+			out[Key{ProductID: c.ProductID}] += cr.Quantity * c.Quantity
+		}
+	}
 	return out, nil
+}
+
+// Component un componente de combo (el subconjunto del snapshot que importa para el stock).
+type Component struct {
+	ProductID   uint    `json:"product_id"`
+	ProductName string  `json:"product_name"`
+	Quantity    float64 `json:"quantity"`
+}
+
+// ParseComponents lee el snapshot de componentes de una línea de combo (vacío si no hay o está dañado).
+func ParseComponents(raw string) []Component {
+	if raw == "" {
+		return nil
+	}
+	var out []Component
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // ReservedFor reservado de UNA línea (producto simple o variante) en la sucursal.

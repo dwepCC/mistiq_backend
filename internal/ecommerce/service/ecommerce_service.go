@@ -10,6 +10,7 @@ import (
 	"time"
 
 	companyservice "tukifac/internal/company/service"
+	"tukifac/internal/catalog/combos"
 	productservice "tukifac/internal/products/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
@@ -277,14 +278,13 @@ func (s *EcommerceService) PublicCategories() ([]PublicCategory, error) {
 // solo lo publicado en el Catálogo Digital. Cuando showStock=false (Módulos → Tienda Virtual →
 // General → "Mostrar stock") el stock/disponibilidad se despoja de la respuesta pública: no basta
 // con ocultarlo solo en el frontend, esto viaja sin autenticación.
-func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPrice, maxPrice *float64, page, perPage int, showStock bool) ([]productservice.ProductReportItem, int64, error) {
+func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPrice, maxPrice *float64, page, perPage int, showStock bool) ([]PublicProduct, int64, error) {
 	psvc := productservice.NewProductService(s.db)
 	params := productservice.ProductListParams{
 		Query:                    query,
 		CategoryID:               categoryID,
 		ActiveOnly:               true,
 		ShowInDigitalCatalogOnly: true,
-		ExcludeCombos:            true, // v1: sin combos/configurables en la tienda pública
 		MinPrice:                 minPrice,
 		MaxPrice:                 maxPrice,
 	}
@@ -297,7 +297,7 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 	}
 	items, total, err := psvc.ListReport(params)
 	if err != nil {
-		return items, total, err
+		return nil, total, err
 	}
 	// El stock que ve el cliente es el DISPONIBLE: lo reservado por pedidos ya confirmados no se
 	// puede ofrecer de nuevo.
@@ -334,7 +334,7 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 			}
 		}
 	}
-	return items, total, nil
+	return s.attachPublicCombos(items, showStock), total, nil
 }
 
 // ── Pedidos ──────────────────────────────────────────────────────────
@@ -347,6 +347,8 @@ type OrderItemInput struct {
 	Name      string  `json:"name"`
 	Quantity  float64 `json:"quantity"`
 	UnitPrice float64 `json:"unit_price"`
+	// ComboJSON: elección del cliente en un combo (mismo formato que la venta); vacío si no es combo.
+	ComboJSON string `json:"combo_json,omitempty"`
 }
 
 // CreateOrderItemInput lo único que el cliente público puede enviar por línea: identidad +
@@ -360,6 +362,9 @@ type CreateOrderItemInput struct {
 	// nombre/precio que el frontend ya tenía cacheado del catálogo.
 	PresentationID *uint
 	Quantity       float64
+	// ComboJSON: si el producto es un combo, lo que el cliente eligió en cada grupo
+	// ([{"group_id":1,"items":[{"product_id":9,"quantity":1}]}]). Los grupos fijos no hace falta enviarlos.
+	ComboJSON string
 }
 
 const (
@@ -407,6 +412,9 @@ type resolvedOrderLine struct {
 	Quantity       float64
 	UnitPrice      float64
 	Subtotal       float64
+	// Combo (vacíos si la línea no es un combo).
+	ComboJSON           string
+	ComboComponentsJSON string
 }
 
 // resolveOrderLine valida y resuelve UNA línea contra el catálogo del tenant actual (s.db, ya
@@ -431,7 +439,26 @@ func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput) (resolvedOr
 	name := product.Name
 	unitPrice := product.SalePrice
 	var presentationID *uint
-	if it.PresentationID != nil && *it.PresentationID > 0 {
+	var comboJSON, comboComponents string
+	if product.HasCombo {
+		// Combo: el servidor valida la elección contra los grupos y calcula el precio (precio del combo
+		// + sobreprecios de lo elegido); nunca se confía en el precio que mande el navegador.
+		if it.PresentationID != nil && *it.PresentationID > 0 {
+			return resolvedOrderLine{}, fmt.Errorf("'%s' es un combo: no admite presentaciones", product.Name)
+		}
+		res, err := combos.Resolve(s.db, product, it.ComboJSON, 0)
+		if err != nil {
+			return resolvedOrderLine{}, err
+		}
+		if res == nil {
+			return resolvedOrderLine{}, fmt.Errorf("el combo '%s' no se pudo armar", product.Name)
+		}
+		unitPrice = res.UnitPrice
+		comboJSON = strings.TrimSpace(it.ComboJSON)
+		if b, merr := json.Marshal(res.ComponentsPayload()); merr == nil {
+			comboComponents = string(b)
+		}
+	} else if it.PresentationID != nil && *it.PresentationID > 0 {
 		var pres database.TenantProductPresentation
 		if err := s.db.Where("id = ? AND product_id = ? AND active = ?", *it.PresentationID, product.ID, true).
 			First(&pres).Error; err != nil {
@@ -452,6 +479,7 @@ func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput) (resolvedOr
 	return resolvedOrderLine{
 		ProductID: product.ID, PresentationID: presentationID, Name: name,
 		Quantity: qty, UnitPrice: unitPrice, Subtotal: money.RoundDisplay(qty * unitPrice),
+		ComboJSON: comboJSON, ComboComponentsJSON: comboComponents,
 	}, nil
 }
 
@@ -518,7 +546,7 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 
 	legacyItems := make([]OrderItemInput, len(lines))
 	for i, l := range lines {
-		legacyItems[i] = OrderItemInput{ProductID: l.ProductID, Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice}
+		legacyItems[i] = OrderItemInput{ProductID: l.ProductID, Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice, ComboJSON: l.ComboJSON}
 	}
 	itemsJSON, err := json.Marshal(legacyItems)
 	if err != nil {
@@ -566,6 +594,7 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 			createdItems[i] = database.TenantEcommerceOrderItem{
 				OrderID: order.ID, ProductID: l.ProductID, PresentationID: l.PresentationID,
 				Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice, Subtotal: l.Subtotal,
+				ComboJSON: l.ComboJSON, ComboComponentsJSON: l.ComboComponentsJSON,
 			}
 		}
 		if err := tx.Create(&createdItems).Error; err != nil {

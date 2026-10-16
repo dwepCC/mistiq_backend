@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -345,4 +346,13 @@ func (h *EcommerceHandler) PublicTrackAPI(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "no se pudo consultar el pedido"})
 	}
 	return c.JSON(fiber.Map{"data": view})
+}
+
+// comboSelection la elección del combo tal como la mandó el cliente, o "" si no mandó ninguna.
+func comboSelection(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" || s == "[]" {
+		return ""
+	}
+	return s
 }

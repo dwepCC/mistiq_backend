@@ -686,3 +686,11 @@ VALIDADOS son los pagos y el saldo queda como crédito (una cuota, vencimiento =
 sin abonos se mantiene el comportamiento previo (cobrado completo) salvo `pay_on_pickup`. El comprobante se emite por el total,
 sin tratar los abonos como anticipos SUNAT. Con `emit_sale_on_dispatch`, el despacho por lote emite también la venta
 (si falla, el despacho queda hecho y el error se informa por pedido).
+
+**Combos en la tienda (V146).** `tenant_ecommerce_order_items` guarda `combo_json` (la elección del cliente, un arreglo
+`[{group_id, items:[{product_id, quantity}]}]`) y `combo_components_json` (snapshot de componentes resueltos). `resolveOrderLine`
+resuelve el combo con `combos.Resolve` (mismo motor que POS): el precio sale del servidor, nunca del cliente, y no admite
+presentaciones. La reserva derivada (`pkg/stockreserve`) expande cada línea de combo a sus componentes (cantidad de la línea ×
+cantidad del componente); `OrderLines`/`CheckOrder` validan componente por componente. `ConvertToSale` pasa `ComboJSON` a la venta,
+que descuenta los componentes y verifica su disponibilidad excluyendo la reserva del propio pedido. `PublicProducts` devuelve
+`PublicProduct{…, combo{groups[].options[], available}}`; la disponibilidad por opción solo se calcula con `show_stock` activo.

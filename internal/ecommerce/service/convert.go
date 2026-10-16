@@ -162,6 +162,7 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 			UnitPrice:          it.UnitPrice,
 			IgvAffectationType: igvType,
 			PriceIncludesIgv:   priceIncludesIgv,
+			ComboJSON:          it.ComboJSON,
 		})
 	}
 
@@ -325,6 +326,7 @@ func loadOrderItems(db *gorm.DB, order database.TenantEcommerceOrder) ([]OrderIt
 				Name:      r.Name,
 				Quantity:  r.Quantity,
 				UnitPrice: r.UnitPrice,
+				ComboJSON: r.ComboJSON,
 			}
 		}
 		return items, nil

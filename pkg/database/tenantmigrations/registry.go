@@ -117,6 +117,7 @@ var TenantMigrations = []TenantMigration{
 	V143DispatchStatusHistory{},
 	V144EcommerceShipping{},
 	V145EcommerceOrderPayments{},
+	V146EcommerceOrderItemCombos{},
 }
 
 // ByVersion mapa versión → migración.

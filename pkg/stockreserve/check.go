@@ -41,18 +41,28 @@ func OrderLines(db *gorm.DB, orderID, branchID uint, lock bool) ([]Line, error) 
 	}
 	groups := map[Key]*agg{}
 	var order []Key
+	add := func(k Key, name string, qty float64) {
+		g, ok := groups[k]
+		if !ok {
+			g = &agg{line: Line{ProductID: k.ProductID, PresentationID: k.PresentationID, Name: name}}
+			groups[k] = g
+			order = append(order, k)
+		}
+		g.line.Quantity += qty
+	}
 	for _, it := range items {
+		// Un combo no tiene stock propio: se valida lo que lleva dentro, componente por componente.
+		if comps := ParseComponents(it.ComboComponentsJSON); len(comps) > 0 {
+			for _, c := range comps {
+				add(Key{ProductID: c.ProductID}, c.ProductName, it.Quantity*c.Quantity)
+			}
+			continue
+		}
 		k := Key{ProductID: it.ProductID}
 		if it.PresentationID != nil {
 			k.PresentationID = *it.PresentationID
 		}
-		g, ok := groups[k]
-		if !ok {
-			g = &agg{line: Line{ProductID: k.ProductID, PresentationID: k.PresentationID, Name: it.Name}}
-			groups[k] = g
-			order = append(order, k)
-		}
-		g.line.Quantity += it.Quantity
+		add(k, it.Name, it.Quantity)
 	}
 
 	productIDs := make([]uint, 0, len(order))
