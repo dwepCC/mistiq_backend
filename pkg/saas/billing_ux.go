@@ -21,6 +21,8 @@ type BillingContextView struct {
 	// del plan): días que quedan para pagarlo antes de que se dé por vencido. Negativo = el
 	// plazo ya se agotó.
 	PaymentDueDate  string `json:"payment_due_date,omitempty"`
+	// PaymentDeadlineDate es el último día para pagar: la fecha del cobro más la ventana de pago.
+	PaymentDeadlineDate string `json:"payment_deadline_date,omitempty"`
 	PaymentDaysLeft int    `json:"payment_days_left,omitempty"`
 	ShowStatusBanner    bool    `json:"show_status_banner"`
 	StatusBannerVariant string  `json:"status_banner_variant,omitempty"`
@@ -83,7 +85,9 @@ func BuildBillingContext(sub TenantSubscriptionView, cfg PlatformSettings, tenan
 		(currentCycle.Status == database.SaasInvoicePending || currentCycle.Status == database.SaasInvoiceOverdue) {
 		due := CalendarDateLima(currentCycle.DueDate)
 		out.PaymentDueDate = due.Format("2006-01-02")
-		out.PaymentDaysLeft = calendarDaysBetween(NowLima(), due.AddDate(0, 0, EffectivePaymentWindowDays(cfg)))
+		deadline := due.AddDate(0, 0, EffectivePaymentWindowDays(cfg))
+		out.PaymentDeadlineDate = deadline.Format("2006-01-02")
+		out.PaymentDaysLeft = calendarDaysBetween(NowLima(), deadline)
 	}
 
 	out.UrgencyTier, out.CurrentPaymentLabel, out.CurrentPaymentTone = resolvePaymentUX(sub, cfg, out.HasRealDebt, out.DisplayDebtAmount)
