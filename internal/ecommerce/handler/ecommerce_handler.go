@@ -58,11 +58,18 @@ func (h *EcommerceHandler) UpdateSettingsAPI(c fiber.Ctx) error {
 		CardStyle      *string `json:"card_style"`
 		CategoryStyle  *string `json:"category_style"`
 		ShowStock      *bool   `json:"show_stock"`
+		// Pedidos y envíos.
+		RequirePaymentValidation *bool   `json:"require_payment_validation"`
+		EmitSaleOnDispatch       *bool   `json:"emit_sale_on_dispatch"`
+		EmitSaleTarget           *string `json:"emit_sale_target"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
 	input := service.UpdateSettingsInput{
+		RequirePaymentValidation: body.RequirePaymentValidation,
+		EmitSaleOnDispatch:       body.EmitSaleOnDispatch,
+		EmitSaleTarget:           body.EmitSaleTarget,
 		Enabled:        body.Enabled,
 		StoreName:      body.StoreName,
 		Tagline:        body.Tagline,
@@ -289,7 +296,9 @@ func (h *EcommerceHandler) GetOrderAPI(c fiber.Ctx) error {
 		}
 	}
 	dep, prov, dist := svc.UbigeoNames(order.DestinationUbigeo)
+	payments, paySummary, _ := svc.ListOrderPayments(order.ID)
 	return c.JSON(fiber.Map{
+		"payments": payments, "payment_summary": paySummary,
 		"data": order, "items": items, "history": history, "dispatch": dispatch, "stock": stock,
 		"carrier_name": carrierName,
 		"destination":  fiber.Map{"department": dep, "province": prov, "district": dist},
@@ -335,6 +344,10 @@ func (h *EcommerceHandler) ConvertOrderAPI(c fiber.Ctx) error {
 		BranchID  uint   `json:"branch_id"`
 		IssueDate string `json:"issue_date"`
 		ContactID *uint  `json:"contact_id"`
+		// Pedido con saldo: fecha límite para cobrarlo (por defecto, el plazo de recojo) y si el cliente
+		// pagará todo al recoger.
+		DueDate     string `json:"due_date"`
+		PayOnPickup bool   `json:"pay_on_pickup"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -355,6 +368,8 @@ func (h *EcommerceHandler) ConvertOrderAPI(c fiber.Ctx) error {
 		UserID:        orderUserID(c),
 		CentralTenant: orderCentralTenantID(c),
 		TaxConfig:     tax.LoadFromDB(db(c)),
+		DueDate:       parseOptionalDay(body.DueDate),
+		PayOnPickup:   body.PayOnPickup,
 	})
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})

@@ -61,6 +61,11 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/ecommerce/carriers", mod, carriersManage, h.CreateCarrierAPI)
 	api.Put("/ecommerce/carriers/:id", mod, carriersManage, h.UpdateCarrierAPI)
 	api.Delete("/ecommerce/carriers/:id", mod, carriersManage, h.DeleteCarrierAPI)
+	// Abonos del pedido: registrarlos lo hace quien atiende pedidos; validarlos u observarlos, el que gestiona.
+	api.Get("/ecommerce/orders/:id/payments", mod, ordersView, h.ListOrderPaymentsAPI)
+	api.Post("/ecommerce/orders/:id/payments", mod, ordersTransition, h.AddOrderPaymentAPI)
+	api.Put("/ecommerce/payments/:id/review", mod, middleware.RequirePermission("ecommerce.orders_manage"), h.ReviewOrderPaymentAPI)
+	api.Delete("/ecommerce/payments/:id", mod, ordersTransition, h.DeleteOrderPaymentAPI)
 	// Despacho por lote (varios pedidos con su guía).
 	api.Post("/ecommerce/dispatches/batch", mod, ordersDispatch, h.BatchDispatchAPI)
 	api.Get("/ecommerce/orders/:id/print-data", mod, ordersView, h.OrderPrintDataAPI)

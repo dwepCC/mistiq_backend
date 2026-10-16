@@ -10,7 +10,9 @@ import (
 
 	salessvc "tukifac/internal/sales/service"
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 	"tukifac/pkg/notificationevents"
+	"tukifac/pkg/paymentcondition"
 	"tukifac/pkg/salecurrency"
 	"tukifac/pkg/tax"
 
@@ -27,6 +29,11 @@ type ConvertInput struct {
 	UserID        uint
 	CentralTenant uint
 	TaxConfig     tax.Config
+	// DueDate: fecha límite del saldo cuando el pedido tiene abonos y queda algo por cobrar (o
+	// PayOnPickup). Si no viene, se usa el plazo de recojo de la empresa de envío (15 días por defecto).
+	DueDate *time.Time
+	// PayOnPickup: el cliente pagará todo al recoger — la venta queda a crédito por el total.
+	PayOnPickup bool
 }
 
 const sunatRucLength = 11
@@ -188,9 +195,57 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 		notesParts = append(notesParts, notes)
 	}
 
+	// Pagos de la venta: los abonos VALIDADOS del pedido; lo que falte queda como saldo a crédito
+	// (fecha límite = plazo de recojo) y se cobra desde Cobros pendientes. Un pedido sin abonos
+	// conserva el comportamiento de siempre: se asume cobrado completo en efectivo, salvo que el
+	// cliente pague al recoger (PayOnPickup).
 	payments := []salessvc.PaymentInput{}
-	if order.Total > 0 {
+	var dueDate *time.Time
+	abonos, err := s.listPaymentsTx(s.db, order.ID)
+	if err != nil {
+		return nil, err
+	}
+	var validatedTotal float64
+	byMethod := map[string]*salessvc.PaymentInput{}
+	var methodOrder []string
+	for _, p := range abonos {
+		if p.Status != database.OrderPaymentValidated {
+			return nil, errors.New("hay abonos sin validar: valídalos u obsérvalos antes de emitir la venta")
+		}
+		validatedTotal += p.Amount
+		if cur, ok := byMethod[p.Method]; ok {
+			cur.Amount += p.Amount
+			if cur.Reference == "" {
+				cur.Reference = p.Reference
+			}
+		} else {
+			byMethod[p.Method] = &salessvc.PaymentInput{Method: p.Method, Amount: p.Amount, Reference: p.Reference}
+			methodOrder = append(methodOrder, p.Method)
+		}
+	}
+	validatedTotal = money.RoundDisplay(validatedTotal)
+	for _, m := range methodOrder {
+		payments = append(payments, *byMethod[m])
+	}
+	balance := money.RoundDisplay(order.Total - validatedTotal)
+	switch {
+	case len(abonos) > 0 && balance > money.PaymentTolerance:
+		dueDate = s.pickupDueDate(&order, input)
+	case len(abonos) == 0 && input.PayOnPickup && order.Total > 0:
+		dueDate = s.pickupDueDate(&order, input)
+	case len(abonos) == 0 && order.Total > 0:
 		payments = []salessvc.PaymentInput{{Method: "cash", Amount: order.Total}}
+	}
+	paymentCondition := ""
+	if dueDate != nil {
+		paymentCondition = paymentcondition.CodeCredit
+	}
+	// Una venta con saldo pendiente necesita a quién cobrarle: se usa el cliente elegido, el del
+	// pedido, o se crea desde el documento de quien recoge.
+	if dueDate != nil && (contactID == nil || *contactID == 0) {
+		if cid, cerr := s.ensureOrderContact(&order); cerr == nil && cid != nil {
+			contactID = cid
+		}
 	}
 
 	taxCfg := input.TaxConfig
@@ -200,19 +255,21 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 
 	saleSvc := salessvc.NewSaleService(s.db)
 	sale, err := saleSvc.Create(salessvc.CreateSaleInput{
-		BranchID:          input.BranchID,
-		ContactID:         contactID,
-		UserID:            input.UserID,
-		SeriesID:          input.SeriesID,
-		DocType:           strings.TrimSpace(targetSeries.DocType),
-		IssueDate:         input.IssueDate,
-		Currency:          "PEN",
-		OperationTypeCode: salecurrency.OpVentaInterna,
-		Payments:          payments,
-		Notes:             strings.Join(notesParts, " "),
-		Items:             saleItems,
-		TaxConfig:         taxCfg,
-		CentralTenantID:   input.CentralTenant,
+		BranchID:             input.BranchID,
+		ContactID:            contactID,
+		UserID:               input.UserID,
+		SeriesID:             input.SeriesID,
+		DocType:              strings.TrimSpace(targetSeries.DocType),
+		IssueDate:            input.IssueDate,
+		Currency:             "PEN",
+		OperationTypeCode:    salecurrency.OpVentaInterna,
+		Payments:             payments,
+		DueDate:              dueDate,
+		PaymentConditionCode: paymentCondition,
+		Notes:                strings.Join(notesParts, " "),
+		Items:                saleItems,
+		TaxConfig:            taxCfg,
+		CentralTenantID:      input.CentralTenant,
 		// La reserva de este pedido es justo la mercadería que la venta va a descontar.
 		ReservedOrderID: order.ID,
 	})

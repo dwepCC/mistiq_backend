@@ -72,6 +72,10 @@ type UpdateSettingsInput struct {
 	CardStyle      *string
 	CategoryStyle  *string
 	ShowStock      *bool
+	// Pedidos y envíos.
+	RequirePaymentValidation *bool
+	EmitSaleOnDispatch       *bool
+	EmitSaleTarget           *string // nota_venta | 03 | 01
 }
 
 func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.TenantEcommerceSettings, error) {
@@ -118,6 +122,19 @@ func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.
 	}
 	if input.ShowStock != nil {
 		upd["show_stock"] = *input.ShowStock
+	}
+	if input.RequirePaymentValidation != nil {
+		upd["require_payment_validation"] = *input.RequirePaymentValidation
+	}
+	if input.EmitSaleOnDispatch != nil {
+		upd["emit_sale_on_dispatch"] = *input.EmitSaleOnDispatch
+	}
+	if input.EmitSaleTarget != nil {
+		t := strings.TrimSpace(*input.EmitSaleTarget)
+		if t != "nota_venta" && t != "03" && t != "01" {
+			return nil, fmt.Errorf("comprobante por defecto inválido: use nota_venta, 03 o 01")
+		}
+		upd["emit_sale_target"] = t
 	}
 	if len(upd) > 0 {
 		if err := s.db.Model(&database.TenantEcommerceSettings{}).Where("id = ?", 1).Updates(upd).Error; err != nil {
@@ -745,6 +762,14 @@ func (s *EcommerceService) UpdateOrderStatus(id uint, input UpdateOrderStatusInp
 		updates := map[string]interface{}{"status": newStatus}
 		if newStatus == OrderStatusConfirmado && order.BranchID == nil && input.BranchID != nil {
 			updates["branch_id"] = *input.BranchID
+		}
+		// Con «validar pagos» activo, un pedido con abonos por revisar no pasa a preparación.
+		if newStatus == OrderStatusEnPreparacion {
+			if cfg, cerr := s.GetSettings(); cerr == nil && cfg.RequirePaymentValidation {
+				if pend, perr := s.pendingReview(tx, id); perr == nil && pend {
+					return fmt.Errorf("hay abonos sin validar: valídalos antes de preparar el pedido")
+				}
+			}
 		}
 		// Al confirmar, el pedido RESERVA su mercadería en la sucursal: se valida que alcance el
 		// stock disponible (almacén menos lo reservado por otros pedidos). Sin sucursal todavía no

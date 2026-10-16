@@ -149,13 +149,17 @@ type BatchDispatchResult struct {
 	OK       bool                              `json:"ok"`
 	Error    string                            `json:"error,omitempty"`
 	Dispatch *database.TenantEcommerceDispatch `json:"dispatch,omitempty"`
+	// SaleID / SaleError: resultado de emitir la venta al despachar. Si la venta falla, el despacho
+	// igual quedó hecho y la venta se puede emitir después desde el pedido.
+	SaleID    *uint  `json:"sale_id,omitempty"`
+	SaleError string `json:"sale_error,omitempty"`
 }
 
 const maxBatchDispatch = 100
 
 // BatchDispatch despacha varios pedidos (cada uno en su propia transacción) y devuelve el resultado
-// de cada uno.
-func (s *EcommerceService) BatchDispatch(items []BatchDispatchItem, userID uint) ([]BatchDispatchResult, error) {
+// de cada uno. Con emit != nil, cada pedido despachado también emite su venta.
+func (s *EcommerceService) BatchDispatch(items []BatchDispatchItem, userID uint, emit *EmitSaleInput) ([]BatchDispatchResult, error) {
 	if len(items) == 0 {
 		return nil, errors.New("no hay pedidos para despachar")
 	}
@@ -180,6 +184,16 @@ func (s *EcommerceService) BatchDispatch(items []BatchDispatchItem, userID uint)
 		} else {
 			res.OK = true
 			res.Dispatch = d
+			if emit != nil {
+				in := *emit
+				in.UserID = userID
+				if sale, serr := s.EmitSaleForOrder(it.OrderID, in); serr != nil {
+					res.SaleError = serr.Error()
+				} else {
+					id := sale.ID
+					res.SaleID = &id
+				}
+			}
 		}
 		results = append(results, res)
 	}

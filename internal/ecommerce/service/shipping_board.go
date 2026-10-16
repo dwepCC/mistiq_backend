@@ -89,7 +89,12 @@ type ShippingRow struct {
 	// ReturnedAt / ReturnReason: cuándo regresó el paquete y el motivo (etapa RETORNO).
 	ReturnedAt   *time.Time `json:"returned_at"`
 	ReturnReason string     `json:"return_reason"`
-	Stage        string     `json:"stage"`
+	// Pagos: abonos validados, saldo y cuántos abonos esperan revisión.
+	PaidTotal        float64 `json:"paid_total"`
+	Balance          float64 `json:"balance"`
+	PaymentsToReview int     `json:"payments_to_review"`
+	PaymentStatus    string  `json:"payment_status"`
+	Stage            string  `json:"stage"`
 }
 
 type shippingRowDB struct {
@@ -122,6 +127,9 @@ type shippingRowDB struct {
 	PickupDeadline     *time.Time
 	ReturnedAt         *time.Time
 	ReturnReason       string
+	PaidTotal          float64
+	PaymentsToReview   int
+	PaymentStatus      string
 	Stage              string
 }
 
@@ -140,6 +148,11 @@ const shippingSelect = `SELECT o.id AS id, o.created_at AS created_at, o.custome
 	d.id AS dispatch_id, COALESCE(d.status, '') AS dispatch_status, COALESCE(d.tracking_code, '') AS tracking_code,
 	d.dispatched_at AS dispatched_at, d.agency_arrived_at AS agency_arrived_at, d.pickup_deadline AS pickup_deadline,
 	d.returned_at AS returned_at,
+	COALESCE((SELECT SUM(p.amount) FROM tenant_ecommerce_order_payments p
+		WHERE p.order_id = o.id AND p.status = 'VALIDADO' AND p.deleted_at IS NULL), 0) AS paid_total,
+	COALESCE((SELECT COUNT(*) FROM tenant_ecommerce_order_payments p
+		WHERE p.order_id = o.id AND p.status <> 'VALIDADO' AND p.deleted_at IS NULL), 0) AS payments_to_review,
+	o.payment_status AS payment_status,
 	COALESCE((SELECT h.notes FROM tenant_ecommerce_dispatch_status_histories h
 		WHERE h.dispatch_id = d.id AND h.to_status = 'DEVUELTO' ORDER BY h.id DESC LIMIT 1), '') AS return_reason,
 	` + stageSQL + ` AS stage
@@ -266,6 +279,8 @@ func (s *EcommerceService) ListShippingBoard(p ShippingBoardParams) ([]ShippingR
 			TrackingCode: r.TrackingCode, DispatchedAt: r.DispatchedAt,
 			AgencyArrivedAt: r.AgencyArrivedAt, PickupDeadline: r.PickupDeadline, Stage: r.Stage,
 			ReturnedAt: r.ReturnedAt, ReturnReason: r.ReturnReason,
+			PaidTotal: r.PaidTotal, PaymentsToReview: r.PaymentsToReview, PaymentStatus: r.PaymentStatus,
+			Balance: balanceOf(r.Total, r.PaidTotal),
 		}
 		if len(r.DestinationUbigeo) == 6 {
 			row.Department = depNames[r.DestinationUbigeo[:2]]
@@ -333,4 +348,13 @@ func (s *EcommerceService) UbigeoNames(ubigeo string) (department, province, dis
 		district = d.Nombre
 	}
 	return department, province, district
+}
+
+// balanceOf lo que falta por pagar de un pedido (nunca negativo).
+func balanceOf(total, paid float64) float64 {
+	b := math.Round((total-paid)*100) / 100
+	if b < 0 {
+		return 0
+	}
+	return b
 }

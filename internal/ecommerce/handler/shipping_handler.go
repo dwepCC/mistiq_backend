@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"tukifac/internal/ecommerce/service"
+	"tukifac/pkg/tax"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -184,6 +185,8 @@ func (h *EcommerceHandler) BatchDispatchAPI(c fiber.Ctx) error {
 			PackageCount *int     `json:"package_count"`
 			WeightKg     *float64 `json:"weight_kg"`
 		} `json:"items"`
+		// EmitSale: emitir también la venta de cada pedido despachado (requiere permiso de convertir).
+		EmitSale bool `json:"emit_sale"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -194,7 +197,14 @@ func (h *EcommerceHandler) BatchDispatchAPI(c fiber.Ctx) error {
 			OrderID: it.OrderID, TrackingCode: it.TrackingCode, PackageCount: it.PackageCount, WeightKg: it.WeightKg,
 		})
 	}
-	results, err := service.NewEcommerceService(db(c)).BatchDispatch(items, orderUserID(c))
+	var emit *service.EmitSaleInput
+	if body.EmitSale {
+		if !hasEcommercePermission(c, service.PermOrdersConvert) {
+			return c.Status(403).JSON(fiber.Map{"error": "no tienes permiso para emitir ventas", "permission": service.PermOrdersConvert})
+		}
+		emit = &service.EmitSaleInput{CentralTenant: orderCentralTenantID(c), TaxConfig: tax.LoadFromDB(db(c))}
+	}
+	results, err := service.NewEcommerceService(db(c)).BatchDispatch(items, orderUserID(c), emit)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -229,4 +239,96 @@ func limaLocation() *time.Location {
 		return time.Local
 	}
 	return loc
+}
+
+// parseOptionalDay "YYYY-MM-DD" → mediodía de ese día en hora de Lima; nil si viene vacío o inválido.
+func parseOptionalDay(day string) *time.Time {
+	day = strings.TrimSpace(day)
+	if day == "" {
+		return nil
+	}
+	t, err := time.ParseInLocation("2006-01-02", day, limaLocation())
+	if err != nil {
+		return nil
+	}
+	t = time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, t.Location())
+	return &t
+}
+
+// ── Abonos ───────────────────────────────────────────────────────────
+
+// ListOrderPaymentsAPI GET /api/ecommerce/orders/:id/payments
+func (h *EcommerceHandler) ListOrderPaymentsAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	rows, sum, err := service.NewEcommerceService(db(c)).ListOrderPayments(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": rows, "summary": sum})
+}
+
+// AddOrderPaymentAPI POST /api/ecommerce/orders/:id/payments
+func (h *EcommerceHandler) AddOrderPaymentAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Amount     float64 `json:"amount"`
+		Method     string  `json:"method"`
+		Reference  string  `json:"reference"`
+		Note       string  `json:"note"`
+		VoucherURL string  `json:"voucher_url"`
+		PaidAt     string  `json:"paid_at"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	svc := service.NewEcommerceService(db(c))
+	row, err := svc.AddOrderPayment(uint(id), service.AddPaymentInput{
+		Amount: body.Amount, Method: body.Method, Reference: body.Reference, Note: body.Note,
+		VoucherURL: body.VoucherURL, PaidAt: parseOptionalDay(body.PaidAt), UserID: orderUserID(c),
+	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	_, sum, _ := svc.ListOrderPayments(uint(id))
+	return c.Status(201).JSON(fiber.Map{"data": row, "summary": sum})
+}
+
+// ReviewOrderPaymentAPI PUT /api/ecommerce/payments/:id/review — {approve: bool, reason}
+func (h *EcommerceHandler) ReviewOrderPaymentAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Approve bool   `json:"approve"`
+		Reason  string `json:"reason"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	row, err := service.NewEcommerceService(db(c)).ReviewOrderPayment(uint(id), service.ReviewPaymentInput{
+		Approve: body.Approve, Reason: body.Reason, UserID: orderUserID(c),
+	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": row})
+}
+
+// DeleteOrderPaymentAPI DELETE /api/ecommerce/payments/:id
+func (h *EcommerceHandler) DeleteOrderPaymentAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if err := service.NewEcommerceService(db(c)).DeleteOrderPayment(uint(id)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }

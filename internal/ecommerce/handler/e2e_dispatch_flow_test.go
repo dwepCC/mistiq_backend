@@ -43,7 +43,7 @@ func TestE2E_FlujoCompletoDespachoYTracking(t *testing.T) {
 		&database.TenantProductStock{}, &database.TenantProductPresentationStock{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{},
-		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantNotification{},
+		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{}, &database.TenantNotification{},
 		&database.TenantEcommerceCustomerAccount{}, &database.TenantEcommerceCustomerAddress{},
 	); err != nil {
 		t.Fatal(err)

@@ -1046,9 +1046,49 @@ type TenantEcommerceSettings struct {
 	CategoryStyle string `gorm:"size:20;default:'circles'" json:"category_style"`
 	// Muestra "Agotado" en la tienda pública cuando manage_stock y stock_total<=0. Si es false, el
 	// stock (incluido stock_by_branch) no se envía en la respuesta pública de productos.
-	ShowStock bool      `gorm:"column:show_stock;default:true" json:"show_stock"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ShowStock bool `gorm:"column:show_stock;default:true" json:"show_stock"`
+	// Pedidos y envíos: si es true, un abono nace PENDIENTE y alguien con permiso debe validarlo antes
+	// de preparar el pedido (voucher revisado). Si es false, el abono nace ya validado.
+	RequirePaymentValidation bool `gorm:"column:require_payment_validation;default:false" json:"require_payment_validation"`
+	// Si es true, al despachar un pedido se emite su venta (los abonos validados son los pagos y el
+	// saldo queda como crédito pendiente de cobro). EmitSaleTarget: nota_venta | 03 | 01.
+	EmitSaleOnDispatch bool      `gorm:"column:emit_sale_on_dispatch;default:false" json:"emit_sale_on_dispatch"`
+	EmitSaleTarget     string    `gorm:"column:emit_sale_target;size:12;default:'nota_venta'" json:"emit_sale_target"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// Estados de un abono de pedido web.
+const (
+	OrderPaymentPending   = "PENDIENTE"
+	OrderPaymentValidated = "VALIDADO"
+	OrderPaymentObserved  = "OBSERVADO"
+)
+
+// TenantEcommerceOrderPayment abono registrado sobre un pedido web (adelanto para el envío, pago
+// parcial, saldo). Es un registro de control: el dinero entra a caja o bancos cuando el pedido se
+// convierte en venta, momento en que los abonos validados pasan a ser los pagos de esa venta.
+type TenantEcommerceOrderPayment struct {
+	ID      uint    `gorm:"primaryKey" json:"id"`
+	OrderID uint    `gorm:"not null;index" json:"order_id"`
+	Amount  float64 `gorm:"type:decimal(15,2);not null" json:"amount"`
+	// Method: código de TenantPaymentMethod (efectivo, yape, transferencia…).
+	Method string `gorm:"size:50;not null" json:"method"`
+	// Reference: número de operación del voucher.
+	Reference string `gorm:"size:100" json:"reference"`
+	Note      string `gorm:"size:255" json:"note"`
+	// VoucherURL: foto del voucher (opcional).
+	VoucherURL string    `gorm:"size:255" json:"voucher_url"`
+	PaidAt     time.Time `json:"paid_at"`
+	Status     string    `gorm:"size:12;not null;default:'PENDIENTE';index" json:"status"`
+	// ObservedReason: por qué se observó el voucher.
+	ObservedReason string         `gorm:"size:255" json:"observed_reason"`
+	CreatedBy      *uint          `json:"created_by"`
+	ReviewedBy     *uint          `json:"reviewed_by"`
+	ReviewedAt     *time.Time     `json:"reviewed_at"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // TenantEcommerceSlider imagen del carrusel principal de la tienda pública.

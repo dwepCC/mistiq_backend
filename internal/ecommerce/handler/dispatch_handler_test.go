@@ -32,7 +32,7 @@ func setupDispatchHandlerTestDB(t *testing.T) *gorm.DB {
 		&database.TenantProduct{}, &database.TenantProductPresentation{},
 		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
 		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{},
-		&database.TenantEcommerceDispatchStatusHistory{},
+		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{},
 		&database.TenantNotification{},
 	); err != nil {
 		t.Fatal(err)

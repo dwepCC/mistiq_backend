@@ -509,7 +509,7 @@ func TestBatchDispatch_ResultadoPorPedido(t *testing.T) {
 		{OrderID: o2.ID, TrackingCode: &g2},
 		{OrderID: pendiente.ID},
 		{OrderID: o1.ID, TrackingCode: &g1},
-	}, 4)
+	}, 4, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +522,7 @@ func TestBatchDispatch_ResultadoPorPedido(t *testing.T) {
 	if res[3].OK {
 		t.Errorf("el repetido no debe procesarse dos veces: %+v", res[3])
 	}
-	if _, err := svc.BatchDispatch(nil, 1); err == nil {
+	if _, err := svc.BatchDispatch(nil, 1, nil); err == nil {
 		t.Error("un lote vacío debe rechazarse")
 	}
 }
