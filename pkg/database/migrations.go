@@ -1173,8 +1173,10 @@ type TenantEcommerceOrder struct {
 	// punto desde CONFIRMADO en adelante, sin importar su estado de preparación/despacho.
 	ConvertedSaleID *uint      `gorm:"index" json:"converted_sale_id"`
 	ConvertedAt     *time.Time `json:"converted_at"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// Source: WEB (tienda virtual) o MANUAL (registrado por el personal en el panel).
+	Source    string    `gorm:"size:20;not null;default:'WEB'" json:"source"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // TenantEcommerceOrderItem línea normalizada del pedido — reemplaza gradualmente a ItemsJSON

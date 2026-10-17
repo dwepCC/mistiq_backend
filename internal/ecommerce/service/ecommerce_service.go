@@ -398,6 +398,11 @@ type CreateOrderInput struct {
 	ContactID         *uint
 	DeliveryAddressID *uint
 	Items             []CreateOrderItemInput
+	// Manual true = pedido registrado por el personal desde el panel (WhatsApp, llamada…): puede incluir
+	// productos que no están publicados en la tienda y empresas de envío que la tienda no muestra.
+	Manual bool
+	// UserID quién lo registró (solo pedidos manuales), para el historial.
+	UserID uint
 	// CentralTenantID solo para la señal SSE post-commit (Fase 6, notificationevents.PublishChanged)
 	// — nunca se usa para resolver datos, s.db ya está scopeado a la BD de este tenant.
 	CentralTenantID uint
@@ -423,7 +428,7 @@ type resolvedOrderLine struct {
 // Catálogo Digital (no se puede pedir un producto oculto adivinando su ID); si se manda
 // presentation_id, debe pertenecer a ESE producto y estar activa; si el producto tiene variantes,
 // presentation_id es obligatorio (no se puede pedir "a ciegas" sin elegir una).
-func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput) (resolvedOrderLine, error) {
+func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput, manual bool) (resolvedOrderLine, error) {
 	if it.ProductID == 0 {
 		return resolvedOrderLine{}, fmt.Errorf("producto inválido en el pedido")
 	}
@@ -431,8 +436,12 @@ func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput) (resolvedOr
 		return resolvedOrderLine{}, fmt.Errorf("la cantidad debe ser mayor a cero")
 	}
 	var product database.TenantProduct
-	if err := s.db.Where("id = ? AND active = ? AND show_in_digital_catalog = ?", it.ProductID, true, true).
-		First(&product).Error; err != nil {
+	pq := s.db.Where("id = ? AND active = ?", it.ProductID, true)
+	if !manual {
+		// El cliente de la tienda solo puede pedir lo publicado; el personal puede pedir cualquier producto activo.
+		pq = pq.Where("show_in_digital_catalog = ?", true)
+	}
+	if err := pq.First(&product).Error; err != nil {
 		return resolvedOrderLine{}, fmt.Errorf("uno de los productos del pedido ya no está disponible")
 	}
 
@@ -504,9 +513,15 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 	var agency agencyOrderData
 	if deliveryMethod == DeliveryMethodAgency {
 		var err error
-		agency, err = s.validateAgencyCheckout(input)
+		agency, err = s.validateAgencyCheckout(input, input.Manual)
 		if err != nil {
 			return nil, nil, err
+		}
+	}
+	if input.Manual && input.ContactID != nil && *input.ContactID > 0 {
+		var n int64
+		if err := s.db.Model(&database.TenantContact{}).Where("id = ?", *input.ContactID).Count(&n).Error; err != nil || n == 0 {
+			return nil, nil, fmt.Errorf("el cliente elegido no existe")
 		}
 	}
 	hasAuthenticatedAddress := input.DeliveryAddressID != nil && *input.DeliveryAddressID > 0
@@ -531,7 +546,7 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 
 	lines := make([]resolvedOrderLine, 0, len(input.Items))
 	for _, it := range input.Items {
-		line, err := s.resolveOrderLine(it)
+		line, err := s.resolveOrderLine(it, input.Manual)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -567,6 +582,10 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 		// puede enviarlo ni modificarlo. Fijo en NO_APLICA mientras no exista pasarela de pago.
 		PaymentStatus: "NO_APLICA",
 		Status:        OrderStatusPendiente,
+		Source:        "WEB",
+	}
+	if input.Manual {
+		order.Source = "MANUAL"
 	}
 	if deliveryMethod == DeliveryMethodAgency {
 		order.CarrierID = agency.carrierID
@@ -602,10 +621,20 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 		}
 		// FromStatus="" (no "transición" real, es la creación) — igual documenta desde cuándo el
 		// pedido existe en PENDIENTE (Contrato v2 §5, fila "Cliente finaliza checkout").
-		if err := tx.Create(&database.TenantEcommerceOrderStatusHistory{
-			OrderID: order.ID, FromStatus: "", ToStatus: OrderStatusPendiente,
-		}).Error; err != nil {
+		hist := database.TenantEcommerceOrderStatusHistory{OrderID: order.ID, FromStatus: "", ToStatus: OrderStatusPendiente}
+		if input.Manual {
+			hist.Notes = "Pedido registrado manualmente"
+			if input.UserID > 0 {
+				uid := input.UserID
+				hist.UserID = &uid
+			}
+		}
+		if err := tx.Create(&hist).Error; err != nil {
 			return err
+		}
+		if input.Manual {
+			// Quien lo registró ya lo sabe: no se avisa «nuevo pedido online».
+			return nil
 		}
 		// Notificación interna (Contrato v2 §1.7). Solo la fila: el hub SSE/badge que la entrega en
 		// vivo al panel es Fase 6, todavía no implementado — acá únicamente se persiste.
