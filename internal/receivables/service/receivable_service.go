@@ -26,6 +26,8 @@ func NewReceivableService(db *gorm.DB) *ReceivableService {
 }
 
 type ListFilter struct {
+	// SaleID una sola venta (para cobrar el saldo desde el pedido que la originó).
+	SaleID        uint
 	BranchID      uint
 	ContactID     uint
 	Status        string // open | overdue | bn_pending | all
@@ -115,6 +117,9 @@ func (s *ReceivableService) List(f ListFilter) ([]ReceivableRow, int64, error) {
 	}
 	if f.ContactID > 0 {
 		q = q.Where("tenant_sales.contact_id = ?", f.ContactID)
+	}
+	if f.SaleID > 0 {
+		q = q.Where("tenant_sales.id = ?", f.SaleID)
 	}
 	if f.Search != "" {
 		like := "%" + strings.TrimSpace(f.Search) + "%"

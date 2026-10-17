@@ -2,9 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"tukifac/internal/ecommerce/service"
+	"tukifac/pkg/notificationevents"
 	"tukifac/pkg/tenantstorage"
 
 	"github.com/gofiber/fiber/v3"
@@ -103,4 +105,54 @@ func validVoucherURL(c fiber.Ctx, raw string) bool {
 	}
 	prefix := tenantstorage.TenantUploadPublicURL(ruc, "ecommerce", voucherFilePrefix+"-")
 	return strings.HasPrefix(raw, prefix) && !strings.ContainsAny(raw[len(prefix):], `/\?#`)
+}
+
+// PublicSendVoucherAPI POST /api/public/ecommerce/track/voucher (multipart) — el cliente informa un pago con la
+// foto de su voucher. Se identifica con el número del pedido y su celular, igual que en el seguimiento. El abono
+// nace PENDIENTE: alguien del negocio lo revisa antes de que cuente como pagado.
+func (h *EcommerceHandler) PublicSendVoucherAPI(c fiber.Ctx) error {
+	svc := service.NewEcommerceService(db(c))
+	orderID, err := svc.AuthorizeTrack(c.FormValue("order"), c.FormValue("phone"))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+	}
+	amount, err := strconv.ParseFloat(strings.TrimSpace(c.FormValue("amount")), 64)
+	if err != nil || amount <= 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "escribe cuánto pagaste"})
+	}
+	url, err := uploadEcommerceImage(c, "image", voucherFilePrefix)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	_, err = svc.AddOrderPayment(orderID, service.AddPaymentInput{
+		Amount: amount, Method: c.FormValue("method"), Reference: strings.TrimSpace(c.FormValue("reference")),
+		VoucherURL: url, ByCustomer: true,
+	})
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	notificationevents.PublishChanged(c.Context(), orderCentralTenantID(c))
+	return c.Status(201).JSON(fiber.Map{"ok": true})
+}
+
+// SetPaymentVoucherAPI PUT /api/ecommerce/payments/:id/voucher — {voucher_url}: agrega o cambia el voucher de un abono.
+func (h *EcommerceHandler) SetPaymentVoucherAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		VoucherURL string `json:"voucher_url"`
+	}
+	if err := c.Bind().JSON(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
+	}
+	if !validVoucherURL(c, body.VoucherURL) {
+		return c.Status(400).JSON(fiber.Map{"error": "la foto del voucher no es válida: súbela de nuevo"})
+	}
+	row, err := service.NewEcommerceService(db(c)).SetPaymentVoucher(uint(id), body.VoucherURL)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": row})
 }

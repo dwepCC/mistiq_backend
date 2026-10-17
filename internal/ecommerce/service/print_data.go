@@ -70,10 +70,20 @@ func BuildPrintDataForOrder(db *gorm.DB, orderID uint) (*salessvc.PrintData, err
 	if err := json.Unmarshal([]byte(order.ItemsJSON), &items); err != nil {
 		items = nil
 	}
+	// Los combos muestran lo que llevan dentro (las líneas normalizadas están en el mismo orden que el JSON).
+	var lines []database.TenantEcommerceOrderItem
+	db.Where("order_id = ?", order.ID).Order("id ASC").Find(&lines)
 	pd.Items = make([]salessvc.PrintItem, len(items))
 	for i, it := range items {
 		subtotal := it.Quantity * it.UnitPrice
+		note := ""
+		if i < len(lines) && lines[i].ProductID == it.ProductID {
+			if inc := comboIncludes(lines[i].ComboComponentsJSON); inc != "" {
+				note = "Incluye: " + inc
+			}
+		}
 		pd.Items[i] = salessvc.PrintItem{
+			ItemNote:    note,
 			Description: it.Name,
 			Unit:        "UND",
 			Quantity:    it.Quantity,

@@ -51,6 +51,7 @@ func RegisterRoutes(api fiber.Router) {
 	// Pedido registrado a mano por el personal (WhatsApp, llamada, mostrador).
 	api.Post("/ecommerce/orders", mod, middleware.RequirePermission("ecommerce.orders_manage"), h.CreateManualOrderAPI)
 	api.Post("/ecommerce/payments/voucher", mod, ordersTransition, h.UploadPaymentVoucherAPI)
+	api.Put("/ecommerce/payments/:id/voucher", mod, ordersTransition, h.SetPaymentVoucherAPI)
 	// Rótulos de varios pedidos (impresión masiva). Antes de /orders/:id para que "labels" no se
 	// interprete como un ID.
 	api.Get("/ecommerce/orders/labels", mod, ordersDispatch, h.BulkLabelsAPI)
@@ -103,6 +104,7 @@ func RegisterPublicRoutes(app fiber.Router) {
 	g.Get("/carriers", h.PublicCarriersAPI)
 	// Seguimiento del pedido para el cliente (número + celular).
 	g.Get("/track", h.PublicTrackAPI)
+	g.Post("/track/voucher", h.PublicSendVoucherAPI)
 	// Departamento → provincia → distrito para elegir la ciudad de destino del envío.
 	ubi := ubigeo.NewTenantHandler()
 	g.Get("/ubigeo/regiones", ubi.RegionesAPI)
