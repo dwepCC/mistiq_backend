@@ -50,7 +50,7 @@ Migraciones: **V144** (envíos), **V145** (abonos + ajustes), **V146** (combos e
 ## Pendiente (por orden sugerido)
 
 1. **Probar con datos reales** (nadie lo ha hecho fuera de la BD de pruebas): despacho con venta, impresión de rótulos, seguimiento desde un celular, abonos con «validar pagos» activado.
-2. **Diseño anterior (`?ui=1`)**: las páginas nuevas existen solo en el diseño nuevo; el menú viejo no las lista.
+2. **Diseño anterior (`?ui=1`)**: decisión del negocio: se trabaja solo con el diseño nuevo, así que el menú viejo no se actualiza (las páginas de envíos se alcanzan solo por el menú nuevo).
 3. **Mejoras menores** (todas las anteriores ya están hechas; esto es lo que queda)
    - Aviso por WhatsApp automático (hoy el aviso de recojo es del panel y el mensaje se envía con un clic).
    - Badges también en el menú lateral de áreas (hoy están en las pestañas de Pedidos y envíos).
