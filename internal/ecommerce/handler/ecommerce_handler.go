@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -120,7 +122,10 @@ func uploadEcommerceImage(c fiber.Ctx, fieldName, filePrefix string) (string, er
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("no se pudo crear carpeta %s: %w", dir, err)
 	}
-	filename := fmt.Sprintf("%s-%d%s", filePrefix, time.Now().UnixMilli(), ext)
+	// Sufijo aleatorio: la URL es pública y no debe poder adivinarse con solo la hora.
+	suffix := make([]byte, 4)
+	_, _ = rand.Read(suffix)
+	filename := fmt.Sprintf("%s-%d-%s%s", filePrefix, time.Now().UnixMilli(), hex.EncodeToString(suffix), ext)
 	savePath := filepath.Join(dir, filename)
 	if err := c.SaveFile(file, savePath); err != nil {
 		return "", fmt.Errorf("error guardando imagen: %w", err)

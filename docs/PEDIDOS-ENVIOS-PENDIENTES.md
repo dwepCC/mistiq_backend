@@ -26,31 +26,36 @@ Decisiones técnicas: `docs/ECOMMERCE-EVOLUTION-CONTRACT.md`, sección 13.
 - Un combo sale «Agotado» en la tienda si no alcanza el stock de alguna de sus opciones obligatorias (con «Mostrar stock» desactivado no se calcula). Sin grupos u opciones, no se ofrece.
 - El panel muestra los componentes bajo la línea (con aviso si falta stock) y el seguimiento público muestra «Incluye: …».
 
+**Pedido manual y voucher**
+- «Pedido manual» (Pedidos web, permiso `ecommerce.orders_manage`): el personal registra un pedido que llegó por WhatsApp, llamada o mostrador. Cliente (se puede buscar uno existente), productos (también variantes y combos), y entrega por recojo, domicilio o agencia. Usa el mismo `CreateOrder` que la tienda: precio y stock salen del servidor.
+- Diferencias con el pedido de la tienda: admite productos no publicados en la tienda y empresas de envío que la tienda no muestra; no genera el aviso «nuevo pedido online»; queda con `source = MANUAL` (migración **V147**; la lista lo marca como «Manual») y el historial guarda quién lo creó.
+- Foto del voucher en el abono: se sube con `POST /api/ecommerce/payments/voucher` (JPG/PNG/WebP, nombre con sufijo aleatorio) y el abono guarda su URL. El servidor solo acepta URLs de voucher de la carpeta de ESE negocio. Se ve en el pedido como miniatura con «Ver voucher».
+
 **F3 (parcial)**
 - Seguimiento público `/ecommerce/seguimiento` (número + celular) y enlace en los mensajes de WhatsApp.
 - Exportar la lista a CSV (abre en Excel).
 
-Migraciones: **V144** (envíos), **V145** (abonos + ajustes) y **V146** (combos en las líneas del pedido). Corren solas en el deploy.
+Migraciones: **V144** (envíos), **V145** (abonos + ajustes), **V146** (combos en las líneas del pedido) y **V147** (origen del pedido). Corren solas en el deploy.
 
 ## Pendiente (por orden sugerido)
 
 1. **Probar con datos reales** (nadie lo ha hecho fuera de la BD de pruebas): despacho con venta, impresión de rótulos, seguimiento desde un celular, abonos con «validar pagos» activado.
-2. **Pedido manual**: botón del mockup, para pedidos que llegan por WhatsApp sin pasar por la tienda (crear pedido desde el panel con cliente, destino y productos).
-3. **Foto del voucher** en el abono (hoy solo monto, medio, n.º de operación y fecha). El campo `voucher_url` ya existe en el modelo; falta subir el archivo (usar el patrón de `uploadEcommerceImage`).
-4. **Diseño anterior (`?ui=1`)**: las páginas nuevas existen solo en el diseño nuevo; el menú viejo no las lista.
-5. **Mejoras menores**
+2. **Diseño anterior (`?ui=1`)**: las páginas nuevas existen solo en el diseño nuevo; el menú viejo no las lista.
+3. **Mejoras menores**
+   - Pedido manual: abono inicial en la misma ventana, costo del envío/bultos/peso al crearlo, y buscar el nombre con el DNI (hoy se hace desde el pedido).
+   - Foto del voucher también desde el checkout de la tienda (hoy solo la sube el personal) y guardar un voucher después de registrado el abono.
    - Mostrar los componentes del combo en el rótulo y la nota de preparación impresa (hoy solo van en el detalle del pedido).
    - Exportar a Excel real (.xlsx) en vez de CSV.
    - Insignias con conteos en el menú lateral (por vencer, por despachar).
    - Cobrar el saldo desde el propio pedido (hoy se cobra en Cobros pendientes).
    - Aviso/notificación automática cuando falten N días para que venza el plazo de recojo (el plazo y el aviso previo ya se configuran, solo se muestran en pantalla).
    - Anular la venta desde el retorno (hoy el panel avisa y se anula en Mis ventas).
-6. **Tests que fallan por el entorno** (no por este módulo): billing Greenter (necesita PHP), prepayment, superadmin (timeout de login). Revisar en una máquina con PHP.
+4. **Tests que fallan por el entorno** (no por este módulo): billing Greenter (necesita PHP), prepayment, superadmin (timeout de login). Revisar en una máquina con PHP.
 
 ## Cómo seguir desde otra PC
 
 1. Clonar `mistiq_backend` y `mistiq_tenant` (y los demás repos del proyecto), ambos en `main`.
-2. Backend: `go run . migrate-bump-target` y `go run . migrate-fleet --limit=10 --workers=1` para llevar la BD local a V146.
+2. Backend: `go run . migrate-bump-target` y `go run . migrate-fleet --limit=10 --workers=1` para llevar la BD local a V147.
 3. Para probar rápido, en un tenant de pruebas: crear empresas de envío (Vender → Pedidos y envíos → Empresas de envío), activar «controlar stock» en un producto con stock, y hacer pedidos desde `/ecommerce/` con «A otra ciudad».
 4. Los mockups aprobados están en `docs/pedidos-envios-mockups/` (fuente `.dc.html`, `canvas.json` y `mq.css`) y publicados en el Artifact «Pedidos y envíos — mockups» de claude.ai (el enlace está en el historial de la conversación original).
 5. Panel: `npm run dev`; verificar con `npx tsc --noEmit -p .`, `npm run check:nav` y `npm run build`.

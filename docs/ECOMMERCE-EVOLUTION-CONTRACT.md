@@ -694,3 +694,10 @@ presentaciones. La reserva derivada (`pkg/stockreserve`) expande cada línea de 
 cantidad del componente); `OrderLines`/`CheckOrder` validan componente por componente. `ConvertToSale` pasa `ComboJSON` a la venta,
 que descuenta los componentes y verifica su disponibilidad excluyendo la reserva del propio pedido. `PublicProducts` devuelve
 `PublicProduct{…, combo{groups[].options[], available}}`; la disponibilidad por opción solo se calcula con `show_stock` activo.
+
+**Pedido manual y voucher (V147).** `tenant_ecommerce_orders.source` (`WEB` | `MANUAL`, por defecto WEB). `POST /api/ecommerce/orders`
+(permiso `ecommerce.orders_manage`) llama a `CreateOrder` con `Manual: true`: la línea se resuelve contra cualquier producto
+activo (no solo los publicados en el Catálogo Digital), la agencia puede ser una empresa con `show_in_store = false`, se valida
+`contact_id` si viene, el historial guarda el usuario y no se crea la notificación «Nuevo pedido online». El resto de reglas
+(precio del servidor, combos, reserva al confirmar) no cambia. `POST /api/ecommerce/payments/voucher` sube la foto del voucher a
+`uploads/tenants/{ruc}/ecommerce/voucher-<ms>-<aleatorio>.<ext>`; `voucher_url` del abono solo se acepta si apunta a esa carpeta.

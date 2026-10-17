@@ -289,6 +289,9 @@ func (h *EcommerceHandler) AddOrderPaymentAPI(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
 	}
+	if !validVoucherURL(c, body.VoucherURL) {
+		return c.Status(400).JSON(fiber.Map{"error": "la foto del voucher no es válida: súbela de nuevo"})
+	}
 	svc := service.NewEcommerceService(db(c))
 	row, err := svc.AddOrderPayment(uint(id), service.AddPaymentInput{
 		Amount: body.Amount, Method: body.Method, Reference: body.Reference, Note: body.Note,

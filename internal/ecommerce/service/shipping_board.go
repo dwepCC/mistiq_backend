@@ -66,6 +66,7 @@ type ShippingRow struct {
 	ShippingCost       float64    `json:"shipping_cost"`
 	BranchID           *uint      `json:"branch_id"`
 	ConvertedSaleID    *uint      `json:"converted_sale_id"`
+	Source             string     `json:"source"`
 	ItemCount          int        `json:"item_count"`
 	PackageCount       *int       `json:"package_count"`
 	WeightKg           *float64   `json:"weight_kg"`
@@ -98,6 +99,7 @@ type ShippingRow struct {
 }
 
 type shippingRowDB struct {
+	Source             string
 	ID                 uint
 	CreatedAt          time.Time
 	CustomerName       string
@@ -136,7 +138,7 @@ type shippingRowDB struct {
 const shippingSelect = `SELECT o.id AS id, o.created_at AS created_at, o.customer_name AS customer_name,
 	o.customer_phone AS customer_phone, o.status AS status, o.delivery_method AS delivery_method,
 	o.total AS total, o.shipping_cost AS shipping_cost, o.branch_id AS branch_id,
-	o.converted_sale_id AS converted_sale_id,
+	o.converted_sale_id AS converted_sale_id, o.source AS source,
 	(SELECT COUNT(*) FROM tenant_ecommerce_order_items i WHERE i.order_id = o.id) AS item_count,
 	COALESCE(d.package_count, o.package_count) AS package_count,
 	COALESCE(d.weight_kg, o.weight_kg) AS weight_kg,
@@ -270,7 +272,7 @@ func (s *EcommerceService) ListShippingBoard(p ShippingBoardParams) ([]ShippingR
 			ID: r.ID, OrderNumber: orderNumber(r.ID), CreatedAt: r.CreatedAt,
 			CustomerName: r.CustomerName, CustomerPhone: r.CustomerPhone, Status: r.Status,
 			DeliveryMethod: r.DeliveryMethod, Total: r.Total, ShippingCost: r.ShippingCost,
-			BranchID: r.BranchID, ConvertedSaleID: r.ConvertedSaleID, ItemCount: r.ItemCount,
+			BranchID: r.BranchID, ConvertedSaleID: r.ConvertedSaleID, Source: r.Source, ItemCount: r.ItemCount,
 			PackageCount: r.PackageCount, WeightKg: r.WeightKg, CarrierID: r.CarrierID,
 			CarrierName: r.CarrierName, DestinationUbigeo: r.DestinationUbigeo,
 			DestinationAgency: r.DestinationAgency, RecipientName: r.RecipientName,

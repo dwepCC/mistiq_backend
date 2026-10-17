@@ -48,6 +48,9 @@ func RegisterRoutes(api fiber.Router) {
 	carriersManage := middleware.RequireAnyPermission("ecommerce.manage", "ecommerce.orders_manage")
 
 	api.Get("/ecommerce/orders", mod, ordersView, h.ListOrdersAPI)
+	// Pedido registrado a mano por el personal (WhatsApp, llamada, mostrador).
+	api.Post("/ecommerce/orders", mod, middleware.RequirePermission("ecommerce.orders_manage"), h.CreateManualOrderAPI)
+	api.Post("/ecommerce/payments/voucher", mod, ordersTransition, h.UploadPaymentVoucherAPI)
 	// Rótulos de varios pedidos (impresión masiva). Antes de /orders/:id para que "labels" no se
 	// interprete como un ID.
 	api.Get("/ecommerce/orders/labels", mod, ordersDispatch, h.BulkLabelsAPI)

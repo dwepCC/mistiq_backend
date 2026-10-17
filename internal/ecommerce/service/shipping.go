@@ -243,13 +243,17 @@ type agencyOrderData struct {
 
 // validateAgencyCheckout valida el checkout de un envío por agencia: el cliente elige
 // transportista, ciudad y agencia, y deja el documento de quien recogerá el paquete.
-func (s *EcommerceService) validateAgencyCheckout(in CreateOrderInput) (agencyOrderData, error) {
+func (s *EcommerceService) validateAgencyCheckout(in CreateOrderInput, manual bool) (agencyOrderData, error) {
 	var out agencyOrderData
 	if in.CarrierID == nil || *in.CarrierID == 0 {
 		return out, errors.New("elige la empresa de envío")
 	}
 	var carrier database.TenantCarrier
-	if err := s.db.Where("id = ? AND active = ? AND show_in_store = ?", *in.CarrierID, true, true).First(&carrier).Error; err != nil {
+	cq := s.db.Where("id = ? AND active = ?", *in.CarrierID, true)
+	if !manual {
+		cq = cq.Where("show_in_store = ?", true)
+	}
+	if err := cq.First(&carrier).Error; err != nil {
 		return out, errors.New("la empresa de envío elegida ya no está disponible")
 	}
 	out.carrierID = &carrier.ID
