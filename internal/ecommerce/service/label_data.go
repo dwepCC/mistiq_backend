@@ -122,7 +122,12 @@ func BuildLabelDataForOrder(db *gorm.DB, orderID uint) (*EcommerceLabelData, err
 	var lines []database.TenantEcommerceOrderItem
 	if err := db.Where("order_id = ?", order.ID).Order("id ASC").Find(&lines).Error; err == nil {
 		for _, l := range lines {
-			label.Items = append(label.Items, EcommerceLabelItem{Name: l.Name, Quantity: l.Quantity})
+			name := l.Name
+			if inc := comboIncludes(l.ComboComponentsJSON); inc != "" {
+				// El rótulo es para armar el paquete: el combo se muestra con lo que lleva dentro.
+				name = fmt.Sprintf("%s (%s)", l.Name, inc)
+			}
+			label.Items = append(label.Items, EcommerceLabelItem{Name: name, Quantity: l.Quantity})
 		}
 		label.ItemCount = len(lines)
 	}

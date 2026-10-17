@@ -29,11 +29,13 @@ func (h *ReceivableHandler) ListAPI(c fiber.Ctx) error {
 	reqBranch, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
 	branchID := branch.ResolveReadBranchFilter(c, uint(reqBranch))
 	contactID, _ := strconv.ParseUint(c.Query("contact_id"), 10, 32)
+	saleID, _ := strconv.ParseUint(c.Query("sale_id"), 10, 32)
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("page_size", "50"))
 
 	svc := service.NewReceivableService(tenantDB(c))
 	rows, total, err := svc.List(service.ListFilter{
+		SaleID:    uint(saleID),
 		BranchID:  branchID,
 		ContactID: uint(contactID),
 		Status:    c.Query("status"),

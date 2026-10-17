@@ -31,25 +31,31 @@ Decisiones técnicas: `docs/ECOMMERCE-EVOLUTION-CONTRACT.md`, sección 13.
 - Diferencias con el pedido de la tienda: admite productos no publicados en la tienda y empresas de envío que la tienda no muestra; no genera el aviso «nuevo pedido online»; queda con `source = MANUAL` (migración **V147**; la lista lo marca como «Manual») y el historial guarda quién lo creó.
 - Foto del voucher en el abono: se sube con `POST /api/ecommerce/payments/voucher` (JPG/PNG/WebP, nombre con sufijo aleatorio) y el abono guarda su URL. El servidor solo acepta URLs de voucher de la carpeta de ESE negocio. Se ve en el pedido como miniatura con «Ver voucher».
 
+**Ajustes menores (octubre 2026)**
+- **Aviso de recojo:** un trabajo cada 6 horas (`pkg/cron/pickup_reminders.go`) recorre los negocios y crea una notificación del panel cuando un paquete en agencia está por vencer (días de «aviso previo» de la empresa, 5 por defecto) y otra cuando venció el plazo. Cada aviso se crea una sola vez por pedido.
+- **Cobrar el saldo desde el pedido:** el pedido muestra «Cobrar saldo» (permiso `receivables.collect`) y abre el mismo cobro de Cobros pendientes; el saldo del pedido sale de lo que sigue pendiente en la venta.
+- **Combos en rótulo y nota:** el rótulo muestra «Combo (lo que lleva)» y la nota del pedido imprime «Incluye: …».
+- **Retorno que anula la venta:** al registrar el retorno de un pedido con nota de venta, se puede anular la venta en el mismo paso (devuelve stock y dinero). Boleta o factura siguen pidiendo nota de crédito.
+- **Insignias en las pestañas** de Pedidos y envíos: por confirmar, listos para despachar, en agencia y retornos.
+- **Pedido manual:** costo del envío, bultos y peso, abono inicial con foto del voucher y búsqueda del nombre por DNI en la misma ventana.
+- **Voucher:** el personal puede agregar o cambiar la foto de un abono ya registrado; el cliente puede enviar su voucher desde el seguimiento (queda PENDIENTE y avisa al negocio, máx. 3 sin revisar por pedido).
+- **Excel real:** «Exportar a Excel» genera un .xlsx (cifras como números, filtros y primera fila fija).
+
 **F3 (parcial)**
 - Seguimiento público `/ecommerce/seguimiento` (número + celular) y enlace en los mensajes de WhatsApp.
 - Exportar la lista a CSV (abre en Excel).
 
-Migraciones: **V144** (envíos), **V145** (abonos + ajustes), **V146** (combos en las líneas del pedido) y **V147** (origen del pedido). Corren solas en el deploy.
+Migraciones: **V144** (envíos), **V145** (abonos + ajustes), **V146** (combos en las líneas del pedido) y **V147** (origen del pedido). Los ajustes menores posteriores no necesitaron migración. Corren solas en el deploy.
 
 ## Pendiente (por orden sugerido)
 
 1. **Probar con datos reales** (nadie lo ha hecho fuera de la BD de pruebas): despacho con venta, impresión de rótulos, seguimiento desde un celular, abonos con «validar pagos» activado.
 2. **Diseño anterior (`?ui=1`)**: las páginas nuevas existen solo en el diseño nuevo; el menú viejo no las lista.
-3. **Mejoras menores**
-   - Pedido manual: abono inicial en la misma ventana, costo del envío/bultos/peso al crearlo, y buscar el nombre con el DNI (hoy se hace desde el pedido).
-   - Foto del voucher también desde el checkout de la tienda (hoy solo la sube el personal) y guardar un voucher después de registrado el abono.
-   - Mostrar los componentes del combo en el rótulo y la nota de preparación impresa (hoy solo van en el detalle del pedido).
-   - Exportar a Excel real (.xlsx) en vez de CSV.
-   - Insignias con conteos en el menú lateral (por vencer, por despachar).
-   - Cobrar el saldo desde el propio pedido (hoy se cobra en Cobros pendientes).
-   - Aviso/notificación automática cuando falten N días para que venza el plazo de recojo (el plazo y el aviso previo ya se configuran, solo se muestran en pantalla).
-   - Anular la venta desde el retorno (hoy el panel avisa y se anula en Mis ventas).
+3. **Mejoras menores** (todas las anteriores ya están hechas; esto es lo que queda)
+   - Aviso por WhatsApp automático (hoy el aviso de recojo es del panel y el mensaje se envía con un clic).
+   - Badges también en el menú lateral de áreas (hoy están en las pestañas de Pedidos y envíos).
+   - Que el voucher que sube el cliente pueda ser un PDF (hoy solo imágenes).
+   - Reintentar solo el abono o el paquete del pedido manual cuando falla justo después de crearlo (hoy se completa desde el pedido).
 4. **Tests que fallan por el entorno** (no por este módulo): billing Greenter (necesita PHP), prepayment, superadmin (timeout de login). Revisar en una máquina con PHP.
 
 ## Cómo seguir desde otra PC

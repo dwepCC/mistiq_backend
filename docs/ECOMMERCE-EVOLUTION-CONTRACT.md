@@ -701,3 +701,10 @@ activo (no solo los publicados en el Catálogo Digital), la agencia puede ser un
 `contact_id` si viene, el historial guarda el usuario y no se crea la notificación «Nuevo pedido online». El resto de reglas
 (precio del servidor, combos, reserva al confirmar) no cambia. `POST /api/ecommerce/payments/voucher` sube la foto del voucher a
 `uploads/tenants/{ruc}/ecommerce/voucher-<ms>-<aleatorio>.<ext>`; `voucher_url` del abono solo se acepta si apunta a esa carpeta.
+
+**Ajustes menores (sin migración).** `NotifyPickupDeadlines` (notificaciones `ecommerce.order.pickup_soon` / `pickup_expired`, idempotentes
+por pedido) lo ejecuta `pkg/cron/pickup_reminders.go` cada 6 h con `cronlock`. `GET /api/receivables?sale_id=` filtra una venta para cobrar
+el saldo desde el pedido. `POST /api/public/ecommerce/track/voucher` (multipart; limitado a 20/min por IP) crea un abono con
+`ByCustomer = true`: nace siempre PENDIENTE (aunque «validar pagos» esté apagado), máximo 3 pendientes por pedido, y genera la
+notificación `ecommerce.order.payment_submitted`; el seguimiento expone `can_send_payment`, `payment_methods` y `pending_payments`.
+`PUT /api/ecommerce/payments/:id/voucher` agrega o cambia el voucher de un abono (solo URLs de la carpeta del negocio).

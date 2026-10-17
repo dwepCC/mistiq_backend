@@ -48,6 +48,7 @@ func runServer(cfg *config.Config) {
 	cron.StartSaasScheduler()
 	cron.StartExchangeRateScheduler()
 	cron.StartFiscalReconcileWorker()
+	cron.StartPickupReminderWorker()
 
 	app := fiber.New(fiber.Config{
 		AppName:      "Mistiq SaaS ERP",

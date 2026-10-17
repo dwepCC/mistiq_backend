@@ -259,3 +259,38 @@ func TestComboPublico_ExponeGruposYDisponibilidad(t *testing.T) {
 		}
 	}
 }
+
+func TestComboPedido_RotuloYNotaMuestranLoQueLleva(t *testing.T) {
+	db := setupComboOrderDB(t)
+	polo := stockedComponent(t, db, "POLO", 10)
+	pant := stockedComponent(t, db, "PANT", 10)
+	short := stockedComponent(t, db, "SHORT", 10)
+	combo, _, choose := seedStoreCombo(t, db, polo, pant, short)
+	if err := db.AutoMigrate(&database.TenantCompanyConfig{}, &database.UbiRegion{}, &database.UbiProvincia{}, &database.UbiDistrito{}); err != nil {
+		t.Fatal(err)
+	}
+	svc := &EcommerceService{db: db}
+	o, _, err := svc.CreateOrder(CreateOrderInput{
+		CustomerName: "Ana", CustomerPhone: "999111222", DeliveryMethod: DeliveryMethodPickup,
+		Items: []CreateOrderItemInput{{ProductID: combo.ID, Quantity: 1, ComboJSON: comboSelection(t, choose.ID, pant.ID)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Model(&database.TenantEcommerceOrder{}).Where("id = ?", o.ID).Update("status", OrderStatusListoParaDespacho)
+	label, err := BuildLabelDataForOrder(db, o.ID)
+	if err != nil {
+		t.Fatalf("rótulo: %v", err)
+	}
+	want := "Combo verano (Comp POLO, Comp PANT)"
+	if len(label.Items) != 1 || label.Items[0].Name != want {
+		t.Errorf("rótulo: %+v, esperaba %q", label.Items, want)
+	}
+	pd, err := BuildPrintDataForOrder(db, o.ID)
+	if err != nil {
+		t.Fatalf("nota: %v", err)
+	}
+	if len(pd.Items) != 1 || pd.Items[0].ItemNote != "Incluye: Comp POLO, Comp PANT" {
+		t.Errorf("nota de la línea: %+v", pd.Items)
+	}
+}

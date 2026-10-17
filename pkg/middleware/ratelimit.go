@@ -90,7 +90,7 @@ func isAuthSensitivePath(path string) bool {
 }
 
 func isPublicConsultPath(path string) bool {
-	return path == "/api/consulta/dni" || path == "/api/consulta/ruc" || path == "/api/public/ecommerce/track"
+	return path == "/api/consulta/dni" || path == "/api/consulta/ruc" || path == "/api/public/ecommerce/track" || path == "/api/public/ecommerce/track/voucher"
 }
 
 func isBillingPath(path string) bool {

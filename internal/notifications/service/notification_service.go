@@ -34,6 +34,9 @@ var broadcastPermissionByType = map[string]string{
 	"ecommerce.order.confirmed": "ecommerce.orders_view",
 	"ecommerce.order.cancelled": "ecommerce.orders_view",
 	"ecommerce.order.converted": "ecommerce.orders_view",
+	"ecommerce.order.pickup_soon":    "ecommerce.orders_view",
+	"ecommerce.order.pickup_expired": "ecommerce.orders_view",
+	"ecommerce.order.payment_submitted": "ecommerce.orders_view",
 }
 
 // hasImpliedPermission mismo criterio que internal/ecommerce/handler/ecommerce_scope.go

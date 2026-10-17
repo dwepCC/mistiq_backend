@@ -110,6 +110,8 @@ type AddPaymentInput struct {
 	VoucherURL string
 	PaidAt     *time.Time
 	UserID     uint
+	// ByCustomer el abono lo informó el cliente desde el seguimiento: nace siempre PENDIENTE, sin importar el ajuste.
+	ByCustomer bool
 }
 
 var paymentBlockedStatuses = map[string]bool{
@@ -175,6 +177,17 @@ func (s *EcommerceService) AddOrderPayment(orderID uint, in AddPaymentInput) (*d
 			return fmt.Errorf("el abono (S/ %.2f) supera lo que falta por pagar (S/ %.2f)", amount, math.Max(remaining, 0))
 		}
 
+		if in.ByCustomer {
+			var pendingCount int64
+			if err := tx.Model(&database.TenantEcommerceOrderPayment{}).
+				Where("order_id = ? AND status = ?", orderID, database.OrderPaymentPending).Count(&pendingCount).Error; err != nil {
+				return err
+			}
+			if pendingCount >= maxCustomerPendingPayments {
+				return errTooManyPendingPayments
+			}
+		}
+
 		now := time.Now()
 		paidAt := now
 		if in.PaidAt != nil {
@@ -194,7 +207,10 @@ func (s *EcommerceService) AddOrderPayment(orderID uint, in AddPaymentInput) (*d
 			uid = &in.UserID
 			created.CreatedBy = uid
 		}
-		if settings.RequirePaymentValidation {
+		if in.ByCustomer && created.Note == "" {
+			created.Note = "Enviado por el cliente"
+		}
+		if settings.RequirePaymentValidation || in.ByCustomer {
 			created.Status = database.OrderPaymentPending
 		} else {
 			created.ReviewedBy = uid
@@ -202,6 +218,16 @@ func (s *EcommerceService) AddOrderPayment(orderID uint, in AddPaymentInput) (*d
 		}
 		if err := tx.Create(&created).Error; err != nil {
 			return err
+		}
+		if in.ByCustomer {
+			if err := tx.Create(&database.TenantNotification{
+				Type:     "ecommerce.order.payment_submitted",
+				Title:    fmt.Sprintf("Voucher recibido de %s", orderNumber(orderID)),
+				Body:     fmt.Sprintf("%s envió S/ %.2f. Revisa el voucher y valida el abono.", order.CustomerName, amount),
+				LinkPath: fmt.Sprintf("/sales/pedidos-web?id=%d", orderID),
+			}).Error; err != nil {
+				return err
+			}
 		}
 		return s.syncPaymentStatus(tx, orderID)
 	})
@@ -312,4 +338,17 @@ func (s *EcommerceService) ShippingSettings() ShippingSettingsView {
 		EmitSaleOnDispatch:       cfg.EmitSaleOnDispatch,
 		EmitSaleTarget:           target,
 	}
+}
+
+// SetPaymentVoucher agrega o cambia la foto del voucher de un abono ya registrado (vacío la quita).
+func (s *EcommerceService) SetPaymentVoucher(paymentID uint, voucherURL string) (*database.TenantEcommerceOrderPayment, error) {
+	var p database.TenantEcommerceOrderPayment
+	if err := s.db.First(&p, paymentID).Error; err != nil {
+		return nil, errors.New("abono no encontrado")
+	}
+	if err := s.db.Model(&p).Update("voucher_url", strings.TrimSpace(voucherURL)).Error; err != nil {
+		return nil, err
+	}
+	p.VoucherURL = strings.TrimSpace(voucherURL)
+	return &p, nil
 }

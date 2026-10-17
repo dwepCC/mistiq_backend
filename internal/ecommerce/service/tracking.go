@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 )
 
 // ErrTrackNotFound se devuelve igual para "no existe" y "el celular no coincide": quien consulta no debe
@@ -52,7 +53,12 @@ type TrackView struct {
 	Total          float64      `json:"total"`
 	Paid           float64      `json:"paid"`
 	Balance        float64      `json:"balance"`
-	Items          []TrackItem  `json:"items"`
+	// PendingPayments lo que el cliente ya envió y aún no se valida.
+	PendingPayments float64 `json:"pending_payments"`
+	// CanSendPayment el cliente puede enviar el voucher de un pago (hay saldo y el pedido sigue vivo).
+	CanSendPayment bool                 `json:"can_send_payment"`
+	PaymentMethods []TrackPaymentMethod `json:"payment_methods,omitempty"`
+	Items          []TrackItem          `json:"items"`
 	Events         []TrackEvent `json:"events"`
 }
 
@@ -116,18 +122,11 @@ func parseOrderRef(ref string) (uint, bool) {
 
 // TrackOrder seguimiento público de un pedido: se identifica con el número y el celular con el que se pidió.
 func (s *EcommerceService) TrackOrder(orderRef, phone string) (*TrackView, error) {
-	id, ok := parseOrderRef(orderRef)
-	want := digitsTail(phone, 9)
-	if !ok || len(want) < 7 {
-		return nil, ErrTrackNotFound
+	order, err := s.findTrackedOrder(orderRef, phone)
+	if err != nil {
+		return nil, err
 	}
-	var order database.TenantEcommerceOrder
-	if err := s.db.First(&order, id).Error; err != nil {
-		return nil, ErrTrackNotFound
-	}
-	if want != digitsTail(order.CustomerPhone, 9) && want != digitsTail(order.RecipientPhone, 9) {
-		return nil, ErrTrackNotFound
-	}
+	id := order.ID
 
 	dispatch, err := s.GetDispatchByOrderID(id)
 	if err != nil {
@@ -144,7 +143,12 @@ func (s *EcommerceService) TrackOrder(orderRef, phone string) (*TrackView, error
 	v := &TrackView{
 		OrderNumber: orderNumber(order.ID), Stage: stage, StageLabel: stageLabels[stage],
 		DeliveryMethod: order.DeliveryMethod, AgencyName: order.DestinationAgency, AgencyAddress: order.DestinationAddress,
-		Total: order.Total, Paid: sum.Paid, Balance: sum.Balance,
+		Total: order.Total, Paid: sum.Paid, Balance: sum.Balance, PendingPayments: sum.Pending,
+	}
+	if !paymentBlockedStatuses[order.Status] && order.ConvertedSaleID == nil && money.RoundDisplay(order.Total-sum.Paid-sum.Pending) > money.PaymentTolerance {
+		v.CanSendPayment = true
+		v.PaymentMethods = s.customerPaymentMethods()
+		v.CanSendPayment = len(v.PaymentMethods) > 0
 	}
 	dep, _, _ := s.UbigeoNames(order.DestinationUbigeo)
 	v.Department = dep
