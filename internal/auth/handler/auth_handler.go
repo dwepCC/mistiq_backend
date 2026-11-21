@@ -2,19 +2,18 @@ package handler
 
 import (
 	"errors"
-	"time"
+	"strings"
 
 	"tukifac/config"
 	authservice "tukifac/internal/auth/service"
 	reststaff "tukifac/internal/restaurant/staff"
-	"tukifac/internal/users/service"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
+	"tukifac/pkg/mastercode"
 	"tukifac/pkg/middleware"
-	"tukifac/pkg/saas"
+	"tukifac/pkg/tenantctx"
 
 	"github.com/gofiber/fiber/v3"
-	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
 )
 
@@ -40,95 +39,6 @@ func (h *AuthHandler) LoginPage(c fiber.Ctx) error {
 		"Title":      "Iniciar sesión",
 		"TenantName": tenant.Name,
 	})
-}
-
-func (h *AuthHandler) LoginSubmit(c fiber.Ctx) error {
-	email := c.FormValue("email")
-	password := c.FormValue("password")
-
-	tenant, _ := c.Locals("tenant").(*database.Tenant)
-	tenantDB, _ := c.Locals("tenantDB").(*gorm.DB)
-
-	// Sin tenant → redirigir a inicio (dev) o superadmin (prod)
-	if tenant == nil || tenantDB == nil {
-		if config.AppConfig.IsDev() {
-			return c.Redirect().To("/")
-		}
-		return c.Redirect().To("/superadmin/login")
-	}
-
-	tenantName := tenant.Name
-
-	renderError := func(msg string) error {
-		return c.Render("auth/login", fiber.Map{
-			"Title":      "Iniciar sesión",
-			"TenantName": tenantName,
-			"Error":      msg,
-			"Email":      email,
-		})
-	}
-
-	if email == "" || password == "" {
-		return renderError("Email y contraseña son requeridos")
-	}
-
-	var user database.TenantUser
-	if err := tenantDB.Where("email = ? AND active = ?", email, true).First(&user).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return renderError("Credenciales inválidas")
-		}
-		return renderError("Error interno")
-	}
-
-	if !user.CheckPassword(password) {
-		return renderError("Credenciales inválidas")
-	}
-
-	// Obtener nombre del rol
-	var role database.TenantRole
-	tenantDB.First(&role, user.RoleID)
-
-	tenantSlug := ""
-	tenantDBName := ""
-	var tenantID uint
-	if tenant != nil {
-		tenantSlug = tenant.Slug
-		tenantDBName = tenant.DBName
-		tenantID = tenant.ID
-	}
-
-	claims := &middleware.TenantClaims{
-		UserID:        user.ID,
-		Email:         user.Email,
-		RoleID:        user.RoleID,
-		RoleName:      role.Name,
-		TenantSlug:    tenantSlug,
-		TenantDB:      tenantDBName,
-		TenantID:      tenantID,
-		TenantVersion: middleware.CurrentTenantJWTVersion(),
-		Type:          "tenant",
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(config.AppConfig.JWTSecret))
-	if err != nil {
-		return renderError("Error generando sesión")
-	}
-
-	c.Cookie(&fiber.Cookie{
-		Name:     "token",
-		Value:    tokenString,
-		Path:     "/",
-		HTTPOnly: true,
-		MaxAge:   24 * 3600,
-		SameSite: "Lax",
-	})
-
-	return c.Redirect().To("/dashboard")
 }
 
 func (h *AuthHandler) Logout(c fiber.Ctx) error {
@@ -163,30 +73,28 @@ func (h *AuthHandler) LoginAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Credenciales inválidas"})
 	}
 
-	var role database.TenantRole
-	tenantDB.First(&role, user.RoleID)
-
-	// Permisos del rol en formato "module.action" para el JWT
-	roleSvc := service.NewRoleService(tenantDB)
-	permissionKeys, _ := roleSvc.GetRolePermissionKeys(user.RoleID)
-	if permissionKeys == nil {
-		permissionKeys = []string{}
+	// Un único emisor arma claims, vigencias y firma (ver internal/auth/service/issuer.go).
+	sess, err := authservice.DefaultIssuer().Issue(tenant, tenantDB, user, authservice.IssueOpts{
+		Kind:        authservice.KindPwd,
+		WithRefresh: true,
+		Legacy:      legacyBranch,
+	})
+	if err != nil {
+		if errors.Is(err, authservice.ErrUserInactive) {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Credenciales inválidas"})
+		}
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	claims := sess.Claims
+	role := sess.Role
+	subView := sess.Subscription
+	enabledModules := claims.Modules
+	permissionKeys := claims.Permissions
+	employeeType := claims.EmployeeType
+	staffID := claims.StaffID
+	permVer := claims.PermVer
+	activeBranchID := claims.ActiveBranchID
 
-	// Consultar BD central UNA SOLA VEZ al login:
-	// módulos habilitados del tenant
-	enabledModules := make([]string, 0)
-	var tms []database.TenantModule
-	database.CentralDB.
-		Where("tenant_id = ? AND enabled = ?", tenant.ID, true).
-		Find(&tms)
-	for _, m := range tms {
-		enabledModules = append(enabledModules, m.ModuleKey)
-	}
-
-	var planID uint
-	subView, _ := saas.GetTenantView(tenant.ID)
-	planID = subView.PlanID
 	subscriptionInfo := fiber.Map{
 		"plan_name":             subView.PlanName,
 		"status":                subView.Status,
@@ -207,45 +115,10 @@ func (h *AuthHandler) LoginAPI(c fiber.Ctx) error {
 		"portal_url":            subView.PortalURL,
 	}
 
-	hasRestaurant := false
-	for _, m := range enabledModules {
-		if m == "restaurant" {
-			hasRestaurant = true
-			break
-		}
-	}
-	employeeType := ""
-	staffID := uint(0)
-	permVer := uint(0)
-	if hasRestaurant {
-		staffSvc := reststaff.New(tenantDB)
-		permVer, _ = staffSvc.GetPermCacheVersion()
-		if st, err := staffSvc.GetStaffByUserID(user.ID); err == nil && st.IsActive {
-			employeeType = st.EmployeeType
-			staffID = st.ID
-		}
-	}
-
-	if !legacyBranch {
-		branch.SyncUserBranchFields(user, role.Name)
-		if user.HomeBranchID == nil || (user.HomeBranchID != nil && *user.HomeBranchID == 0) {
-			if hid, err := branch.ResolveHomeBranchID(tenantDB, user); err == nil {
-				hb := hid
-				user.HomeBranchID = &hb
-				user.BranchID = &hb
-				_ = database.PersistUserBranchFieldsOnLogin(tenantDB, user.ID, hb, branch.CanSwitchBranch(role.Name, user))
-			}
-		}
-	}
-
-	activeBranchID, err := branch.ResolveUserSessionBranchID(tenantDB, user)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
 	canSwitch := branch.UserCanSwitchBranch(tenantDB, role.Name, user)
 	activeBrief, _ := branch.GetBranchBrief(tenantDB, activeBranchID)
 	allowedBranches, _ := branch.ListUserBranchBriefs(tenantDB, user.ID)
-	if branch.IsTenantAdmin(role.Name) {
+	if branch.RoleViewsAll(tenantDB, user.RoleID, role.Name, "") {
 		var all []database.TenantBranch
 		tenantDB.Where("active = ?", true).Order("is_main DESC, name ASC").Find(&all)
 		allowedBranches = make([]branch.BranchBrief, 0, len(all))
@@ -254,54 +127,14 @@ func (h *AuthHandler) LoginAPI(c fiber.Ctx) error {
 		}
 	}
 
-	sessionVersion := uint(0)
-	if !legacyBranch {
-		sessionVersion = user.BranchSessionVersion
-	}
-
-	claims := &middleware.TenantClaims{
-		UserID:               user.ID,
-		Email:                user.Email,
-		RoleID:               user.RoleID,
-		RoleName:             role.Name,
-		TenantSlug:           tenant.Slug,
-		TenantDB:             tenant.DBName,
-		TenantID:             tenant.ID,
-		TenantVersion:        middleware.CurrentTenantJWTVersion(),
-		PlanID:               planID,
-		Modules:              enabledModules,
-		Permissions:          permissionKeys,
-		EmployeeType:         employeeType,
-		AuthMethod:           "pwd",
-		PermVer:              permVer,
-		StaffID:              staffID,
-		Status:               tenant.Status,
-		Type:                 "tenant",
-		ActiveBranchID:       activeBranchID,
-		BranchSessionVersion: sessionVersion,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(config.AppConfig.JWTSecret))
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error generando token"})
-	}
-
 	restPerms := []string(nil)
-	if hasRestaurant && employeeType != "" {
+	if employeeType != "" {
 		restPerms, _ = reststaff.New(tenantDB).ResolvePermissionKeys(tenant.Slug, tenant.ID, user.ID, permVer)
 	}
 
-	// Refresh token (30 días): permite renovar el access token sin volver a pedir contraseña.
-	refreshToken, _ := middleware.BuildTenantRefreshToken(user.ID, tenant.Slug, tenant.DBName, tenant.ID, "pwd")
-
 	return c.JSON(fiber.Map{
-		"token":         tokenString,
-		"refresh_token": refreshToken,
+		"token":         sess.Token,
+		"refresh_token": sess.RefreshToken,
 		"user": fiber.Map{
 			"id":                user.ID,
 			"name":              user.Name,
@@ -314,6 +147,7 @@ func (h *AuthHandler) LoginAPI(c fiber.Ctx) error {
 		},
 		"active_branch":          activeBrief,
 		"can_switch_branch":      canSwitch,
+		"can_view_all":           branch.RoleViewsAll(tenantDB, user.RoleID, role.Name, ""),
 		"allowed_branches":       allowedBranches,
 		"modules":                enabledModules,
 		"permissions":            permissionKeys,
@@ -329,6 +163,9 @@ func (h *AuthHandler) LoginAPI(c fiber.Ctx) error {
 func (h *AuthHandler) RefreshAPI(c fiber.Ctx) error {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
+		// ActiveBranchID: sucursal con la que el cliente venía operando. Se respeta solo si el usuario puede
+		// acceder a ella; si no, se vuelve a la base. Sin esto el refresh devolvía siempre a la sucursal base.
+		ActiveBranchID uint `json:"active_branch_id"`
 	}
 	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
@@ -369,21 +206,68 @@ func (h *AuthHandler) RefreshAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Usuario desactivado", "code": "REFRESH_INVALID"})
 	}
 
-	// El refresh token no lleva impersonated, pero sí auth_method, y solo el acceso
-	// maestro lo emite como master_access. Derivarlo mantiene ambas señales coherentes
-	// si alguna vez se emite refresh para sesiones de soporte (hoy solo lo emite el
-	// login normal, con "pwd", así que aquí siempre resuelve a false).
-	sess, err := authservice.BuildTenantSession(tenant, tenantDB, user, legacyBranch, authservice.TenantSessionOpts{
-		AuthMethod:   claims.AuthMethod,
-		Impersonated: claims.AuthMethod == middleware.AuthMethodMasterAccess,
+	// El refresh token lleva auth_method; el perfil (vigencia, permisos, Impersonated) sale de él en el emisor.
+	// Hoy solo el login normal emite refresh (pwd).
+	sess, err := authservice.DefaultIssuer().Issue(tenant, tenantDB, user, authservice.IssueOpts{
+		Kind:   claims.AuthMethod,
+		Legacy: legacyBranch,
 	})
 	if err != nil {
+		if errors.Is(err, authservice.ErrUserInactive) {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Usuario desactivado", "code": "REFRESH_INVALID"})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo renovar la sesión"})
 	}
 
+	token := sess.Token
+	if want := req.ActiveBranchID; want > 0 && want != sess.Claims.ActiveBranchID && !legacyBranch {
+		if allowedBranchForRefresh(tenantDB, user, sess.Claims.RoleName, want) {
+			if re, rerr := authservice.DefaultIssuer().Reissue(tenantDB, sess.Claims, user, authservice.Change{ActiveBranchID: want}); rerr == nil {
+				token = re.Token
+			}
+		}
+	}
+
 	return c.JSON(fiber.Map{
-		"token":       sess.Token,
+		"token":       token,
 		"modules":     sess.Claims.Modules,
 		"permissions": sess.Claims.Permissions,
 	})
+}
+
+// allowedBranchForRefresh indica si el usuario puede conservar la sucursal wantID al renovar el token: debe estar
+// activa y ser asignada (o el usuario ve todas las sucursales). Nunca confía en lo que pida el cliente.
+func allowedBranchForRefresh(db *gorm.DB, user *database.TenantUser, roleName string, wantID uint) bool {
+	var b database.TenantBranch
+	if err := db.Where("id = ? AND active = ?", wantID, true).First(&b).Error; err != nil {
+		return false
+	}
+	if branch.RoleViewsAll(db, user.RoleID, roleName, "") {
+		return true
+	}
+	ok, err := branch.UserHasBranchAccess(db, user.ID, wantID)
+	return err == nil && ok
+}
+
+// MasterExchangeAPI (POST /api/auth/master-exchange) canjea el código de UN SOLO USO del acceso maestro por el JWT del tenant.
+// Es público (no hay sesión todavía) pero exige contexto de empresa por host y que el código se haya emitido para ESE tenant.
+func (h *AuthHandler) MasterExchangeAPI(c fiber.Ctx) error {
+	tenant, ok := tenantctx.Tenant(c)
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Acceso no permitido sin contexto de empresa"})
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := c.Bind().Body(&body); err != nil || strings.TrimSpace(body.Code) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Código requerido"})
+	}
+	token, redeemed := mastercode.Redeem(c.Context(), tenant.Slug, strings.TrimSpace(body.Code))
+	if !redeemed {
+		database.WriteAuditLog(&database.AuditLog{TenantID: tenant.ID, Action: "master_access_exchange_failed", Entity: "tenant", EntityID: tenant.ID, IPAddress: c.IP()})
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Código inválido o vencido", "code": "MASTER_CODE_INVALID"})
+	}
+	database.WriteAuditLog(&database.AuditLog{TenantID: tenant.ID, Action: "master_access_exchange", Entity: "tenant", EntityID: tenant.ID, IPAddress: c.IP()})
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	return c.JSON(fiber.Map{"token": token})
 }

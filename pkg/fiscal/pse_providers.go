@@ -11,6 +11,8 @@ func ResolvePSEBaseURL(provider string) string {
 	switch p {
 	case "validapse":
 		return "https://app.validapse.com"
+	case "pseapp":
+		return "https://pse.tukifac.com"
 	default:
 		return ""
 	}

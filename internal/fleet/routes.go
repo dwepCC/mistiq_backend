@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"tukifac/internal/fleet/handler"
+	"tukifac/pkg/database"
 	"tukifac/pkg/middleware"
 
 	"github.com/gofiber/fiber/v3"
@@ -12,7 +13,7 @@ import (
 // fleet.{view,manage} (ver internal/users/service/role_service.go); se agrega RequirePermission.
 func RegisterRoutes(api fiber.Router) {
 	h := handler.NewFleetHandler()
-	mod := middleware.RequireModule("billing")
+	mod := middleware.RequireModule(database.ModuleDespatch)
 	view := middleware.RequirePermission("fleet.view")
 	manage := middleware.RequirePermission("fleet.manage")
 

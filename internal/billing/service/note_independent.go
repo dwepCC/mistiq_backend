@@ -1,6 +1,7 @@
 package service
 
 import (
+	"tukifac/pkg/salecurrency"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,6 +163,11 @@ func (s *BillingService) CreateIndependentNote(input IndependentNoteInput) (*dat
 	if currency == "" {
 		currency = "PEN"
 	}
+	// Moneda y TC de la nota: moneda válida (PEN/USD); en USD, el TC guardado del día (sin él la contabilidad la valoraría a 1.00).
+	currency, noteRate, _, rerr := salecurrency.ResolveDocumentRate(currency, nil, now)
+	if rerr != nil {
+		return nil, nil, rerr
+	}
 	docKind := "NOTA_CREDITO"
 	if docType == "08" {
 		docKind = "NOTA_DEBITO"
@@ -179,6 +185,7 @@ func (s *BillingService) CreateIndependentNote(input IndependentNoteInput) (*dat
 		TaxAmount:               taxAmount,
 		Total:                   total,
 		Currency:                currency,
+		ExchangeRate:            noteRate,
 		Notes:                   reason,
 		NoteReasonCode:          reasonCode,
 		Status:                  "paid",

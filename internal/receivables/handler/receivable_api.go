@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"tukifac/internal/receivables/service"
+	"tukifac/internal/sales/branchguard"
 	"tukifac/pkg/branch"
 
 	"github.com/gofiber/fiber/v3"
@@ -86,6 +87,16 @@ func (h *ReceivableHandler) CollectAPI(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
+	// Cobrar es una escritura: la venta y la caja destino (si se indica) deben ser de la sucursal
+	// activa. Antes solo la caja protegía indirectamente.
+	if err := branchguard.SaleWritable(c, tenantDB(c), uint(saleID)); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "venta no encontrada"})
+	}
+	if body.CashSessionID != nil && *body.CashSessionID > 0 {
+		if err := branchguard.SessionWritable(c, tenantDB(c), *body.CashSessionID); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "sesión de caja no encontrada"})
+		}
+	}
 	body.UserID = uid(c)
 	if err := service.NewReceivableService(tenantDB(c)).Collect(uint(saleID), body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
@@ -102,6 +113,11 @@ func (h *ReceivableHandler) ConfirmBNAPI(c fiber.Ctx) error {
 	var body service.ConfirmBNInput
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+	// Sin esta guarda cualquier usuario con receivables.confirm_bn confirmaba la detracción de una venta
+	// de otra sucursal.
+	if err := branchguard.SaleWritable(c, tenantDB(c), uint(saleID)); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "venta no encontrada"})
 	}
 	row, err := service.NewReceivableService(tenantDB(c)).ConfirmBN(uint(saleID), body)
 	if err != nil {

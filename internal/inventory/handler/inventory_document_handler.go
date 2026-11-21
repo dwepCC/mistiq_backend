@@ -78,6 +78,9 @@ func (h *InventoryHandler) DocumentGetAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	if ok, gerr := guardDocument(c, uint(id), false); !ok {
+		return gerr
+	}
 	doc, lines, err := documentService(c).GetInventoryDocument(uint(id))
 	if err != nil {
 		code, msg := mapDocumentError(err)
@@ -149,6 +152,9 @@ func (h *InventoryHandler) DocumentUpdateAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	if ok, gerr := guardDocument(c, uint(id), true); !ok {
+		return gerr
+	}
 	var body struct {
 		OperationTypeID uint   `json:"operation_type_id"`
 		DocumentDate    string `json:"document_date"`
@@ -201,6 +207,9 @@ func (h *InventoryHandler) DocumentConfirmAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	if ok, gerr := guardDocument(c, uint(id), true); !ok {
+		return gerr
+	}
 	err = documentService(c).ConfirmInventoryDocument(uint(id), userID(c))
 	if err != nil {
 		code, msg := mapDocumentError(err)
@@ -214,6 +223,9 @@ func (h *InventoryHandler) DocumentVoidAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if ok, gerr := guardDocument(c, uint(id), true); !ok {
+		return gerr
 	}
 	err = documentService(c).VoidInventoryDocument(uint(id), userID(c))
 	if err != nil {

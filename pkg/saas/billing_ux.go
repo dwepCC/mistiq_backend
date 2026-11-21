@@ -17,6 +17,11 @@ type BillingContextView struct {
 	CurrentPaymentTone  string  `json:"current_payment_tone"` // success, warning, danger, info, muted
 	HasRealDebt         bool    `json:"has_real_debt"`
 	DisplayDebtAmount   float64 `json:"display_debt_amount,omitempty"`
+	// ReconnectionFee: cargo configurado en Cobros SaaS si la cuenta llega a suspenderse (ver
+	// ChargeReconnectionFee). Se expone siempre, ANTES de suspender — para avisar al tenant en
+	// los recordatorios previos y que no lo descubra recién cuando ya se suspendió y le toca
+	// pagarlo.
+	ReconnectionFee float64 `json:"reconnection_fee"`
 	// PaymentDueDate y PaymentDaysLeft describen el plazo del cobro en curso (no la vigencia
 	// del plan): días que quedan para pagarlo antes de que se dé por vencido. Negativo = el
 	// plazo ya se agotó.
@@ -47,6 +52,7 @@ func BuildBillingContext(sub TenantSubscriptionView, cfg PlatformSettings, tenan
 		ReminderDays:    append([]int(nil), cfg.ReminderDays...),
 		MaxReminderDays: maxRem,
 		UrgencyTier:     "normal",
+		ReconnectionFee: cfg.ReconnectionFee,
 	}
 
 	var plan database.SaasPlan
@@ -190,6 +196,17 @@ func resolvePaymentUX(sub TenantSubscriptionView, cfg PlatformSettings, hasDebt 
 	return tier, "Pagado", "success"
 }
 
+// reconnectionFeeWarning texto a sumar en los avisos ANTES de suspender, para que el tenant
+// sepa de antemano que, si no paga a tiempo, la suspensión trae un cargo extra — y no se
+// sorprenda recién cuando el monto a pagar ya incluye la reconexión (ver ChargeReconnectionFee).
+// Vacío si no hay cargo configurado (reconnection_fee = 0, admin lo desactivó).
+func reconnectionFeeWarning(ctx BillingContextView) string {
+	if ctx.ReconnectionFee <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Si se suspende, reactivarla cuesta S/ %.2f adicionales.", ctx.ReconnectionFee)
+}
+
 func resolveStatusBanner(sub TenantSubscriptionView, ctx BillingContextView) (show bool, variant, msg string) {
 	switch ctx.UrgencyTier {
 	case "blocked":
@@ -204,7 +221,7 @@ func resolveStatusBanner(sub TenantSubscriptionView, ctx BillingContextView) (sh
 		}
 		return true, "danger", "Tu cuenta está suspendida. Contacta a soporte o envía tu comprobante."
 	case "grace":
-		return true, "warning", "Periodo de gracia: realiza tu pago para evitar la suspensión."
+		return true, "warning", "Periodo de gracia: realiza tu pago para evitar la suspensión." + reconnectionFeeWarning(ctx)
 	case "overdue":
 		// Vencido ya implica acceso restringido (CanOperate lo niega): decirlo evita que el
 		// tenant crea que solo es un recordatorio y descubra el corte al intentar vender.
@@ -216,28 +233,28 @@ func resolveStatusBanner(sub TenantSubscriptionView, ctx BillingContextView) (sh
 		return true, "danger", "Tu suscripción venció y el acceso quedó restringido. Regulariza tu pago para reactivarlo."
 	case "reminder":
 		if sub.DaysUntilExpiry > 0 {
-			return true, "warning", fmt.Sprintf("Tu plan vence en %d día(s). Programa tu renovación.", sub.DaysUntilExpiry)
+			return true, "warning", fmt.Sprintf("Tu plan vence en %d día(s). Programa tu renovación.", sub.DaysUntilExpiry) + reconnectionFeeWarning(ctx)
 		}
 		if ctx.HasRealDebt {
-			return true, "warning", fmt.Sprintf("Tienes un pago pendiente de S/ %.2f.", ctx.DisplayDebtAmount)
+			return true, "warning", fmt.Sprintf("Tienes un pago pendiente de S/ %.2f.", ctx.DisplayDebtAmount) + reconnectionFeeWarning(ctx)
 		}
-		return true, "warning", "Renovación próxima."
+		return true, "warning", "Renovación próxima." + reconnectionFeeWarning(ctx)
 	case "payment_due":
 		// Habla del plazo del cobro, no de la vigencia del plan: son cosas distintas y el
 		// tenant necesita saber cuánto le queda para pagar, no cuándo vence su suscripción.
 		if ctx.PaymentDaysLeft > 0 {
 			return true, "warning", fmt.Sprintf(
 				"Tienes un pago pendiente de S/ %.2f. Cuentas con %d día(s) para regularizarlo.",
-				ctx.DisplayDebtAmount, ctx.PaymentDaysLeft)
+				ctx.DisplayDebtAmount, ctx.PaymentDaysLeft) + reconnectionFeeWarning(ctx)
 		}
 		if ctx.PaymentDaysLeft == 0 {
 			return true, "warning", fmt.Sprintf(
 				"Tienes un pago pendiente de S/ %.2f. Hoy vence el plazo para regularizarlo.",
-				ctx.DisplayDebtAmount)
+				ctx.DisplayDebtAmount) + reconnectionFeeWarning(ctx)
 		}
 		return true, "danger", fmt.Sprintf(
 			"El plazo para pagar S/ %.2f venció. Regulariza tu pago para evitar la suspensión.",
-			ctx.DisplayDebtAmount)
+			ctx.DisplayDebtAmount) + reconnectionFeeWarning(ctx)
 	default:
 		return false, "success", "Tu suscripción está activa."
 	}

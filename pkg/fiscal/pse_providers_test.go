@@ -14,6 +14,12 @@ func TestResolvePSEBaseURL_sunatNotPseProvider(t *testing.T) {
 	}
 }
 
+func TestResolvePSEBaseURL_pseapp(t *testing.T) {
+	if got := ResolvePSEBaseURL("pseapp"); got != "https://pse.tukifac.com" {
+		t.Fatalf("pseapp URL = %q", got)
+	}
+}
+
 func TestNormalizePSEProvider_defaults(t *testing.T) {
 	if got := NormalizePSEProvider(""); got != "validapse" {
 		t.Fatalf("empty -> validapse, got %q", got)

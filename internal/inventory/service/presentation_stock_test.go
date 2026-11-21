@@ -65,3 +65,24 @@ func TestGetPresentationStockByProduct_breaksDownByPresentation(t *testing.T) {
 		}
 	})
 }
+
+// Un producto con control de stock y sin fila de stock (stock 0) no se puede transferir:
+// la visibilidad no implica existencias.
+func TestTransfer_ProductWithoutStockRowRejected(t *testing.T) {
+	db := setupKardexTestDB(t)
+	dest := database.TenantBranch{Name: "Destino", Active: true}
+	db.Create(&dest)
+	var mainBranch database.TenantBranch
+	db.Where("is_main = ?", true).First(&mainBranch)
+	p := database.TenantProduct{Code: "SIN-FILA", Name: "Sin fila", Type: "product", Unit: "NIU", ManageStock: true, Active: true}
+	db.Create(&p)
+
+	if err := NewInventoryService(db).Transfer(p.ID, mainBranch.ID, dest.ID, 1, 0, ""); err == nil {
+		t.Fatal("la transferencia sin stock debía rechazarse")
+	}
+	var n int64
+	db.Model(&database.TenantProductStock{}).Where("product_id = ? AND quantity < 0", p.ID).Count(&n)
+	if n != 0 {
+		t.Fatal("no debe dejar stock negativo")
+	}
+}

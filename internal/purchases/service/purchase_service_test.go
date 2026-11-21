@@ -73,7 +73,7 @@ func TestCatalogPriceUpdates_SkipsPurchasePriceWhenUnitCostNotPositive(t *testin
 		updates, err := catalogPriceUpdates(PurchaseItemInput{
 			UnitCost:        cost,
 			UpdateSalePrice: false,
-		})
+		}, cost)
 		if err != nil {
 			t.Fatalf("unit_cost=%v: %v", cost, err)
 		}
@@ -88,7 +88,7 @@ func TestCatalogPriceUpdates_IncludesSalePriceWhenUnitCostZero(t *testing.T) {
 		UnitCost:        0,
 		UpdateSalePrice: true,
 		NewSalePrice:    25,
-	})
+	}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestCatalogPriceUpdates_RejectsInvalidSalePrice(t *testing.T) {
 		UnitCost:        10,
 		UpdateSalePrice: true,
 		NewSalePrice:    0,
-	})
+	}, 10)
 	if err == nil {
 		t.Fatal("expected error")
 	}

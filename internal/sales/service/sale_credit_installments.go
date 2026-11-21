@@ -42,6 +42,27 @@ func sumDirectPaymentsExclSpecial(payments []PaymentInput) float64 {
 	return money.RoundDisplay(sum)
 }
 
+// sumNonCashDirectPayments suma los pagos directos (excluye detracción/crédito, igual que
+// sumDirectPaymentsExclSpecial) que NO son efectivo — usado para bloquear el vuelto vía métodos
+// electrónicos (ver validación en SaleService.Create): el vuelto solo puede salir de efectivo,
+// así que ningún método no-efectivo puede superar por sí solo el total a pagar de la venta.
+func sumNonCashDirectPayments(payments []PaymentInput) float64 {
+	var sum float64
+	for _, p := range payments {
+		if p.Amount <= 0 || p.Method == "" {
+			continue
+		}
+		if taxpayment.IsDetractionCode(p.Method) || paymentcondition.IsCreditCode(p.Method) {
+			continue
+		}
+		if money.IsCashMethod(p.Method) {
+			continue
+		}
+		sum += p.Amount
+	}
+	return money.RoundDisplay(sum)
+}
+
 func sumDirectPayments(payments []PaymentInput) float64 {
 	var sum float64
 	for _, p := range payments {

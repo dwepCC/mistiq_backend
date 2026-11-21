@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
 	"tukifac/pkg/tax"
 
 	"gorm.io/gorm"
@@ -100,6 +101,12 @@ type PrecuentaPayload struct {
 	Subtotal      float64             `json:"subtotal"`
 	TaxAmount     float64             `json:"tax_amount"`
 	Total         float64             `json:"total"`
+	// Recargo al consumo (si el negocio lo tiene activado): estimado sobre el valor de venta sin IGV, para que la precuenta cuadre con lo que se
+	// cobrará. Total NO lo incluye; TotalWithServiceCharge sí. El cobro real lo recalcula el servidor.
+	ServiceChargeEnabled   bool    `json:"service_charge_enabled"`
+	ServiceChargeRate      float64 `json:"service_charge_rate,omitempty"`
+	ServiceChargeAmount    float64 `json:"service_charge_amount,omitempty"`
+	TotalWithServiceCharge float64 `json:"total_with_service_charge,omitempty"`
 	Lines         []PrecuentaLine     `json:"lines"`
 }
 
@@ -499,7 +506,20 @@ func (s *RestaurantService) GetPrecuenta(sessionID uint) (*PrecuentaPayload, err
 		total = detail.TotalAmount
 		subtotal = detail.TotalAmount
 	}
+	scEnabled, scRate := tax.LoadServiceChargeFromDB(s.db)
+	if !tax.ValidServiceChargeRate(scRate) {
+		scEnabled, scRate = false, 0
+	}
+	var scAmount, totalWithSC float64
+	if scEnabled && len(lines) > 0 {
+		scAmount = tax.ServiceChargeAmount(subtotal, scRate)
+		totalWithSC = money.RoundSunat(total + scAmount)
+	}
 	return &PrecuentaPayload{
+		ServiceChargeEnabled:   scEnabled,
+		ServiceChargeRate:      scRate,
+		ServiceChargeAmount:    scAmount,
+		TotalWithServiceCharge: totalWithSC,
 		OrderCode:         detail.OrderCode,
 		OrderType:         detail.OrderType,
 		TableName:         detail.TableName,

@@ -14,6 +14,7 @@ type testSale struct {
 	Status               string
 	SaleOrigin           string
 	IssuedFromNotaSaleID *uint
+	DeletedAt            gorm.DeletedAt
 }
 
 func (testSale) TableName() string { return "tenant_sales" }

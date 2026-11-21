@@ -84,6 +84,16 @@ func (s *BillingService) applyRetentionPrefillFromPurchase(input *CreateRetentio
 				Fecha:   p.IssueDate.Format("2006-01-02"),
 			}},
 		}
+		// Compra en dólares con TC propio: la retención usa ese mismo TC (el del comprobante), no uno consultado
+		// por fecha que podría diferir.
+		if moneda == salecurrency.CurrencyUSD && p.ExchangeRate != nil && *p.ExchangeRate > 0 {
+			detail.TipoCambio = &retentionExchangeInput{
+				MonedaRef: salecurrency.CurrencyUSD,
+				MonedaObj: salecurrency.CurrencyPEN,
+				Factor:    *p.ExchangeRate,
+				Fecha:     issueDate,
+			}
+		}
 		input.Details = []RetentionDetailInput{detail}
 	}
 	return nil

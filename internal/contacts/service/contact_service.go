@@ -1,6 +1,7 @@
 package service
 
 import (
+	"tukifac/pkg/branchscope"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,9 @@ type ContactListParams struct {
 	Query     string
 	Type      string
 	DocNumber string
+	// TypesIn restringe por permisos (customers.* / suppliers.*): nil = sin restricción;
+	// vacío = no ve nada. Se combina con Type.
+	TypesIn []string
 	// Status: "active" (default), "inactive" o "all"
 	Status string
 }
@@ -36,6 +40,9 @@ func (s *ContactService) buildListQuery(params ContactListParams) *gorm.DB {
 	}
 	if params.Type != "" {
 		q = q.Where("type = ? OR type = 'both'", params.Type)
+	}
+	if params.TypesIn != nil {
+		q = q.Where("type IN ?", params.TypesIn)
 	}
 	if params.DocNumber != "" {
 		q = q.Where("doc_number = ?", params.DocNumber)
@@ -101,6 +108,8 @@ type ContactInput struct {
 	TradeName                       string
 	Address                         string
 	Ubigeo                          string
+	// Country: país ISO alfa-2 de un cliente extranjero; vacío o PE = Perú.
+	Country                         string
 	Phone                           string
 	Email                           string
 	PhotoURL                        string
@@ -111,6 +120,20 @@ type ContactInput struct {
 	EsAgenteDePercepcion            *bool
 	EsAgenteDePercepcionCombustible *bool
 	EsBuenContribuyente             *bool
+}
+
+// NormalizeCountry deja el país en ISO alfa-2 en mayúsculas; lo que no es un código válido, y el Perú (el valor por defecto), quedan vacíos.
+func NormalizeCountry(raw string) string {
+	c := strings.ToUpper(strings.TrimSpace(raw))
+	if len(c) != 2 || c == "PE" {
+		return ""
+	}
+	for _, r := range c {
+		if r < 'A' || r > 'Z' {
+			return ""
+		}
+	}
+	return c
 }
 
 func validateContactPersons(persons []ContactPersonInput) error {
@@ -235,6 +258,7 @@ func (s *ContactService) Create(input ContactInput) (*database.TenantContact, er
 		TradeName:                       input.TradeName,
 		Address:                         addr,
 		Ubigeo:                          ubi,
+		Country:                         NormalizeCountry(input.Country),
 		Phone:                           input.Phone,
 		Email:                           input.Email,
 		PhotoURL:                        strings.TrimSpace(input.PhotoURL),
@@ -290,6 +314,7 @@ func (s *ContactService) Update(id uint, input ContactInput) error {
 		"trade_name":                          input.TradeName,
 		"address":                             addr,
 		"ubigeo":                              ubi,
+		"country":                             NormalizeCountry(input.Country),
 		"phone":                               input.Phone,
 		"email":                               input.Email,
 		"photo_url":                           strings.TrimSpace(input.PhotoURL),
@@ -319,13 +344,53 @@ func (s *ContactService) UpdatePhotoURL(id uint, photoURL string) error {
 	return s.db.Model(&database.TenantContact{}).Where("id = ?", id).Update("photo_url", photoURL).Error
 }
 
+// ContactInUseError el contacto tiene documentos asociados: eliminarlo los dejaría sin su cliente.
+type ContactInUseError struct{ Documents int64 }
+
+func (e *ContactInUseError) Error() string {
+	return fmt.Sprintf("Este contacto tiene %d documento(s) asociado(s) (ventas, cotizaciones, compras, etc.). "+
+		"No se elimina para no alterar sus comprobantes; desactívelo para que deje de aparecer en los buscadores.", e.Documents)
+}
+
+// contactReferencingTables tablas del tenant con documentos o movimientos ligados a un contacto.
+var contactReferencingTables = []string{
+	"tenant_sales", "tenant_quotations", "tenant_purchases", "tenant_memberships",
+	"tenant_sale_prepayment_vouchers", "tenant_table_sessions", "tenant_cash_movements", "tenant_bank_movements",
+}
+
+// CountLinkedDocuments cuenta los registros (incluso anulados) que apuntan al contacto.
+func (s *ContactService) CountLinkedDocuments(id uint) (int64, error) {
+	// Regla GLOBAL: un contacto es del tenant; se cuentan los documentos de TODAS las sucursales (con el scope activo no se
+	// verían los de otras sucursales y se podría eliminar un contacto usado en ellas).
+	sys := branchscope.System(s.db, "contacts: documentos vinculados de todas las sucursales")
+	var total int64
+	for _, table := range contactReferencingTables {
+		if !sys.Migrator().HasTable(table) {
+			continue
+		}
+		var n int64
+		if err := sys.Table(table).Where("contact_id = ?", id).Count(&n).Error; err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
 func (s *ContactService) Delete(id uint) error {
 	var c database.TenantContact
 	if err := s.db.First(&c, id).Error; err != nil {
 		return err
 	}
+	linked, err := s.CountLinkedDocuments(id)
+	if err != nil {
+		return err
+	}
+	if linked > 0 {
+		return &ContactInUseError{Documents: linked}
+	}
 	oldPhoto := strings.TrimSpace(c.PhotoURL)
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err = s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("contact_id = ?", id).Delete(&database.TenantContactPerson{}).Error; err != nil {
 			return err
 		}

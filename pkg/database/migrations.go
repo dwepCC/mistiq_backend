@@ -291,6 +291,10 @@ type SaasSubscription struct {
 	// encadena al fin del período anterior mientras start_date es hoy, así que esa distancia
 	// resulta mayor que los meses realmente contratados y el cobro salía inflado.
 	BilledMonths int `gorm:"default:0" json:"billed_months"`
+	// BonusMonths meses de CORTESÍA que se agregaron a la vigencia sin cobrarse (p. ej. un plan de
+	// 12 meses con 2 de regalo: BilledMonths=12, BonusMonths=2, vigencia de 14 meses). Solo
+	// documenta y muestra el regalo: el cobro sigue saliendo de BilledMonths.
+	BonusMonths int `gorm:"default:0" json:"bonus_months"`
 	// Descuento pactado para esta suscripción: se aplica a cada cobro que genere.
 	// Vive aquí y no en el ciclo porque es parte del acuerdo con el cliente (típicamente
 	// a cambio de contratar varios meses por adelantado).
@@ -431,6 +435,8 @@ func MigrateCentral() error {
 		&SARolePermission{},
 		&SAUserRoleMigrationBackup{},
 		&SAMigrationLock{},
+		&TenantFiscalDaily{},
+		&TenantFiscalHealth{},
 	)
 }
 
@@ -479,11 +485,28 @@ func MigrateModuleKeySaasToMemberships() error {
 // moduleCodeMeta: hechos de código de un módulo (si existe/usable y sus dependencias). Es la
 // fuente de verdad de implemented/requires/category; name/description/icon los edita el superadmin.
 type moduleCodeMeta struct {
-	Key         string
+	Key string
+	// Name, Description e Icon solo se usan al CREAR el módulo en BD (después los edita el superadmin).
+	Name        string
+	Description string
+	Icon        string
 	Implemented bool
 	Requires    string // CSV de keys de las que depende (no se fusionan, se venden aparte)
 	Category    string
 	SortOrder   int
+}
+
+// Módulos que separan subfunciones de `billing` (antes iban incluidas en él).
+const (
+	ModuleDespatch     = "despatch"      // guías de remisión + flota (transportistas, conductores, vehículos)
+	ModuleAdvancedDocs = "advanced_docs" // retenciones, percepciones y reversiones
+)
+
+func moduleDisplayName(m moduleCodeMeta) string {
+	if m.Name != "" {
+		return m.Name
+	}
+	return m.Key
 }
 
 // moduleCodeCatalog: todos los módulos conocidos por el código. Los implemented=false se ocultan
@@ -496,20 +519,23 @@ var moduleCodeCatalog = []moduleCodeMeta{
 	{Key: "purchases", Implemented: true, Requires: "products,cashbank", Category: "core", SortOrder: 5},
 	{Key: "contacts", Implemented: true, Requires: "", Category: "core", SortOrder: 6},
 	{Key: "billing", Implemented: true, Requires: "", Category: "core", SortOrder: 7},
-	{Key: "restaurant", Implemented: true, Requires: "cashbank", Category: "vertical", SortOrder: 8},
-	{Key: "memberships", Implemented: true, Requires: "sales,cashbank", Category: "vertical", SortOrder: 9},
-	{Key: "ecommerce", Implemented: true, Requires: "products,sales", Category: "vertical", SortOrder: 10},
+	{Key: "restaurant", Implemented: true, Requires: "cashbank", Category: "vertical", SortOrder: 10},
+	{Key: "memberships", Implemented: true, Requires: "sales,cashbank", Category: "vertical", SortOrder: 11},
+	{Key: "ecommerce", Implemented: true, Requires: "products,sales", Category: "vertical", SortOrder: 12},
 	// No implementados (ocultos al tenant hasta que exista el código):
-	{Key: "hotel", Implemented: false, Category: "vertical", SortOrder: 11},
-	{Key: "clinic", Implemented: false, Category: "vertical", SortOrder: 12},
-	{Key: "transport", Implemented: false, Category: "vertical", SortOrder: 13},
-	{Key: "manufacturing", Implemented: false, Category: "vertical", SortOrder: 14},
-	{Key: "hr", Implemented: false, Category: "avanzado", SortOrder: 15},
-	{Key: "accounting", Implemented: false, Category: "avanzado", SortOrder: 16},
-	{Key: "bi", Implemented: false, Category: "avanzado", SortOrder: 17},
-	{Key: "fixedassets", Implemented: false, Category: "avanzado", SortOrder: 18},
-	{Key: "documents", Implemented: false, Category: "avanzado", SortOrder: 19},
-	{Key: "support", Implemented: false, Category: "avanzado", SortOrder: 20},
+	{Key: "hotel", Implemented: false, Category: "vertical", SortOrder: 13},
+	{Key: "clinic", Implemented: false, Category: "vertical", SortOrder: 14},
+	{Key: "transport", Implemented: false, Category: "vertical", SortOrder: 15},
+	{Key: "manufacturing", Implemented: false, Category: "vertical", SortOrder: 16},
+	{Key: "hr", Implemented: false, Category: "avanzado", SortOrder: 17},
+	{Key: "accounting", Name: "Contabilidad", Description: "Registros de ventas y compras, formatos para sistemas contables, libro mayor y SIRE", Icon: "file-text", Implemented: true, Requires: "sales,purchases", Category: "avanzado", SortOrder: 18},
+	{Key: "bi", Implemented: false, Category: "avanzado", SortOrder: 19},
+	{Key: "fixedassets", Implemented: false, Category: "avanzado", SortOrder: 20},
+	{Key: "documents", Implemented: false, Category: "avanzado", SortOrder: 21},
+	{Key: "support", Implemented: false, Category: "avanzado", SortOrder: 22},
+	// Subfunciones de facturación que se venden aparte (dependen de `billing`).
+	{Key: ModuleDespatch, Name: "Guías de remisión y flota", Description: "Guías de remisión remitente y transportista, con transportistas, conductores y vehículos", Icon: "truck", Implemented: true, Requires: "billing", Category: "avanzado", SortOrder: 8},
+	{Key: ModuleAdvancedDocs, Name: "Documentos avanzados SUNAT", Description: "Retenciones, percepciones y reversiones", Icon: "file-text", Implemented: true, Requires: "billing", Category: "avanzado", SortOrder: 9},
 }
 
 // ImplementedModuleKeys: set de módulos usables (implementados). Fuente para filtrar lo que ve
@@ -567,8 +593,8 @@ func SyncModuleCodeMetadata() error {
 		err := CentralDB.Where("`key` = ?", m.Key).First(&existing).Error
 		if err == gorm.ErrRecordNotFound {
 			if e := CentralDB.Create(&SaasModule{
-				Key: m.Key, Name: m.Key, Implemented: m.Implemented,
-				Requires: m.Requires, Category: m.Category, SortOrder: m.SortOrder, Active: true,
+				Key: m.Key, Name: moduleDisplayName(m), Description: m.Description, Icon: m.Icon,
+				Implemented: m.Implemented, Requires: m.Requires, Category: m.Category, SortOrder: m.SortOrder, Active: true,
 			}).Error; e != nil {
 				return e
 			}
@@ -721,6 +747,13 @@ func SeedCentral() error {
 		return err
 	}
 	_ = SeedUbigeoDistritos(CentralDB, UbigeoDistritosCSVPath())
+	// Provincias y distritos que faltaban o se crearon después de la carga inicial (la siembra de arriba solo corre con la tabla vacía).
+	if err := UpsertUbigeoRegionesProvincias(CentralDB); err != nil {
+		return err
+	}
+	if _, err := UpsertUbigeoDistritos(CentralDB); err != nil {
+		return err
+	}
 
 	// Ajustes centrales (una sola fila)
 	var ajusteCount int64
@@ -798,16 +831,21 @@ type TenantUserBranch struct {
 func (TenantUserBranch) TableName() string { return "tenant_user_branches" }
 
 type TenantBranch struct {
-	ID                 uint           `gorm:"primaryKey" json:"id"`
-	Name               string         `gorm:"size:255;not null" json:"name"`
-	Address            string         `gorm:"size:255" json:"address"`
-	Phone              string         `gorm:"size:50" json:"phone"`
-	FiscalDomicileCode string         `gorm:"size:20" json:"fiscal_domicile_code"`
-	IsMain             bool           `gorm:"default:false" json:"is_main"`
-	Active             bool           `gorm:"default:true" json:"active"`
-	CreatedAt          time.Time      `json:"created_at"`
-	UpdatedAt          time.Time      `json:"updated_at"`
-	DeletedAt          gorm.DeletedAt `gorm:"index" json:"-"`
+	ID                 uint   `gorm:"primaryKey" json:"id"`
+	Name               string `gorm:"size:255;not null" json:"name"`
+	Address            string `gorm:"size:255" json:"address"`
+	Phone              string `gorm:"size:50" json:"phone"`
+	FiscalDomicileCode string `gorm:"size:20" json:"fiscal_domicile_code"`
+	IsMain             bool   `gorm:"default:false" json:"is_main"`
+	Active             bool   `gorm:"default:true" json:"active"`
+	// Logo propio de la sucursal (opcional). Vacío = se usa el logo global de
+	// TenantCompanyConfig.LogoURL — ver pkg/branchlogo.ResolveURL, el único punto que decide
+	// esta cadena de fallback (mismo patrón que TenantProductSaleUnitBranchPrice para precios).
+	LogoURL     string         `gorm:"type:longtext" json:"logo_url"`
+	LogoDataURL string         `gorm:"-" json:"logo_data_url,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 type TenantCompanyConfig struct {
@@ -850,6 +888,30 @@ type TenantCompanyConfig struct {
 	TermsAndConditions     string     `gorm:"type:text" json:"terms_and_conditions"`
 	// Preferencia global: incluir términos en comprobantes/NV/cotizaciones nuevas.
 	ShowTermsConditions bool `gorm:"default:false" json:"show_terms_conditions"`
+	// ExportsEnabled: la empresa factura exportación de servicios a clientes del exterior (operaciones 0201/0202/0208). Apagado por
+	// defecto: exportar sin serlo tiene consecuencias tributarias, así que se activa a propósito en Ajustes.
+	ExportsEnabled bool `gorm:"column:exports_enabled;default:false" json:"exports_enabled"`
+	// Solo nota de venta (SUNAT 00): mostrar razón social del emisor en el impreso.
+	// Default true = comportamiento previo (siempre visible). Si se oculta, se muestra
+	// nombre comercial en su lugar; sin nombre comercial, la razón social se sigue
+	// mostrando igual (nunca queda el comprobante sin identificar al emisor).
+	ShowBusinessNameOnSaleNote bool `gorm:"default:true" json:"show_business_name_on_sale_note"`
+	// Solo nota de venta (SUNAT 00): discriminar Op. gravadas / IGV en el impreso. Default true =
+	// comportamiento previo. Si se desactiva, la nota de venta muestra solo el total (los descuentos,
+	// si los hay, se siguen mostrando). No afecta boleta ni factura.
+	ShowIgvBreakdownOnSaleNote bool `gorm:"default:true" json:"show_igv_breakdown_on_sale_note"`
+	// Recargo al consumo (DL 25988, 5.ª disp. compl.): lo activa el propio tenant (hoteles/restaurantes). Es un % sobre el valor de venta
+	// (sin IGV) que no integra la base del IGV y se reparte entre los trabajadores. Tope legal 13 %. Default apagado.
+	ServiceChargeEnabled bool    `gorm:"column:service_charge_enabled;default:false" json:"service_charge_enabled"`
+	ServiceChargeRate    float64 `gorm:"column:service_charge_rate;type:decimal(5,2);default:10" json:"service_charge_rate"`
+	// Tamaño del logo en TODOS los comprobantes (factura/boleta/NV), separado por formato
+	// porque ticket (rollo térmico) y A4 tienen proporciones muy distintas.
+	// Valores: pequeno | mediano | grande.
+	LogoSizeTicket string `gorm:"size:10;default:'mediano'" json:"logo_size_ticket"`
+	LogoSizeA4     string `gorm:"size:10;default:'mediano'" json:"logo_size_a4"`
+	// Diseño del PDF A4 de comprobantes (slug: modern | classic | …). Es solo presentación: lo dibuja el
+	// frontend. Default 'modern' = el diseño vigente; ver pkg/receiptdesign y la migración v164.
+	PdfA4Design string `gorm:"size:30;not null;default:'modern'" json:"pdf_a4_design"`
 	// QR de pago Yape/Plin en comprobantes locales (PDF ticket / A4)
 	WalletProvider     string `gorm:"size:20" json:"wallet_provider"` // yape | plin
 	WalletPhone        string `gorm:"size:30" json:"wallet_phone"`
@@ -893,6 +955,8 @@ type TenantContact struct {
 	TradeName                       string         `gorm:"size:255" json:"trade_name"`
 	Address                         string         `gorm:"size:255" json:"address"`
 	Ubigeo                          string         `gorm:"size:6;index" json:"ubigeo"` // código 6 dígitos del distrito (SUNAT)
+	// Country: país (ISO 3166-1 alfa-2) de un cliente extranjero; vacío = Perú. Lo usa la exportación de servicios (el hospedaje toma de aquí el país del pasaporte).
+	Country                         string         `gorm:"column:country;size:2" json:"country"`
 	Phone                           string         `gorm:"size:50" json:"phone"`
 	Email                           string         `gorm:"size:255" json:"email"`
 	PhotoURL                        string         `gorm:"size:500" json:"photo_url"`
@@ -924,15 +988,22 @@ type TenantContactPerson struct {
 }
 
 type TenantCategory struct {
-	ID          uint           `gorm:"primaryKey" json:"id"`
-	Name        string         `gorm:"size:255;not null" json:"name"`
-	Description string         `gorm:"size:255" json:"description"`
-	ParentID    *uint          `gorm:"index" json:"parent_id"`
-	SortOrder   int            `gorm:"default:0;index" json:"sort_order"`
-	Active      bool           `gorm:"default:true" json:"active"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	Name        string `gorm:"size:255;not null" json:"name"`
+	Description string `gorm:"size:255" json:"description"`
+	ParentID    *uint  `gorm:"index" json:"parent_id"`
+	SortOrder   int    `gorm:"default:0;index" json:"sort_order"`
+	// ImageURL imagen de la categoría (se muestra en la tienda virtual).
+	ImageURL string `gorm:"size:255" json:"image_url"`
+	// BranchID (V192): sucursal a la que pertenece la categoría. NULL = todas las sucursales (lo de siempre: toda categoría
+	// anterior a V192 queda así, sin backfill, y cualquier camino que la cree sin indicar sucursal también). Con valor = solo
+	// esa sucursal. Regla única en pkg/categorybranch. No se registra en el scope global de sucursal: el filtro (NULL o la
+	// sucursal) lo aplica ese paquete.
+	BranchID  *uint          `gorm:"index" json:"branch_id"`
+	Active    bool           `gorm:"default:true" json:"active"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // TenantBrand marca de producto (mismo rol que TenantCategory, sin jerarquía).
@@ -986,17 +1057,21 @@ type TenantProduct struct {
 	CategoryID  *uint  `gorm:"index" json:"category_id"`
 	BrandID     *uint  `gorm:"index" json:"brand_id"`
 	Code        string `gorm:"size:100;not null;index" json:"code"`
-	Name        string `gorm:"size:255;not null" json:"name"`
+	Name        string `gorm:"size:500;not null" json:"name"`
 	Description string `gorm:"type:text" json:"description"`
 	Type        string `gorm:"size:20;default:'product'" json:"type"` // product, service
 	// Unit: código SUNAT catálogo N°03 denormalizado desde UnitID.TenantUnit.Code — no se edita
 	// directo, se sincroniza al guardar (ver ProductService.resolveUnitReference). Se conserva como
 	// string porque ventas/cotizaciones/compras/facturación/impresión ya lo leen así en decenas de
 	// lugares; UnitID es la fuente de verdad para la UI (selects por ID, no texto libre).
-	Unit               string  `gorm:"size:50;default:'NIU'" json:"unit"`
-	UnitID             *uint   `gorm:"index" json:"unit_id"`
-	SalePrice          float64 `gorm:"type:decimal(15,2);not null" json:"sale_price"`
-	PurchasePrice      float64 `gorm:"type:decimal(15,2)" json:"purchase_price"`
+	Unit      string  `gorm:"size:50;default:'NIU'" json:"unit"`
+	UnitID    *uint   `gorm:"index" json:"unit_id"`
+	SalePrice float64 `gorm:"type:decimal(15,2);not null" json:"sale_price"`
+	// PurchasePrice: costo BASE (por unidad base del producto), no comercial. Ampliado a
+	// decimal(15,6) en v136 por el mismo motivo que TenantStockMovement.UnitCost (ver ahí):
+	// cuando la compra usa una SaleUnit, este valor es commercial_unit_cost/ConversionFactor, que
+	// puede necesitar más de 2 decimales exactos (ej. S/100 ÷ 24 = S/4.1666...).
+	PurchasePrice      float64 `gorm:"type:decimal(15,6)" json:"purchase_price"`
 	TaxRate            float64 `gorm:"type:decimal(5,2);default:18.00" json:"tax_rate"`
 	IgvAffectationType string  `gorm:"size:10;default:'10'" json:"igv_affectation_type"` // Catálogo SUNAT N°7
 	PriceIncludesIgv   bool    `gorm:"default:true" json:"price_includes_igv"`
@@ -1054,6 +1129,12 @@ type TenantEcommerceSettings struct {
 	// saldo queda como crédito pendiente de cobro). EmitSaleTarget: nota_venta | 03 | 01.
 	EmitSaleOnDispatch bool      `gorm:"column:emit_sale_on_dispatch;default:false" json:"emit_sale_on_dispatch"`
 	EmitSaleTarget     string    `gorm:"column:emit_sale_target;size:12;default:'nota_venta'" json:"emit_sale_target"`
+	// HeroStyle: 'split' (texto + botón a la izquierda, imagen a la derecha) | 'image' (solo la
+	// imagen completa a todo el ancho, sin textos, botón ni degradado encima).
+	HeroStyle string `gorm:"column:hero_style;size:20;default:'split'" json:"hero_style"`
+	// PaymentMethodsJSON medios de pago que se muestran al hacer el pedido (Yape, Plin, cuentas…).
+	// Informativo: ver service.PaymentMethod.
+	PaymentMethodsJSON string    `gorm:"column:payment_methods_json;type:text" json:"payment_methods_json"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -1412,6 +1493,140 @@ type TenantProductPresentation struct {
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
+// TenantProductSaleUnit: unidad comercial de venta de un producto, relativa a la unidad base del
+// producto (TenantProduct.UnitID) — ej. "Saco 100 KG" con ConversionFactor=100 sobre un producto
+// cuya unidad base es KG. No se guarda de nuevo la unidad base aquí: se interpreta contra
+// TenantProduct.UnitID/Unit del producto dueño.
+//
+// A propósito NO tiene stock propio ni tabla de stock asociada: es solo una "lente" de
+// precio+factor sobre TenantProductStock, que sigue siendo la única fuente de verdad del stock
+// del producto. Esto la distingue de TenantProductPresentation (arriba), que SÍ es una variante
+// tipo SKU con stock independiente — son dos conceptos deliberadamente separados, no se fusionan
+// ni se migran datos de uno a otro.
+//
+// Esta fase solo crea y administra la entidad: todavía no está conectada a ventas, compras,
+// Kardex ni precios por sucursal (fases posteriores).
+type TenantProductSaleUnit struct {
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	ProductID uint   `gorm:"not null;index:idx_sale_unit_product_active" json:"product_id"`
+	Name      string `gorm:"size:120;not null" json:"name"`
+	// UnitID/Unit: unidad comercial SUNAT (Catálogo N°03) propia de esta SaleUnit — ej. "Caja" →
+	// BX —, mismo patrón de denormalización que TenantProduct.UnitID/Unit (UnitID es la fuente de
+	// verdad — FK a TenantUnit —, Unit es el código ya resuelto que el resto del sistema lee sin
+	// tener que hacer join, ver ProductService.resolveUnitReference). NUNCA se deriva del nombre
+	// de la SaleUnit ("Caja" no implica "BX" automáticamente) ni de conversion_factor — son tres
+	// datos independientes: nombre comercial, código fiscal y factor de conversión de inventario.
+	//
+	// Puede quedar vacío (UnitID nil, Unit "") en SaleUnits creadas antes de esta fase (Fase
+	// "Unidad Comercial Fiscal", posterior a 7E) — el backend usa la unidad base del producto como
+	// resguardo en ese caso (ver resolveSaleItemUnitCode,
+	// internal/sales/service/sale_service_calc.go), nunca inventa un código. Por eso es requerido
+	// en ProductService.CreateSaleUnit (SaleUnits nuevas) pero opcional en UpdateSaleUnit (no se
+	// fuerza a completar retroactivamente una SaleUnit existente solo por editar otro campo).
+	UnitID           *uint   `gorm:"index" json:"unit_id"`
+	Unit             string  `gorm:"size:50" json:"unit"`
+	ConversionFactor float64 `gorm:"type:decimal(15,6);not null;default:1" json:"conversion_factor"`
+	// IsBase: unidad que representa 1:1 la unidad base del producto (ConversionFactor siempre 1).
+	// A lo sumo una por producto — se aplica en ProductService.CreateSaleUnit/UpdateSaleUnit
+	// (clearOtherBaseSaleUnitsTx), no con un índice único: MySQL no soporta índices únicos
+	// parciales sin columnas generadas (mismo criterio que TenantDocumentSeries.IsDefault, ver
+	// arriba en este archivo).
+	IsBase bool `gorm:"default:false" json:"is_base"`
+	// AllowFraction: sin gorm:"default:..." a propósito — GORM omite del INSERT los campos con
+	// tag `default` cuando el valor Go es el zero value, así que un caller que mande
+	// AllowFraction:false explícito terminaría persistiendo el default (true) en vez de false.
+	// El servicio siempre setea este campo explícitamente al crear/actualizar.
+	AllowFraction bool           `json:"allow_fraction"`
+	Price1        float64        `gorm:"type:decimal(15,6);not null" json:"price1"`
+	Price2        *float64       `gorm:"type:decimal(15,6)" json:"price2"`
+	Price3        *float64       `gorm:"type:decimal(15,6)" json:"price3"`
+	SortOrder     int            `gorm:"default:0" json:"sort_order"`
+	Active        bool           `gorm:"default:true;index:idx_sale_unit_product_active" json:"active"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// TenantProductSaleUnitBranchPrice: override de precio de una TenantProductSaleUnit para UNA
+// sucursal puntual (Fase 4). La SaleUnit sigue siendo global al tenant/producto — esto NO le
+// agrega branch_id a TenantProductSaleUnit, es una tabla aparte que la referencia. Cuando no
+// existe fila para (sale_unit_id, branch_id), o existe pero Active=false, se usa el precio global
+// de la SaleUnit (ver pkg/saleunit.ResolvePrice) — el precio de sucursal es un override, nunca
+// una unidad de venta distinta ni afecta factor/stock/Kardex/costo.
+//
+// A propósito SIN gorm.DeletedAt: a diferencia de TenantProductPresentation/TenantProductSaleUnit
+// (entidades independientes donde el soft-delete preserva referencias históricas), esta fila es
+// puramente "la configuración de precio de esta sucursal para esta SaleUnit" — desactivarla es
+// Active=false (ver abajo), y "eliminarla" es un DELETE físico real que libera el par
+// (sale_unit_id, branch_id) para poder configurarse de nuevo más adelante. Esto permite un índice
+// único real a nivel de MySQL (uniqueIndex, sin necesidad de columnas generadas): un
+// gorm.DeletedAt aquí haría que MySQL no pueda distinguir "hay una fila activa duplicada" de "hay
+// una fila borrada más una activa", porque NULL en una columna de un índice único no colisiona
+// consigo mismo.
+type TenantProductSaleUnitBranchPrice struct {
+	ID         uint     `gorm:"primaryKey" json:"id"`
+	SaleUnitID uint     `gorm:"not null;uniqueIndex:idx_sale_unit_branch_price" json:"sale_unit_id"`
+	BranchID   uint     `gorm:"not null;uniqueIndex:idx_sale_unit_branch_price;index" json:"branch_id"`
+	Price1     float64  `gorm:"type:decimal(15,6);not null" json:"price1"`
+	Price2     *float64 `gorm:"type:decimal(15,6)" json:"price2"`
+	Price3     *float64 `gorm:"type:decimal(15,6)" json:"price3"`
+	// Active: sin gorm:"default:..." a propósito — mismo motivo que TenantProductSaleUnit.
+	// AllowFraction (ver ahí): GORM omite del INSERT los campos con tag `default` cuando el valor
+	// Go es su zero value, así que Active:false explícito terminaría persistiendo el default
+	// (true). El servicio siempre setea este campo explícitamente al crear/actualizar.
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TenantProductBranchPrice: override del precio base de un producto (TenantProduct.SalePrice)
+// para UNA sucursal puntual. Deliberadamente separado de TenantProductSaleUnitBranchPrice: una
+// SaleUnit con is_base=true activa el selector de "elegir unidad" en el POS en cada venta (ver
+// POSPage.tsx, has_sale_units) — un producto "normal" (sin unidades de venta) debe poder tener
+// precio por sucursal SIN ganar ese paso extra. Un solo precio, sin niveles 2/3 (eso es
+// multiprecios, concepto de SaleUnit, no de este). Cuando no existe fila para (product_id,
+// branch_id), o existe pero Active=false, se usa TenantProduct.SalePrice — ver
+// ProductService.loadProductBranchPriceOverrides, el único punto que resuelve este override
+// (list/report/venta), igual que pkg/saleunit.ResolvePrice para SaleUnits.
+type TenantProductBranchPrice struct {
+	ID        uint    `gorm:"primaryKey" json:"id"`
+	ProductID uint    `gorm:"not null;uniqueIndex:idx_product_branch_price" json:"product_id"`
+	BranchID  uint    `gorm:"not null;uniqueIndex:idx_product_branch_price;index" json:"branch_id"`
+	SalePrice float64 `gorm:"type:decimal(15,2);not null" json:"sale_price"`
+	// Active: sin gorm:"default:..." a propósito — mismo motivo que TenantProductSaleUnitBranchPrice
+	// (GORM omite del INSERT los campos con tag `default` cuando el valor Go es su zero value). El
+	// servicio siempre lo setea explícitamente al crear/actualizar.
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TenantProductAttribute: característica descriptiva del producto (ej. "Color: Rojo",
+// "RAM: 16 GB") — Fase 5. Puramente informativo: no tiene stock propio, no genera Kardex, no
+// afecta precios, no genera TenantProductSaleUnit ni interactúa con TenantProductPresentation.
+// Deliberadamente NO se combina con otros atributos para formar variantes — son tres conceptos
+// separados: SaleUnit (unidad comercial + factor + precio), Presentation (SKU/variante con stock
+// propio, existente, sin tocar) y Attribute (texto descriptivo, sin identidad propia).
+//
+// Sin gorm.DeletedAt a propósito (mismo criterio que TenantProductSaleUnitBranchPrice, Fase 4):
+// ninguna otra tabla referencia el ID de un atributo (no vive en TenantSaleItem/TenantPurchaseItem
+// ni en ningún movimiento de Kardex — ver Fase 2/3, deliberadamente no se le agregó ahí), así que
+// no hace falta preservar filas borradas para no romper una referencia histórica. Active=false
+// alcanza para "ocultar sin perder el dato"; DELETE es un borrado físico real.
+type TenantProductAttribute struct {
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	ProductID uint   `gorm:"not null;index:idx_product_attribute_active" json:"product_id"`
+	Name      string `gorm:"size:100;not null" json:"name"`
+	Value     string `gorm:"size:255;not null" json:"value"`
+	SortOrder int    `gorm:"default:0" json:"sort_order"`
+	// Active: sin gorm:"default:..." a propósito — mismo motivo documentado arriba en
+	// TenantProductSaleUnitBranchPrice.Active (GORM omite del INSERT los campos con tag
+	// `default` cuando el valor Go es su zero value).
+	Active    bool      `gorm:"index:idx_product_attribute_active" json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // TenantModifierGroup: extras reutilizables entre productos (suman al precio).
 type TenantModifierGroup struct {
 	ID          uint           `gorm:"primaryKey" json:"id"`
@@ -1510,23 +1725,40 @@ type TenantStockMovement struct {
 	// PresentationID: cuando el producto vende por variante (color/talla/presentación con stock
 	// propio), el movimiento afecta esa presentación en vez del stock agregado del producto.
 	// nil = producto sin variantes (comportamiento de siempre).
-	PresentationID      *uint   `gorm:"index" json:"presentation_id,omitempty"`
-	BranchID            uint    `gorm:"not null;index" json:"branch_id"`
-	Type                string  `gorm:"size:30;not null" json:"type"` // in, out, transfer, adjustment
-	Quantity            float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
-	UnitCost            float64 `gorm:"type:decimal(15,2)" json:"unit_cost"`
+	PresentationID *uint  `gorm:"index" json:"presentation_id,omitempty"`
+	BranchID       uint   `gorm:"not null;index" json:"branch_id"`
+	Type           string `gorm:"size:30;not null" json:"type"` // in, out, transfer, adjustment
+	// Quantity/Balance: SIEMPRE en unidad base del producto — esta semántica no cambia con
+	// SaleUnit. Cuando el movimiento nace de una venta con unidad de venta (ej. "1.5 Saco 100 KG"),
+	// Quantity es la cantidad base ya convertida (150), y SaleUnitID/SaleUnitQuantity/
+	// ConversionFactor quedan como snapshot histórico inmutable del cómo se llegó a ese número —
+	// si mañana cambia el factor de la SaleUnit, este movimiento histórico no se reinterpreta.
+	Quantity         float64  `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	SaleUnitID       *uint    `gorm:"index" json:"sale_unit_id,omitempty"`
+	SaleUnitQuantity *float64 `gorm:"type:decimal(15,3)" json:"sale_unit_quantity,omitempty"`
+	ConversionFactor *float64 `gorm:"type:decimal(15,6)" json:"conversion_factor,omitempty"`
+	// UnitCost: en decimal(15,6), no (15,2) — cuando este movimiento nace de una compra con
+	// SaleUnit, UnitCost es el costo BASE ya convertido (ej. S/350/saco ÷ 100 = S/3.50/KG, pero
+	// factores como 24 o 1000 pueden dar más de 2 decimales exactos: S/100/caja÷24=S/4.1666.../u).
+	// Ampliado en v136 (antes decimal(15,2)) siguiendo el mismo criterio ya usado en v047
+	// (SaleAmountsSunatPrecision) para evitar la pérdida de precisión que un costo comercial
+	// dividido entre un factor puede producir. Ver pkg/money.RoundSunat (6 decimales), el
+	// redondeo "de precisión interna" que ya usa el resto del proyecto para este tipo de valor.
+	UnitCost            float64 `gorm:"type:decimal(15,6)" json:"unit_cost"`
 	Balance             float64 `gorm:"type:decimal(15,3)" json:"balance"`
 	Reference           string  `gorm:"size:100" json:"reference"`
 	Notes               string  `gorm:"type:text" json:"notes"`
 	OperationTypeID     *uint   `gorm:"index" json:"operation_type_id,omitempty"`
 	InventoryDocumentID *uint   `gorm:"index" json:"inventory_document_id,omitempty"`
-	// TransferID / SaleItemID: enlace directo al origen del movimiento (transferencia entre
-	// sucursales o línea de venta), para poder mostrar en el Kardex qué números de serie
-	// participaron sin tener que inferirlo por referencia/fecha.
-	TransferID *uint     `gorm:"index" json:"transfer_id,omitempty"`
-	SaleItemID *uint     `gorm:"index" json:"sale_item_id,omitempty"`
-	UserID     uint      `gorm:"index" json:"user_id"`
-	CreatedAt  time.Time `json:"created_at"`
+	// TransferID / SaleItemID / PurchaseItemID: enlace directo al origen del movimiento
+	// (transferencia entre sucursales, línea de venta o línea de compra), para poder mostrar en
+	// el Kardex qué números de serie participaron, y para que una reversión (Void de compra)
+	// pueda releer la cantidad/costo BASE históricos de esta línea en vez de recalcularlos.
+	TransferID     *uint     `gorm:"index" json:"transfer_id,omitempty"`
+	SaleItemID     *uint     `gorm:"index" json:"sale_item_id,omitempty"`
+	PurchaseItemID *uint     `gorm:"index" json:"purchase_item_id,omitempty"`
+	UserID         uint      `gorm:"index" json:"user_id"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // TenantInventoryOperationType catálogo de tipos de operación (Tabla 12 SUNAT). Seed por migración; sin CRUD.
@@ -1619,7 +1851,7 @@ type TenantSale struct {
 	ID                   uint       `gorm:"primaryKey" json:"id"`
 	BranchID             uint       `gorm:"not null;index" json:"branch_id"`
 	ContactID            *uint      `gorm:"index" json:"contact_id"`
-	UserID               uint       `gorm:"not null;index" json:"user_id"`
+	UserID               uint       `gorm:"not null;index;uniqueIndex:uk_tenant_sales_user_idempotency,priority:1" json:"user_id"`
 	CashSessionID        *uint      `gorm:"index" json:"cash_session_id"`
 	SeriesID             uint       `gorm:"not null;index" json:"series_id"`
 	DocType              string     `gorm:"size:50;not null" json:"doc_type"`
@@ -1634,16 +1866,22 @@ type TenantSale struct {
 	GlobalDiscountAmount float64    `gorm:"type:decimal(15,2);default:0" json:"global_discount_amount"`
 	GlobalDiscountMode   string     `gorm:"size:20" json:"global_discount_mode,omitempty"`
 	GlobalDiscountValue  float64    `gorm:"type:decimal(15,2);default:0" json:"global_discount_value"`
+	// Recargo al consumo cobrado en esta venta (cargo global, cat. 53 código 46): fuera de la base del IGV; suma a Total. Base: Subtotal.
+	ServiceChargeRate    float64    `gorm:"column:service_charge_rate;type:decimal(5,2);default:0" json:"service_charge_rate"`
+	ServiceChargeAmount  float64    `gorm:"column:service_charge_amount;type:decimal(15,2);default:0" json:"service_charge_amount"`
+	// NoteCredited NO se guarda: total de notas de crédito ACEPTADAS por SUNAT contra esta venta, que Cuentas por Cobrar resta
+	// del saldo (la factura no se edita; la nota la corrige). Lo llena receivables.AttachNoteCredits antes de calcular saldos.
+	NoteCredited         float64    `gorm:"-" json:"-"`
 	Currency             string     `gorm:"size:10;default:'PEN'" json:"currency"`
 	OperationTypeCode    string     `gorm:"size:10;default:'0101'" json:"operation_type_code"`
 	ExchangeRate         *float64   `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
 	PaymentMethod        string     `gorm:"size:50" json:"payment_method"`
 	PaymentConditionCode string     `gorm:"size:20;default:cash;index" json:"payment_condition_code"`
 	Notes                string     `gorm:"type:text" json:"notes"`
-	Status               string     `gorm:"size:30;default:'paid'" json:"status"`            // draft, paid, cancelled, credit
-	BillingStatus        string     `gorm:"size:30;default:'pending'" json:"billing_status"` // pending, sent, accepted, rejected
-	RestaurantSessionID  *uint      `gorm:"index" json:"restaurant_session_id,omitempty"`    // pedido restaurante que originó la venta
-	OriginalSaleID       *uint      `gorm:"index" json:"original_sale_id"`                   // Si es NOTA_CREDITO: venta que se anuló
+	Status               string     `gorm:"size:30;default:'paid'" json:"status"`                  // draft, paid, cancelled, credit
+	BillingStatus        string     `gorm:"size:30;default:'pending';index" json:"billing_status"` // pending, sent, accepted, rejected
+	RestaurantSessionID  *uint      `gorm:"index" json:"restaurant_session_id,omitempty"`          // pedido restaurante que originó la venta
+	OriginalSaleID       *uint      `gorm:"index" json:"original_sale_id"`                         // Si es NOTA_CREDITO: venta que se anuló
 	// Motivo SUNAT elegido al emitir la nota (catálogo 09 para NC, catálogo 10 para ND).
 	// Vacío en notas emitidas antes de existir este campo — se interpreta como "01" (NC) /
 	// "02" (ND), el único motivo que el sistema podía emitir hasta ahora.
@@ -1667,6 +1905,11 @@ type TenantSale struct {
 	ReissueReason    string     `gorm:"type:text" json:"reissue_reason,omitempty"`
 	ReissuedByEmail  string     `gorm:"size:255" json:"reissued_by_email,omitempty"`
 	ReissueCount     int        `gorm:"default:0" json:"reissue_count,omitempty"`
+	// IdempotencyKey: clave que genera el cliente al abrir el cobro y reenvía idéntica en cada
+	// reintento. UNIQUE(user_id, idempotency_key) hace que un reintento (respuesta perdida, timeout,
+	// pantalla congelada) no pueda crear una segunda venta con otro correlativo: el servidor devuelve
+	// la ya creada. NULL en ventas sin clave (todas las anteriores y los flujos que no la mandan).
+	IdempotencyKey *string `gorm:"size:64;uniqueIndex:uk_tenant_sales_user_idempotency,priority:2" json:"-"`
 
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
@@ -1674,6 +1917,11 @@ type TenantSale struct {
 
 	// ContactName se rellena al listar (join con tenant_contacts), no es columna en BD
 	ContactName string `gorm:"-" json:"contact_name"`
+	// Equivalente en SOLES (solo lectura, lo calcula el listado): total × TC de la venta. En PEN es el mismo total; en USD usa
+	// el TC guardado de la venta o, si faltara, el TC del día de emisión (RateEstimated = true). nil si no hay ningún TC.
+	TotalPEN      *float64 `gorm:"-" json:"total_pen,omitempty"`
+	RateEffective *float64 `gorm:"-" json:"rate_effective,omitempty"`
+	RateEstimated bool     `gorm:"-" json:"rate_estimated,omitempty"`
 	// ContactDocNumber (RUC/DNI del cliente) se rellena al listar, no es columna en BD.
 	ContactDocNumber string `gorm:"-" json:"contact_doc_number,omitempty"`
 	// UserName se rellena al listar (usuario que registró la venta).
@@ -1704,6 +1952,9 @@ type TenantSale struct {
 	DetraccionAmount      float64 `gorm:"-" json:"detraccion_amount,omitempty"`
 	NetPayable            float64 `gorm:"-" json:"net_payable,omitempty"`
 	DetraccionRatePercent float64 `gorm:"-" json:"detraccion_rate_percent,omitempty"`
+	// Vuelto entregado en la venta (suma de pagos directos - importe cobrable, si es positivo);
+	// se calcula igual que print_data.ChangeAmount, no es columna en BD (ver enrichSalesWithChangeAmount).
+	ChangeAmount float64 `gorm:"-" json:"change_amount,omitempty"`
 }
 
 type TenantSaleItem struct {
@@ -1711,24 +1962,40 @@ type TenantSaleItem struct {
 	SaleID    uint  `gorm:"not null;index" json:"sale_id"`
 	ProductID *uint `gorm:"index" json:"product_id"`
 	// PresentationID: variante/presentación descontada (ej. color), cuando aplica.
-	PresentationID         *uint   `gorm:"index" json:"presentation_id,omitempty"`
-	Code                   string  `gorm:"size:100" json:"code"`
-	Description            string  `gorm:"size:255;not null" json:"description"`
-	Unit                   string  `gorm:"size:50" json:"unit"`
-	Quantity               float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
-	UnitPrice              float64 `gorm:"type:decimal(15,2);not null" json:"unit_price"`
-	Discount               float64 `gorm:"type:decimal(15,2);default:0" json:"discount"`
-	LineDiscountSubtotal   float64 `gorm:"type:decimal(15,2);default:0" json:"line_discount_subtotal"`
-	GlobalDiscountSubtotal float64 `gorm:"type:decimal(15,2);default:0" json:"global_discount_subtotal"`
-	TaxRate                float64 `gorm:"type:decimal(5,2);default:0" json:"tax_rate"`
-	IgvAffectationType     string  `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
-	Subtotal               float64 `gorm:"type:decimal(15,2);not null" json:"subtotal"`
-	TaxAmount              float64 `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
-	Total                  float64 `gorm:"type:decimal(15,2);not null" json:"total"`
-	ModifiersJSON          string  `gorm:"type:text" json:"modifiers_json"` // JSON array de { option_id, name, extra_price } para el detalle
+	PresentationID *uint `gorm:"index" json:"presentation_id,omitempty"`
+	// SaleUnitID: unidad de venta con conversión utilizada en esta línea (ej. "Saco 100 KG"),
+	// cuando aplica. Quantity/UnitPrice de esta fila siguen siendo la cantidad y precio
+	// COMERCIALES (1.5, 450) — la conversión a unidad base solo afecta al Kardex (ver
+	// TenantStockMovement.SaleUnitID/SaleUnitQuantity/ConversionFactor). Mutuamente excluyente con
+	// PresentationID (no se combinan variantes con unidades de venta en esta fase).
+	SaleUnitID  *uint   `gorm:"index" json:"sale_unit_id,omitempty"`
+	Code        string  `gorm:"size:100" json:"code"`
+	Description string  `gorm:"size:255;not null" json:"description"`
+	Unit        string  `gorm:"size:50" json:"unit"`
+	Quantity    float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	UnitPrice   float64 `gorm:"type:decimal(15,6);not null" json:"unit_price"`
+	// PurchasePrice: snapshot del costo del producto (TenantProduct.PurchasePrice) al momento de
+	// vender esta línea — para reportes de utilidad exactos aunque el costo del catálogo cambie
+	// después (ver v145_sale_item_purchase_price_snapshot.go). nil en líneas manuales (sin
+	// producto de catálogo) y en toda venta anterior a esta migración — ProfitDetail cae al costo
+	// actual del catálogo como fallback en ese caso.
+	PurchasePrice          *float64 `gorm:"type:decimal(15,6)" json:"purchase_price,omitempty"`
+	Discount               float64  `gorm:"type:decimal(15,2);default:0" json:"discount"`
+	LineDiscountSubtotal   float64  `gorm:"type:decimal(15,2);default:0" json:"line_discount_subtotal"`
+	GlobalDiscountSubtotal float64  `gorm:"type:decimal(15,2);default:0" json:"global_discount_subtotal"`
+	TaxRate                float64  `gorm:"type:decimal(5,2);default:0" json:"tax_rate"`
+	IgvAffectationType     string   `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
+	Subtotal               float64  `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	TaxAmount              float64  `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
+	Total                  float64  `gorm:"type:decimal(15,2);not null" json:"total"`
+	ModifiersJSON          string   `gorm:"type:text" json:"modifiers_json"` // JSON array de { option_id, name, extra_price } para el detalle
 	// ItemNote nota libre de esta línea (p. ej. "segundo uso"). Queda en el snapshot de la
 	// venta; NO modifica el producto del catálogo.
 	ItemNote string `gorm:"size:255" json:"item_note"`
+	// PackLabel (V191): contenido de la unidad de venta usada, p. ej. "12 UND" cuando se vende por caja de 12. Se congela al crear la
+	// línea (el factor de la unidad de venta puede cambiar después) y se imprime entre paréntesis junto a la descripción. Vacío en
+	// líneas sin unidad de venta con factor > 1 y en todo documento anterior a V191 (no se reconstruye).
+	PackLabel string `gorm:"size:60" json:"pack_label,omitempty"`
 	// OriginalSaleItemID: en una línea de nota de crédito parcial, la línea de la venta
 	// original de la que nace (para revertir stock exacto vía tenant_stock_movements.sale_item_id).
 	// NULL en cualquier otro caso (venta normal, o nota que copia el 100%).
@@ -1790,6 +2057,26 @@ type TenantSaleFiscalObligation struct {
 
 func (TenantSaleFiscalObligation) TableName() string { return "tenant_sale_fiscal_obligations" }
 
+// TenantSaleExport datos de una venta de exportación de servicios (1:1 con la venta; operaciones 0201, 0202 y 0208).
+// 0201/0208 usan CountryUse (país donde se usa el servicio); 0202 (hospedaje) usa los datos del huésped y su estadía.
+type TenantSaleExport struct {
+	SaleID            uint       `gorm:"primaryKey" json:"sale_id"`
+	OperationTypeCode string     `gorm:"size:10;not null" json:"operation_type_code"`
+	CountryUse        string     `gorm:"size:2" json:"country_use,omitempty"` // ISO 3166-1 alfa-2
+	GuestName         string     `gorm:"size:150" json:"guest_name,omitempty"`
+	GuestDocType      string     `gorm:"size:2" json:"guest_doc_type,omitempty"` // catálogo 06: 7 pasaporte, 4 carné de extranjería, ...
+	GuestDocNumber    string     `gorm:"size:20" json:"guest_doc_number,omitempty"`
+	PassportCountry   string     `gorm:"size:2" json:"passport_country,omitempty"`
+	ResidenceCountry  string     `gorm:"size:2" json:"residence_country,omitempty"`
+	EntryDate         *time.Time `gorm:"type:date" json:"entry_date,omitempty"` // ingreso al país
+	CheckIn           *time.Time `gorm:"type:date" json:"check_in,omitempty"`
+	CheckOut          *time.Time `gorm:"type:date" json:"check_out,omitempty"`
+	StayDays          int        `json:"stay_days,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+}
+
+func (TenantSaleExport) TableName() string { return "tenant_sale_exports" }
+
 // TenantSaleDetraccion datos de detracción SUNAT (1:1 con venta factura 1001 o 1004).
 type TenantSaleDetraccion struct {
 	SaleID uint `gorm:"primaryKey" json:"sale_id"`
@@ -1807,19 +2094,41 @@ type TenantSaleDetraccion struct {
 	BnConfirmationStatus    string     `gorm:"size:20;default:'pending'" json:"bn_confirmation_status"`
 	BnConfirmedAt           *time.Time `json:"bn_confirmed_at,omitempty"`
 	BnConfirmationReference string     `gorm:"size:100" json:"bn_confirmation_reference,omitempty"`
+	// N° de constancia de pago de la detracción (opcional, aplica a 1001 y 1004). Solo referencia
+	// administrativa capturada por el usuario al momento de la venta — no viaja al XML SUNAT, igual
+	// que en el sistema anterior (facturador-tukifac: campo "N° Constancia de pago - detracción",
+	// se imprime en el comprobante pero no forma parte del UBL). No confundir con
+	// BnConfirmationReference, que se llena DESPUÉS al confirmar la acreditación BN en Cobranzas.
+	PayConstancyNumber string `gorm:"size:50" json:"pay_constancy_number,omitempty"`
 	// Campos exclusivos de 1004 (transporte de carga), vacíos/NULL en 1001. Van al comprobante
 	// como cac:InvoiceLine/cac:Item/cac:AdditionalItemProperty (Catálogo N° 55 SUNAT) — no existe
 	// un nodo de cabecera para esto; SUNAT lo exige a nivel de ítem. Captura manual: ni este
 	// sistema ni el de referencia calculan las tablas de tarifas MTC (D.S. 020-2021-MTC).
-	ValorReferencialPen    *float64  `gorm:"type:decimal(15,2)" json:"valor_referencial_pen,omitempty"`
-	MtcRegistro            string    `gorm:"size:30" json:"mtc_registro,omitempty"`
-	ConfiguracionVehicular string    `gorm:"size:10" json:"configuracion_vehicular,omitempty"`
-	PuntoOrigen            string    `gorm:"size:200" json:"punto_origen,omitempty"`
-	PuntoDestino           string    `gorm:"size:200" json:"punto_destino,omitempty"`
-	CargaEfectivaTm        *float64  `gorm:"type:decimal(10,2)" json:"carga_efectiva_tm,omitempty"`
-	CargaUtilTm            *float64  `gorm:"type:decimal(10,2)" json:"carga_util_tm,omitempty"`
-	CreatedAt              time.Time `json:"created_at"`
-	UpdatedAt              time.Time `json:"updated_at"`
+	ValorReferencialPen    *float64 `gorm:"type:decimal(15,2)" json:"valor_referencial_pen,omitempty"`
+	MtcRegistro            string   `gorm:"size:30" json:"mtc_registro,omitempty"`
+	ConfiguracionVehicular string   `gorm:"size:10" json:"configuracion_vehicular,omitempty"`
+	PuntoOrigen            string   `gorm:"size:200" json:"punto_origen,omitempty"`
+	PuntoDestino           string   `gorm:"size:200" json:"punto_destino,omitempty"`
+	CargaEfectivaTm        *float64 `gorm:"type:decimal(10,2)" json:"carga_efectiva_tm,omitempty"`
+	CargaUtilTm            *float64 `gorm:"type:decimal(10,2)" json:"carga_util_tm,omitempty"`
+	// Detalle del viaje (obligatorio en 1004, igual que en el sistema anterior). Ahí, viaja al XML
+	// como cac:Despatch/cbc:Instructions (estructura UBL distinta que este sistema no implementa
+	// para la factura); aquí queda como referencia interna — se imprime en el comprobante, pero NO
+	// se envía a SUNAT (el payload del facturador no tiene un nodo equivalente para factura/boleta,
+	// solo para guía de remisión, un documento distinto). Ver internal/detraccion/service.go.
+	TripDetail string `gorm:"size:500" json:"trip_detail,omitempty"`
+	// Ubigeo (cat. 13, 6 dígitos) y dirección detallada del origen/destino, y valores referenciales (PEN)
+	// de la carga efectiva y útil nominal (migración v163, NULL en filas anteriores). SUNAT los exige en
+	// el XML de 1004 (cac:InvoiceLine/cac:Delivery, errores 3116-3126); TripDetail también viaja
+	// (cac:Despatch/cbc:Instructions). PuntoOrigen/PuntoDestino quedan como etiqueta legible.
+	OriginUbigeo             string    `gorm:"size:6" json:"origin_ubigeo,omitempty"`
+	OriginAddress            string    `gorm:"size:200" json:"origin_address,omitempty"`
+	DestinationUbigeo        string    `gorm:"size:6" json:"destination_ubigeo,omitempty"`
+	DestinationAddress       string    `gorm:"size:200" json:"destination_address,omitempty"`
+	ValorRefCargaEfectivaPen *float64  `gorm:"type:decimal(15,2)" json:"valor_ref_carga_efectiva_pen,omitempty"`
+	ValorRefCargaUtilPen     *float64  `gorm:"type:decimal(15,2)" json:"valor_ref_carga_util_pen,omitempty"`
+	CreatedAt                time.Time `json:"created_at"`
+	UpdatedAt                time.Time `json:"updated_at"`
 }
 
 func (TenantSaleDetraccion) TableName() string { return "tenant_sale_detraccion" }
@@ -1866,21 +2175,30 @@ func (TenantSalePrepaymentApplication) TableName() string {
 
 // TenantQuotation — cotización comercial (pre venta); no afecta inventario ni caja.
 type TenantQuotation struct {
-	ID                  uint       `gorm:"primaryKey" json:"id"`
-	BranchID            uint       `gorm:"not null;index" json:"branch_id"`
-	ContactID           *uint      `gorm:"index" json:"contact_id"`
-	UserID              uint       `gorm:"not null;index" json:"user_id"`
-	SeriesID            uint       `gorm:"not null;index" json:"series_id"`
-	Series              string     `gorm:"size:10;not null" json:"series"`
-	Correlative         uint       `gorm:"not null" json:"correlative"`
-	Number              string     `gorm:"size:20;not null;index" json:"number"`
-	IssueDate           time.Time  `gorm:"not null;index" json:"issue_date"`
-	ValidUntil          *time.Time `json:"valid_until,omitempty"`
-	Subtotal            float64    `gorm:"type:decimal(15,2);not null" json:"subtotal"`
-	TaxAmount           float64    `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
-	Total               float64    `gorm:"type:decimal(15,2);not null" json:"total"`
-	Currency            string     `gorm:"size:10;default:'PEN'" json:"currency"`
-	ExchangeRate        *float64   `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	BranchID    uint       `gorm:"not null;index" json:"branch_id"`
+	ContactID   *uint      `gorm:"index" json:"contact_id"`
+	UserID      uint       `gorm:"not null;index" json:"user_id"`
+	SeriesID    uint       `gorm:"not null;index" json:"series_id"`
+	Series      string     `gorm:"size:10;not null" json:"series"`
+	Correlative uint       `gorm:"not null" json:"correlative"`
+	Number      string     `gorm:"size:20;not null;index" json:"number"`
+	IssueDate   time.Time  `gorm:"not null;index" json:"issue_date"`
+	ValidUntil  *time.Time `json:"valid_until,omitempty"`
+	Subtotal    float64    `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	TaxAmount   float64    `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
+	Total       float64    `gorm:"type:decimal(15,2);not null" json:"total"`
+	// Descuento global tal como lo tecleó el usuario (modo percent|amount + valor) y el monto en
+	// base imponible que resultó. Sin esto, al editar o convertir solo se podía reconstruir el
+	// reparto por línea y se perdía el "15 %" original (ver v151).
+	GlobalDiscountMode   string   `gorm:"size:20" json:"global_discount_mode,omitempty"`
+	GlobalDiscountValue  float64  `gorm:"type:decimal(15,4);default:0" json:"global_discount_value"`
+	GlobalDiscountAmount float64  `gorm:"type:decimal(15,2);default:0" json:"global_discount_amount"`
+	Currency             string   `gorm:"size:10;default:'PEN'" json:"currency"`
+	ExchangeRate         *float64 `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	// PaymentMethodsJSON: métodos de pago de REFERENCIA (cómo piensa pagar el cliente), lista JSON de
+	// {method, amount, reference}. No es un cobro: no afecta caja ni saldos (v154).
+	PaymentMethodsJSON  string     `gorm:"type:text" json:"payment_methods_json,omitempty"`
 	Notes               string     `gorm:"type:text" json:"notes"`
 	ShowTermsConditions bool       `gorm:"default:false" json:"show_terms_conditions"`
 	Status              string     `gorm:"size:30;default:'draft';index" json:"status"` // draft | converted
@@ -1895,25 +2213,42 @@ type TenantQuotation struct {
 func (TenantQuotation) TableName() string { return "tenant_quotations" }
 
 type TenantQuotationItem struct {
-	ID                 uint    `gorm:"primaryKey" json:"id"`
-	QuotationID        uint    `gorm:"not null;index" json:"quotation_id"`
-	ProductID          *uint   `gorm:"index" json:"product_id"`
-	PresentationID     *uint   `gorm:"index" json:"presentation_id"`
-	Code               string  `gorm:"size:100" json:"code"`
-	Description        string  `gorm:"size:255;not null" json:"description"`
-	Unit               string  `gorm:"size:50" json:"unit"`
-	Quantity           float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
-	UnitPrice          float64 `gorm:"type:decimal(15,2);not null" json:"unit_price"`
-	Discount           float64 `gorm:"type:decimal(15,2);default:0" json:"discount"`
+	ID             uint    `gorm:"primaryKey" json:"id"`
+	QuotationID    uint    `gorm:"not null;index" json:"quotation_id"`
+	ProductID      *uint   `gorm:"index" json:"product_id"`
+	PresentationID *uint   `gorm:"index" json:"presentation_id"`
+	Code           string  `gorm:"size:100" json:"code"`
+	Description    string  `gorm:"size:255;not null" json:"description"`
+	Unit           string  `gorm:"size:50" json:"unit"`
+	Quantity       float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	UnitPrice      float64 `gorm:"type:decimal(15,6);not null" json:"unit_price"`
+	// Discount: monto en formato CalcItem (resta del bruto qty*precio). Se conserva para ventas y
+	// consumidores que no conocen LineDiscountMode; el dato de verdad es LineDiscountMode/Value.
+	Discount float64 `gorm:"type:decimal(15,2);default:0" json:"discount"`
+	// LineDiscountMode/Value: el descuento de la línea como lo tecleó el usuario (percent|amount
+	// sobre la base imponible). Vacío en cotizaciones anteriores a v151.
+	LineDiscountMode  string  `gorm:"size:20" json:"line_discount_mode,omitempty"`
+	LineDiscountValue float64 `gorm:"type:decimal(15,4);default:0" json:"line_discount_value"`
+	// SaleUnitID: unidad de venta elegida (ej. "Caja x12"). Sin ella la conversión vendía 2 cajas
+	// y descontaba 2 unidades del inventario en vez de 24. ComboJSON / SerialsJSON: elección del
+	// combo y números de serie, que la conversión también debe respetar (v152).
+	SaleUnitID         *uint   `gorm:"index" json:"sale_unit_id,omitempty"`
+	ComboJSON          string  `gorm:"type:text" json:"combo_json,omitempty"`
+	SerialsJSON        string  `gorm:"type:text" json:"serials_json,omitempty"`
 	TaxRate            float64 `gorm:"type:decimal(5,2);default:0" json:"tax_rate"`
 	IgvAffectationType string  `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
-	PriceIncludesIgv   bool    `gorm:"default:true" json:"price_includes_igv"`
-	Subtotal           float64 `gorm:"type:decimal(15,2);not null" json:"subtotal"`
-	TaxAmount          float64 `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
-	Total              float64 `gorm:"type:decimal(15,2);not null" json:"total"`
-	ModifiersJSON      string  `gorm:"type:text" json:"modifiers_json"`
+	// Sin `default:true` a propósito: con ese tag GORM reemplaza un false explícito por true al
+	// insertar, y toda cotización con precios SIN IGV se guardaba (y luego se convertía) como si
+	// el precio ya lo incluyera.
+	PriceIncludesIgv bool    `json:"price_includes_igv"`
+	Subtotal         float64 `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	TaxAmount        float64 `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
+	Total            float64 `gorm:"type:decimal(15,2);not null" json:"total"`
+	ModifiersJSON    string  `gorm:"type:text" json:"modifiers_json"`
 	// ItemNote nota libre de esta línea; queda en el snapshot de la cotización.
 	ItemNote string `gorm:"size:255" json:"item_note"`
+	// PackLabel (V191): contenido de la unidad de venta ("12 UND"); ver TenantSaleItem.PackLabel.
+	PackLabel string `gorm:"size:60" json:"pack_label,omitempty"`
 }
 
 func (TenantQuotationItem) TableName() string { return "tenant_quotation_items" }
@@ -2126,6 +2461,10 @@ type TenantPurchase struct {
 	TaxAmount     float64    `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
 	Total         float64    `gorm:"type:decimal(15,2);not null" json:"total"`
 	Currency      string     `gorm:"size:10;default:'PEN'" json:"currency"`
+	// ExchangeRate: tipo de cambio (venta) de la compra en USD (V181); nil en soles. Los importes del
+	// documento, sus pagos y la CxP quedan en la moneda del documento; inventario y costos van en soles
+	// (costo × TC) y los totales consolidados convierten con este TC.
+	ExchangeRate  *float64   `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
 	PaymentMethod string     `gorm:"size:50" json:"payment_method"`
 	Notes         string     `gorm:"type:text" json:"notes"`
 	Status        string     `gorm:"size:30;default:'received'" json:"status"`
@@ -2148,10 +2487,12 @@ type TenantPurchase struct {
 	CashSessionID *uint `gorm:"index" json:"cash_session_id,omitempty"`
 	// PriceIncludesIgv: criterio con el que se registró la compra. Si es true, los unit_cost
 	// tecleados ya traían IGV y se desagregó; si es false, el IGV se sumó encima.
-	PriceIncludesIgv bool           `gorm:"default:false" json:"price_includes_igv"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
-	DeletedAt        gorm.DeletedAt `gorm:"index" json:"-"`
+	PriceIncludesIgv bool `gorm:"default:false" json:"price_includes_igv"`
+	// PurchaseOrderID: orden de compra (V180) que originó esta compra; nil = compra directa.
+	PurchaseOrderID *uint          `gorm:"index" json:"purchase_order_id,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // TenantPurchasePayable cuenta por pagar (CxP) de una compra a crédito — 1:1 con TenantPurchase,
@@ -2187,14 +2528,78 @@ type TenantPurchasePayment struct {
 }
 
 type TenantPurchaseItem struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	PurchaseID  uint   `gorm:"not null;index" json:"purchase_id"`
+	ProductID   *uint  `gorm:"index" json:"product_id"`
+	Code        string `gorm:"size:100" json:"code"`
+	Description string `gorm:"size:255;not null" json:"description"`
+	Unit        string `gorm:"size:50" json:"unit"`
+	// Quantity/UnitCost: SIEMPRE comerciales (10 sacos, S/350/saco) — igual que en
+	// TenantSaleItem, la conversión a unidad base vive únicamente en el TenantStockMovement
+	// vinculado (ver SaleUnitID abajo y TenantStockMovement.PurchaseItemID).
+	Quantity float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
+	UnitCost float64 `gorm:"type:decimal(15,6);not null" json:"unit_cost"`
+	// SaleUnitID: unidad de venta con conversión utilizada en esta línea de compra (ej. "Saco 100
+	// KG"), cuando aplica. nil = línea legacy sin conversión (comportamiento previo, intacto).
+	SaleUnitID *uint `gorm:"index" json:"sale_unit_id,omitempty"`
+	// PresentationID: presentación/variante comprada (ej. "Talla M") cuando el producto maneja
+	// stock por presentación (product.HasVariants). nil = producto sin variantes.
+	PresentationID     *uint   `gorm:"index" json:"presentation_id,omitempty"`
+	TaxRate            float64 `gorm:"type:decimal(5,2);default:0" json:"tax_rate"`
+	IgvAffectationType string  `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
+	PriceIncludesIgv   bool    `gorm:"default:false" json:"price_includes_igv"`
+	Subtotal           float64 `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	TaxAmount          float64 `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
+	Total              float64 `gorm:"type:decimal(15,2);not null" json:"total"`
+}
+
+// TenantPurchaseOrder orden de compra al proveedor (V180). NO mueve stock, caja ni cuentas por
+// pagar: es un compromiso previo a la compra. Se convierte (1 OC → 1 compra) y queda "received".
+// Estados: draft → sent → received | cancelled. Moneda PEN/USD con tipo de cambio (TC venta).
+type TenantPurchaseOrder struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	BranchID    uint      `gorm:"not null;index" json:"branch_id"`
+	ContactID   *uint     `gorm:"index" json:"contact_id"`
+	UserID      uint      `gorm:"not null;index" json:"user_id"`
+	SeriesID    uint      `gorm:"not null;index" json:"series_id"`
+	Series      string    `gorm:"size:10;not null" json:"series"`
+	Correlative uint      `gorm:"not null" json:"correlative"`
+	Number      string    `gorm:"size:20;not null;index" json:"number"`
+	IssueDate   time.Time `gorm:"not null;index" json:"issue_date"`
+	// ExpectedDate: fecha de entrega esperada por el proveedor.
+	ExpectedDate *time.Time `json:"expected_date,omitempty"`
+	Currency     string     `gorm:"size:10;default:'PEN'" json:"currency"`
+	ExchangeRate *float64   `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	// PaymentCondition: condición de pago de REFERENCIA (texto libre, ej. "Crédito 30 días").
+	PaymentCondition string  `gorm:"size:120" json:"payment_condition"`
+	Subtotal         float64 `gorm:"type:decimal(15,2);not null" json:"subtotal"`
+	TaxAmount        float64 `gorm:"type:decimal(15,2);not null" json:"tax_amount"`
+	Total            float64 `gorm:"type:decimal(15,2);not null" json:"total"`
+	PriceIncludesIgv bool    `gorm:"default:false" json:"price_includes_igv"`
+	Notes            string  `gorm:"type:text" json:"notes"`
+	Status           string  `gorm:"size:20;default:'draft';index" json:"status"`
+	// PurchaseID: compra que recibió esta orden (nil mientras no se convierta).
+	PurchaseID *uint          `gorm:"index" json:"purchase_id,omitempty"`
+	ReceivedAt *time.Time     `json:"received_at,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt `gorm:"index" json:"-"`
+	// ContactName: solo lectura (se resuelve al listar), no es columna.
+	ContactName string `gorm:"-" json:"contact_name"`
+}
+
+// TenantPurchaseOrderItem línea de una orden de compra; mismos campos comerciales que la compra.
+type TenantPurchaseOrderItem struct {
 	ID                 uint    `gorm:"primaryKey" json:"id"`
-	PurchaseID         uint    `gorm:"not null;index" json:"purchase_id"`
+	PurchaseOrderID    uint    `gorm:"not null;index" json:"purchase_order_id"`
 	ProductID          *uint   `gorm:"index" json:"product_id"`
+	PresentationID     *uint   `gorm:"index" json:"presentation_id,omitempty"`
+	SaleUnitID         *uint   `gorm:"index" json:"sale_unit_id,omitempty"`
 	Code               string  `gorm:"size:100" json:"code"`
 	Description        string  `gorm:"size:255;not null" json:"description"`
 	Unit               string  `gorm:"size:50" json:"unit"`
 	Quantity           float64 `gorm:"type:decimal(15,3);not null" json:"quantity"`
-	UnitCost           float64 `gorm:"type:decimal(15,2);not null" json:"unit_cost"`
+	UnitCost           float64 `gorm:"type:decimal(15,6);not null" json:"unit_cost"`
 	TaxRate            float64 `gorm:"type:decimal(5,2);default:0" json:"tax_rate"`
 	IgvAffectationType string  `gorm:"size:10;default:'10'" json:"igv_affectation_type"`
 	PriceIncludesIgv   bool    `gorm:"default:false" json:"price_includes_igv"`
@@ -2242,7 +2647,14 @@ type TenantCashMovement struct {
 	// egreso a un proveedor sin compra registrada todavía. Nulo en movimientos de venta/compra
 	// (esos ya se vinculan por SaleID/PurchaseID → tenant_sales.contact_id / tenant_purchases.contact_id).
 	ContactID *uint     `gorm:"index" json:"contact_id,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	// Snapshot de moneda (V182): Amount está en la moneda del documento de origen (Currency); ExchangeRate es el TC con el que se
+	// valuó y AmountPEN el equivalente en soles (nil = no se pudo valuar: lectores derivan del documento). Ver movement_snapshot.go.
+	Currency     string   `gorm:"size:10;default:'PEN'" json:"currency"`
+	ExchangeRate *float64 `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	AmountPEN    *float64 `gorm:"type:decimal(15,2)" json:"amount_pen,omitempty"`
+	// TransferID: transferencia entre cuentas/caja de la que forma parte este movimiento (V183). Nulo en el resto.
+	TransferID *uint     `gorm:"index" json:"transfer_id,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // TenantPaymentMethod medios reales de cobro (efectivo, Yape, Plin, etc.).
@@ -2255,6 +2667,12 @@ type TenantPaymentMethod struct {
 	IsSystem      bool   `gorm:"default:false" json:"is_system"`
 	SortOrder     int    `gorm:"default:0" json:"sort_order"`
 	Active        bool   `gorm:"default:true" json:"active"`
+	// AppliesTo (V184): en qué sentido se puede usar el método — income (cobros), expense (pagos/compras/gastos) o both.
+	AppliesTo string `gorm:"size:10;default:'both'" json:"applies_to"`
+	// RequiresReference (V184): el cobro/pago exige un N° de operación o referencia (transferencias, tarjetas).
+	RequiresReference bool `gorm:"default:false" json:"requires_reference"`
+	// LogoURL (V189): icono propio del método (data URL ya reducido por el panel). Vacío = se usa el icono por defecto según el código.
+	LogoURL string `gorm:"type:text" json:"logo_url"`
 	// Legacy column — se elimina en v075; GORM lo omite en BD nueva sin la columna.
 	DestinationType string         `gorm:"size:20" json:"destination_type,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
@@ -2298,11 +2716,23 @@ type TenantTaxPaymentType struct {
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
+// TenantBank catálogo de bancos/cajas/billeteras (V184). Las cuentas se enlazan con BankID.
+type TenantBank struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"size:150;not null;uniqueIndex" json:"name"`
+	Active    bool      `gorm:"default:true" json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type TenantBankAccount struct {
-	ID            uint           `gorm:"primaryKey" json:"id"`
-	Name          string         `gorm:"size:255;not null" json:"name"`
-	BankName      string         `gorm:"size:255" json:"bank_name"`
-	AccountNumber string         `gorm:"size:100" json:"account_number"`
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	Name          string `gorm:"size:255;not null" json:"name"`
+	BankName      string `gorm:"size:255" json:"bank_name"`
+	// BankID (V184): banco del catálogo; BankName conserva su nombre para impresión y datos antiguos.
+	BankID        *uint  `gorm:"index" json:"bank_id,omitempty"`
+	AccountNumber string `gorm:"size:100" json:"account_number"`
+	// CCI: Código de Cuenta Interbancario (20 dígitos), opcional; se imprime en comprobantes y cotizaciones.
+	CCI           string         `gorm:"column:cci;size:40" json:"cci"`
 	Currency      string         `gorm:"size:10;default:'PEN'" json:"currency"`
 	Balance       float64        `gorm:"type:decimal(15,2);default:0" json:"balance"`
 	Type          string         `gorm:"size:30;default:'bank'" json:"type"`  // bank, wallet, cash
@@ -2344,7 +2774,42 @@ type TenantBankMovement struct {
 	// criterio que TenantCashMovement.ContactID (nulo en movimientos de venta/compra, que ya se
 	// vinculan por SaleID/PurchaseID).
 	ContactID *uint     `gorm:"index" json:"contact_id,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	// Snapshot de moneda (V182): Amount está en la moneda del documento de origen (Currency); ExchangeRate es el TC con el que se
+	// valuó y AmountPEN el equivalente en soles (nil = no se pudo valuar: lectores derivan del documento). Ver movement_snapshot.go.
+	Currency     string   `gorm:"size:10;default:'PEN'" json:"currency"`
+	ExchangeRate *float64 `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	AmountPEN    *float64 `gorm:"type:decimal(15,2)" json:"amount_pen,omitempty"`
+	// AccountAmount (V183): importe que este movimiento suma/resta al SALDO de la cuenta, en la moneda de la cuenta (positivo; el signo
+	// lo da Type). Una cuenta en soles lo recibe en soles (AmountPEN); una cuenta en dólares, en dólares. Nulo = fila anterior a V183.
+	AccountAmount *float64 `gorm:"type:decimal(15,2)" json:"account_amount,omitempty"`
+	// TransferID: transferencia de la que forma parte este movimiento (V183). Nulo en el resto.
+	TransferID *uint     `gorm:"index" json:"transfer_id,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// TenantAccountTransfer traslado de dinero entre dos "lugares" del tenant: la caja (sesión abierta del usuario) o una cuenta bancaria/
+// billetera. Cada transferencia genera dos movimientos enlazados por TransferID (salida y entrada) y es anulable (Status = voided
+// genera los movimientos inversos). Si las monedas de origen y destino difieren, ExchangeRate es el TC aplicado (soles por dólar).
+type TenantAccountTransfer struct {
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	FromKind      string     `gorm:"size:10;not null" json:"from_kind"` // cash | bank
+	FromAccountID *uint      `gorm:"index" json:"from_account_id,omitempty"`
+	ToKind        string     `gorm:"size:10;not null" json:"to_kind"`
+	ToAccountID   *uint      `gorm:"index" json:"to_account_id,omitempty"`
+	AmountFrom    float64    `gorm:"type:decimal(15,2);not null" json:"amount_from"`
+	CurrencyFrom  string     `gorm:"size:10;default:'PEN'" json:"currency_from"`
+	AmountTo      float64    `gorm:"type:decimal(15,2);not null" json:"amount_to"`
+	CurrencyTo    string     `gorm:"size:10;default:'PEN'" json:"currency_to"`
+	ExchangeRate  *float64   `gorm:"type:decimal(10,4)" json:"exchange_rate,omitempty"`
+	Date          time.Time  `gorm:"not null" json:"date"`
+	Notes         string     `gorm:"type:text" json:"notes"`
+	UserID        uint       `gorm:"not null" json:"user_id"`
+	CashSessionID *uint      `gorm:"index" json:"cash_session_id,omitempty"`
+	Status        string     `gorm:"size:20;default:'active';index" json:"status"` // active | voided
+	VoidedAt      *time.Time `json:"voided_at,omitempty"`
+	VoidedBy      *uint      `json:"voided_by,omitempty"`
+	VoidReason    string     `gorm:"type:text" json:"void_reason,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 type TenantExternalModule struct {
@@ -2729,3 +3194,42 @@ func SeedTenant(db *gorm.DB, adminEmail, adminPassword, companyName, ruc, addres
 }
 
 // SeedPaymentMethodsIfEmpty y SeedPaymentMethodsCatalog están en payment_method_seed.go.
+
+// MigrateSplitDespatchModules separa de `billing` los módulos `despatch` (guías de remisión y flota) y
+// `advanced_docs` (retenciones, percepciones, reversiones). Hasta ahora todo eso iba incluido en facturación,
+// así que se otorgan a cada plan y a cada tenant que YA tiene facturación: nadie pierde acceso el día del
+// despliegue. Después el superadmin desmarca los módulos en los planes que no los ofrecen.
+//
+// Se ejecuta una sola vez: la señal es que la fila del módulo `despatch` aún no existe en saas_modules (la crea
+// SyncModuleCodeMetadata justo después). Si se vuelve a ejecutar antes de eso solo repite inserciones ignoradas.
+func MigrateSplitDespatchModules() error {
+	if CentralDB == nil {
+		return nil
+	}
+	var done int64
+	CentralDB.Model(&SaasModule{}).Where("`key` = ?", ModuleDespatch).Count(&done)
+	if done > 0 {
+		return nil
+	}
+	return CentralDB.Transaction(func(tx *gorm.DB) error {
+		for _, key := range []string{ModuleDespatch, ModuleAdvancedDocs} {
+			if err := tx.Exec(`
+				INSERT INTO saas_plan_modules (plan_id, module_key, created_at)
+				SELECT pm.plan_id, ?, NOW() FROM saas_plan_modules pm
+				WHERE pm.module_key = 'billing'
+				  AND NOT EXISTS (SELECT 1 FROM saas_plan_modules x WHERE x.plan_id = pm.plan_id AND x.module_key = ?)
+			`, key, key).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(`
+				INSERT INTO tenant_modules (tenant_id, module_key, enabled, source, config_json, created_at, updated_at)
+				SELECT tm.tenant_id, ?, 1, tm.source, '{}', NOW(), NOW() FROM tenant_modules tm
+				WHERE tm.module_key = 'billing' AND tm.enabled = 1
+				  AND NOT EXISTS (SELECT 1 FROM tenant_modules x WHERE x.tenant_id = tm.tenant_id AND x.module_key = ?)
+			`, key, key).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

@@ -130,3 +130,42 @@ func TestResolveEffectiveStatus_provisionalActiveWindow(t *testing.T) {
 		t.Fatalf("expected provisional_active, got %s", st)
 	}
 }
+
+// Una empresa desactivada por el administrador no opera aunque su suscripción siga vigente, ni siquiera
+// con una reactivación provisional.
+func TestCanOperate_inactiveNoOperate(t *testing.T) {
+	tenant := &database.Tenant{Status: database.TenantStatusInactive}
+	if CanOperate("active", tenant, nil, NowLima()) {
+		t.Fatal("un tenant desactivado no debe operar con suscripción vigente")
+	}
+	until := NowLima().Add(2 * time.Hour)
+	if CanOperate("active", tenant, &until, NowLima()) {
+		t.Fatal("un tenant desactivado no debe operar ni con ventana provisional")
+	}
+}
+
+// La consulta de reportes sigue abierta con la cuenta suspendida/vencida, pero no si está bloqueada o
+// desactivada.
+func TestCanViewReports(t *testing.T) {
+	cases := []struct {
+		name      string
+		tenant    *database.Tenant
+		isBlocked bool
+		want      bool
+	}{
+		{"activo", &database.Tenant{Status: database.TenantStatusActive}, false, true},
+		{"suspendido por falta de pago", &database.Tenant{Status: database.TenantStatusSuspended}, false, true},
+		{"vencido (tenant aún activo)", &database.Tenant{Status: database.TenantStatusActive}, false, true},
+		{"bloqueado", &database.Tenant{Status: database.TenantStatusBlocked}, true, false},
+		{"bloqueado por strikes", &database.Tenant{Status: database.TenantStatusSuspended}, true, false},
+		{"desactivado", &database.Tenant{Status: database.TenantStatusInactive}, false, false},
+	}
+	for _, c := range cases {
+		if got := CanViewReports(c.isBlocked, c.tenant); got != c.want {
+			t.Errorf("%s: CanViewReports = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if CanViewReports(false, nil) {
+		t.Error("sin tenant no hay acceso")
+	}
+}

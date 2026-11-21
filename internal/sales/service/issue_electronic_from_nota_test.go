@@ -26,6 +26,7 @@ func setupIssueElectronicFromNotaTestDB(t *testing.T) *gorm.DB {
 		&database.TenantSale{},
 		&database.TenantSaleItem{},
 		&database.TenantSalePayment{},
+		&database.TenantSaleCreditInstallment{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {

@@ -145,8 +145,17 @@ func ApplyDeductionToSaleTotals(
 		out.DiscountBase = base
 		out.DiscountFactor = roundFactor(amount / base)
 		out.Totals.GravadoSubtotal = roundMoney(totals.GravadoSubtotal - amount)
-		out.Totals.GravadoTax = roundMoney(out.Totals.GravadoSubtotal * (taxRatePercent / 100))
-		out.Totals.GravadoTotal = roundMoney(out.Totals.GravadoSubtotal + out.Totals.GravadoTax)
+		// El total se obtiene restando lo que el anticipo realmente cubre (total con IGV), no
+		// recalculando IGV sobre una base ya redondeada a 2 decimales: 130 − 30 = 100.00 y no
+		// 84.75 + 15.26 = 100.01. El IGV es la diferencia, así total e IGV cuadran con el cobro.
+		if totals.GravadoTotal > 0 {
+			out.Totals.GravadoTotal = roundMoney(totals.GravadoTotal - deductionTotalSum)
+			out.Totals.GravadoTax = roundMoney(out.Totals.GravadoTotal - out.Totals.GravadoSubtotal)
+		} else {
+			// Sin total bruto de referencia (totales incompletos): cálculo por tasa.
+			out.Totals.GravadoTax = roundMoney(out.Totals.GravadoSubtotal * (taxRatePercent / 100))
+			out.Totals.GravadoTotal = roundMoney(out.Totals.GravadoSubtotal + out.Totals.GravadoTax)
+		}
 	case AffectationExonerado:
 		base := roundMoney(totals.ExoneradoSubtotal + amount)
 		out.DiscountBase = base

@@ -27,9 +27,10 @@ func (s *RestaurantPOSCheckoutService) checkoutDirect(
 	payments := make([]salesvc.PaymentInput, 0, len(in.Payments))
 	for _, p := range in.Payments {
 		payments = append(payments, salesvc.PaymentInput{
-			Method:    p.Method,
-			Amount:    p.Amount,
-			Reference: p.Reference,
+			Method:               p.Method,
+			Amount:               p.Amount,
+			Reference:            p.Reference,
+			DestinationAccountID: p.DestinationAccountID,
 		})
 	}
 
@@ -55,9 +56,11 @@ func (s *RestaurantPOSCheckoutService) checkoutDirect(
 		Payments:            payments,
 		GlobalDiscountMode:  discountMode,
 		GlobalDiscountValue: discountValue,
+		ApplyServiceCharge:  in.ApplyServiceCharge,
 		TaxConfig:           taxCfg,
 		ExtraStockMovements: extraStock,
 		CentralTenantID:     in.CentralTenantID,
+		IdempotencyKey:      in.IdempotencyKey,
 	})
 }
 
@@ -83,7 +86,7 @@ func (s *RestaurantPOSCheckoutService) resolveDirectSaleItems(
 			ProductID:          item.ProductID,
 			PresentationID:     item.PresentationID,
 			Code:               item.ProductCode,
-			Description:        item.ProductName,
+			Description:        nameWithPresentation(item.ProductName, item.ModifiersJSON),
 			Unit:               "NIU",
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
@@ -93,6 +96,11 @@ func (s *RestaurantPOSCheckoutService) resolveDirectSaleItems(
 			// El combo lo resuelve SaleService (precio, validación y stock de componentes):
 			// un solo punto de resolución, el mismo que usa el ERP.
 			ComboJSON: strings.TrimSpace(item.ComboJSON),
+			// El precio ya se resolvió arriba en resolveRestaurantOrderItem (catálogo, variante,
+			// extras, o el precio acordado en caja/mesa si el cliente mandó uno > 0) — es la
+			// autoridad de precio de este módulo, SaleService.Create no debe reevaluarlo con las
+			// reglas genéricas de venta directa (que no conocen ese acuerdo de mostrador).
+			PriceAuthorized: item.ProductID != nil && *item.ProductID > 0,
 		})
 	}
 

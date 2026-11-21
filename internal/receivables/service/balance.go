@@ -1,6 +1,8 @@
 package service
 
 import (
+	"gorm.io/gorm"
+
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
 	"tukifac/pkg/paymentcondition"
@@ -31,7 +33,15 @@ func SaleBalance(sale database.TenantSale, det *database.TenantSaleDetraccion, p
 	directTarget, directPaid, directDue, spotAmount, spotPending float64,
 	bnStatus string,
 ) {
-	if det != nil {
+	if det != nil && taxpayment.IsSelfDetractionStatus(det.BnConfirmationStatus) {
+		// Autodetracción: el cliente paga el TOTAL de la factura al proveedor (que deposita la detracción en
+		// su propia cuenta BN), así que no hay SPOT que el cliente deba acreditar ni confirmar en el BN.
+		directTarget = det.InvoiceTotalPen
+		if directTarget <= 0 {
+			directTarget = sale.Total
+		}
+		bnStatus = taxpayment.BnStatusSelfPending
+	} else if det != nil {
 		directTarget = det.NetPayablePen
 		spotAmount = det.DetractionAmountPen
 		bnStatus = det.BnConfirmationStatus
@@ -43,6 +53,14 @@ func SaleBalance(sale database.TenantSale, det *database.TenantSaleDetraccion, p
 		}
 	} else {
 		directTarget = sale.Total
+	}
+	// Las notas de crédito aceptadas contra esta venta bajan lo que el cliente debe pagar (la factura no se edita: la nota la
+	// corrige). Con detracción se resta igual: el depósito ya hecho no cambia, el resto a pagar baja lo que baja la factura.
+	if sale.NoteCredited > 0 {
+		directTarget = money.RoundDisplay(directTarget - sale.NoteCredited)
+		if directTarget < 0 {
+			directTarget = 0
+		}
 	}
 	directPaid = DirectPaid(payments)
 	directDue = money.RoundDisplay(directTarget - directPaid)
@@ -78,4 +96,35 @@ func HasOpenReceivable(sale database.TenantSale, det *database.TenantSaleDetracc
 		return true
 	}
 	return false
+}
+
+// AttachNoteCredits llena sale.NoteCredited en cada venta con el total de sus notas de crédito aceptadas por SUNAT (no
+// rechazadas ni anuladas). Es lo que hace que una nota que corrige el valor de una factura a crédito baje la cuenta por cobrar.
+// Una venta anulada por completo (nota 01) ya sale de Cuentas por Cobrar por su estado; aquí cuentan las parciales y de valor.
+func AttachNoteCredits(db *gorm.DB, sales []database.TenantSale) error {
+	if len(sales) == 0 {
+		return nil
+	}
+	ids := make([]uint, len(sales))
+	for i := range sales {
+		ids[i] = sales[i].ID
+	}
+	var rows []struct {
+		OriginalSaleID uint
+		Total          float64
+	}
+	if err := db.Model(&database.TenantSale{}).
+		Select("original_sale_id, COALESCE(SUM(total), 0) AS total").
+		Where("original_sale_id IN ? AND doc_type = ? AND billing_status = ? AND status <> ?", ids, "NOTA_CREDITO", "accepted", "cancelled").
+		Group("original_sale_id").Scan(&rows).Error; err != nil {
+		return err
+	}
+	byID := make(map[uint]float64, len(rows))
+	for _, r := range rows {
+		byID[r.OriginalSaleID] = r.Total
+	}
+	for i := range sales {
+		sales[i].NoteCredited = money.RoundDisplay(byID[sales[i].ID])
+	}
+	return nil
 }

@@ -102,3 +102,56 @@ func TestApplyCreditTermsToInvoicePayload_noopForCashSale(t *testing.T) {
 		t.Errorf("FormaPago debería quedar sin tocar (nil) para una venta al contado, obtuve %+v", payload.FormaPago)
 	}
 }
+
+// Autodetracción: las cuotas guardadas suman el TOTAL (neto + detracción), pero a SUNAT deben viajar las cuotas
+// NETAS de siempre y el Monto neto pendiente = total − detracción. Sin la marca, nada cambia.
+func TestApplyCreditTermsToInvoicePayload_autodetraccionEnviaCuotasNetas(t *testing.T) {
+	db := setupCreditTermsDB(t)
+	if err := db.AutoMigrate(&database.TenantSaleDetraccion{}); err != nil {
+		t.Fatal(err)
+	}
+	sale := database.TenantSale{
+		BranchID: 1, UserID: 1, SeriesID: 1, DocType: "01", Series: "F001", Correlative: 1,
+		Number: "F001-1", IssueDate: time.Now(), Total: 2000, Currency: "PEN",
+		PaymentConditionCode: "credit", Status: "credit",
+	}
+	db.Create(&sale)
+	for i, amt := range []float64{666.67, 666.67, 666.66} {
+		db.Create(&database.TenantSaleCreditInstallment{
+			SaleID: sale.ID, InstallmentNo: i + 1, DueDate: time.Now().AddDate(0, i+1, 0), Amount: amt, Currency: "PEN",
+		})
+	}
+	det := database.TenantSaleDetraccion{
+		SaleID: sale.ID, OperationTypeCode: "1001", GoodCode: "014", PaymentMethodCode: "001", BankAccount: "0004-1",
+		RatePercent: 12, BaseAmountPen: 2000, DetractionAmountPen: 240, InvoiceTotalPen: 2000, NetPayablePen: 1760,
+		BnConfirmationStatus: "self_pending",
+	}
+	if err := db.Create(&det).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	payload := &facturador.InvoicePayload{TipoMoneda: "PEN"}
+	applyCreditTermsToInvoicePayload(db, &sale, payload)
+
+	if payload.FormaPago == nil || payload.FormaPago.Monto != 1760 {
+		t.Fatalf("Monto neto pendiente = %+v, want 1760 (2000 − 240)", payload.FormaPago)
+	}
+	var sum float64
+	for _, c := range payload.Cuotas {
+		sum += c.Monto
+	}
+	if len(payload.Cuotas) != 3 || sum < 1759.99 || sum > 1760.01 {
+		t.Fatalf("cuotas a SUNAT = %+v (suma %v), want 3 cuotas netas que sumen 1760", payload.Cuotas, sum)
+	}
+	if payload.Cuotas[0].Monto != 586.67 {
+		t.Errorf("la primera cuota debe ser la misma que una venta normal con detracción (586.67), got %v", payload.Cuotas[0].Monto)
+	}
+
+	// Misma venta con detracción NORMAL (estado pending): las cuotas viajan tal cual están guardadas.
+	db.Model(&database.TenantSaleDetraccion{}).Where("sale_id = ?", sale.ID).Update("bn_confirmation_status", "pending")
+	normal := &facturador.InvoicePayload{TipoMoneda: "PEN"}
+	applyCreditTermsToInvoicePayload(db, &sale, normal)
+	if normal.FormaPago.Monto != 2000 {
+		t.Errorf("sin autodetracción no se ajusta nada: monto = %v, want 2000", normal.FormaPago.Monto)
+	}
+}

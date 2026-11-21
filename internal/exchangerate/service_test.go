@@ -137,3 +137,48 @@ func TestCacheService_cooldownSkipsProvider(t *testing.T) {
 		t.Fatalf("expected 0 calls during cooldown, got %d", prov.callCount())
 	}
 }
+
+// Todo día debe tener su TC guardado: EnsureRecentDays completa los días sin fila (hoy y los últimos N) y no vuelve a
+// consultar los que ya tienen TC.
+func TestCacheService_EnsureRecentDaysFillsEveryDay(t *testing.T) {
+	db := setupExchangeRateTestDB(t)
+	prov := &mockProvider{venta: 3.45}
+	svc := NewCacheService(db, prov)
+
+	filled := svc.EnsureRecentDays(5) // hoy + 5 días anteriores = 6 días
+	if filled != 6 {
+		t.Fatalf("completó %d días, quiere 6", filled)
+	}
+	var n int64
+	db.Model(&database.SaasExchangeRate{}).Where("sale_rate > 0").Count(&n)
+	if n != 6 {
+		t.Errorf("filas con TC guardado = %d, quiere 6 (uno por día)", n)
+	}
+	calls := prov.callCount()
+	if again := svc.EnsureRecentDays(5); again != 0 {
+		t.Errorf("segunda pasada no debe completar nada, completó %d", again)
+	}
+	if prov.callCount() != calls {
+		t.Errorf("no debe volver a consultar al proveedor por días ya guardados")
+	}
+}
+
+// Con el proveedor caído, los días faltantes se completan con el último TC confirmado (nunca queda un día sin TC).
+func TestCacheService_EnsureRecentDaysFallsBackWhenProviderDown(t *testing.T) {
+	db := setupExchangeRateTestDB(t)
+	yesterday := time.Now().AddDate(0, 0, -4).Format("2006-01-02")
+	db.Create(&database.SaasExchangeRate{RateDate: yesterday, SaleRate: 3.4, BuyRate: 3.39, Status: StatusConfirmed, Source: SourceApiPeru, EffectiveDate: yesterday})
+	svc := NewCacheService(db, &mockProvider{err: fmt.Errorf("sin servicio")})
+
+	svc.EnsureRecentDays(3)
+	var rows []database.SaasExchangeRate
+	db.Where("rate_date > ?", yesterday).Find(&rows)
+	if len(rows) < 3 {
+		t.Fatalf("faltan días: %d", len(rows))
+	}
+	for _, r := range rows {
+		if r.SaleRate != 3.4 {
+			t.Errorf("%s: TC %v, quiere el último confirmado 3.4", r.RateDate, r.SaleRate)
+		}
+	}
+}

@@ -19,7 +19,9 @@ func setupProductServiceTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&database.TenantProduct{}, &database.TenantCategory{}, &database.TenantBrand{}, &database.TenantPreparationArea{},
-		&database.TenantProductPresentation{}, &database.TenantUnit{},
+		&database.TenantProductPresentation{}, &database.TenantUnit{}, &database.TenantProductSaleUnit{},
+		&database.TenantBranch{}, &database.TenantProductSaleUnitBranchPrice{}, &database.TenantProductAttribute{},
+		&database.TenantProductStock{}, &database.TenantStockMovement{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -424,6 +426,40 @@ func TestAttachCategoryNames_alsoResolvesBrandName(t *testing.T) {
 	}
 }
 
+// El escáner de barras trae un solo producto: debe llevar el precio de la sucursal activa igual que el
+// listado (regresión: lookup-by-code devolvía siempre el precio base).
+func TestProductListItemForBranch_appliesBranchPrice(t *testing.T) {
+	db := setupProductServiceTestDB(t)
+	if err := db.AutoMigrate(&database.TenantProductBranchPrice{}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewProductService(db)
+
+	p, _, err := svc.Create(ProductInput{
+		Code: "7750000000011", Name: "Gaseosa", Type: "product", Unit: "NIU",
+		SalePrice: 10, TaxRate: 18, IgvAffectationType: "10", Active: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&database.TenantProductBranchPrice{ProductID: p.ID, BranchID: 2, SalePrice: 8.5, Active: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if got := svc.ProductListItemForBranch(*p, 2).SalePrice; got != 8.5 {
+		t.Fatalf("sucursal con precio propio: got %v want 8.5", got)
+	}
+	if got := svc.ProductListItemForBranch(*p, 3).SalePrice; got != 10 {
+		t.Fatalf("sucursal sin precio propio debe usar el base: got %v want 10", got)
+	}
+	if got := svc.ProductListItemForBranch(*p, 0).SalePrice; got != 10 {
+		t.Fatalf("sin sucursal debe usar el base: got %v want 10", got)
+	}
+	if got := svc.ProductListItemFrom(*p).SalePrice; got != 10 {
+		t.Fatalf("ProductListItemFrom (edición) debe seguir devolviendo el base: got %v want 10", got)
+	}
+}
+
 func TestPreparationAreaCRUD_linksProductByID(t *testing.T) {
 	db := setupProductServiceTestDB(t)
 	svc := NewProductService(db)
@@ -508,5 +544,47 @@ func TestProductCreate_ServiceCanHavePresentations(t *testing.T) {
 	}
 	if loaded.ManageStock {
 		t.Errorf("manage_stock en BD = true, se esperaba false")
+	}
+}
+
+func TestProductList_SortByCatalogGroupsByCategory(t *testing.T) {
+	db := setupProductServiceTestDB(t)
+	svc := NewProductService(db)
+	bebidas := database.TenantCategory{Name: "Bebidas", SortOrder: 2, Active: true}
+	comidas := database.TenantCategory{Name: "Comidas", SortOrder: 1, Active: true}
+	for _, c := range []*database.TenantCategory{&bebidas, &comidas} {
+		if err := db.Create(c).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Orden de registro intercalado a propósito: bebida, sin categoría, comida, bebida, comida.
+	seed := []struct {
+		name string
+		cat  *uint
+	}{{"Agua", &bebidas.ID}, {"Suelto", nil}, {"Pollo", &comidas.ID}, {"Cola", &bebidas.ID}, {"Arroz", &comidas.ID}}
+	for _, s := range seed {
+		if _, _, err := svc.Create(ProductInput{
+			Code: s.name, Name: s.name, Type: "product", Unit: "NIU", CategoryID: s.cat,
+			SalePrice: 10, TaxRate: 18, IgvAffectationType: "10", BranchID: 1, Active: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, _, err := svc.ListWithCategoryNames(ProductListParams{ActiveOnly: true, SortBy: "catalog", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, it := range items {
+		got = append(got, it.Name)
+	}
+	want := []string{"Arroz", "Pollo", "Agua", "Cola", "Suelto"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
 	}
 }

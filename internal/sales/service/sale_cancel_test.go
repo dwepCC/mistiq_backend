@@ -25,6 +25,7 @@ func setupCancelDB(t *testing.T) *gorm.DB {
 		&database.TenantProduct{}, &database.TenantBranch{}, &database.TenantProductStock{},
 		&database.TenantStockMovement{}, &database.TenantInventoryOperationType{},
 		&database.TenantBankMovement{}, &database.TenantBankAccount{}, &database.TenantProductSerial{},
+		&database.TenantSalePrepaymentVoucher{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {

@@ -1,11 +1,13 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"tukifac/pkg/branchscope"
 
 	"tukifac/config"
 	authsvc "tukifac/internal/auth/service"
@@ -15,6 +17,7 @@ import (
 	"tukifac/pkg/database/engine"
 	"tukifac/pkg/database/tenantbackfills"
 	"tukifac/pkg/domains"
+	"tukifac/pkg/mastercode"
 	"tukifac/pkg/middleware"
 	"tukifac/pkg/pagination"
 	"tukifac/pkg/saas"
@@ -51,6 +54,9 @@ type CreateTenantInput struct {
 	// suscripción —las gratuitas también, vinculadas al plan gratis—, así que 0 se corrige a 1
 	// en vez de saltarse el alta.
 	SubscriptionMonths int `json:"subscription_months"`
+	// SubscriptionBonusMonths meses de cortesía (gratis) que se suman a la vigencia. Solo con
+	// suscripción de 12 meses; el cobro no cambia (ver saas.ValidateBonusMonths).
+	SubscriptionBonusMonths int `json:"subscription_bonus_months"`
 	// StartDate opcional (YYYY-MM-DD): la empresa se registra hoy pero su suscripción/primer
 	// cobro puede arrancar unos días después. Vacío = arranca hoy (comportamiento de siempre).
 	// Debe ser hoy o una fecha futura — se valida al crear la suscripción.
@@ -119,6 +125,11 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 	months := input.SubscriptionMonths
 	if months <= 0 {
 		months = 1
+	}
+	// Se valida antes de crear nada (BD del tenant, usuario admin…): un error aquí no debe dejar una
+	// empresa a medio crear.
+	if err := saas.ValidateBonusMonths(months, input.SubscriptionBonusMonths); err != nil {
+		return nil, err
 	}
 	var startDate *time.Time
 	if sd := strings.TrimSpace(input.StartDate); sd != "" {
@@ -198,8 +209,12 @@ func (s *TenantService) Create(input CreateTenantInput) (tenant *database.Tenant
 	// 5–6. Suscripción + billing cycle (módulos según plan vía syncTenantModulesFromPlanTx).
 	// El descuento lo calcula ProvisionInitialSubscription según el plan y los meses elegidos
 	// (PlanCycleDiscount) — ya no se recibe del formulario.
-	if _, err = saas.ProvisionInitialSubscription(
-		tenant.ID, plan, months, "Suscripción creada al registrar la empresa", startDate,
+	subNotes := "Suscripción creada al registrar la empresa"
+	if input.SubscriptionBonusMonths > 0 {
+		subNotes += fmt.Sprintf(" (%d meses + %d de cortesía)", months, input.SubscriptionBonusMonths)
+	}
+	if _, err = saas.ProvisionInitialSubscriptionWithBonus(
+		tenant.ID, plan, months, input.SubscriptionBonusMonths, subNotes, startDate,
 	); err != nil {
 		return nil, fmt.Errorf("suscripción SaaS: %w", err)
 	}
@@ -680,13 +695,13 @@ func (s *TenantService) CleanupAbandonedQuickSalesFleet() (cleaned int64, failed
 	var tenants []database.Tenant
 	s.db.Where("status = ?", "active").Find(&tenants)
 	for _, t := range tenants {
-		tdb, err := database.GetTenantDB(t.DBName)
+		tdb, release, err := database.GetTenantDBBackground(t.DBName)
 		if err != nil {
 			failed = append(failed, t.Slug)
 			continue
 		}
-		n, err := restaurantsvc.New(tdb).CleanupAbandonedQuickSales()
-		database.ReleaseTenantDB(t.DBName)
+		n, err := restaurantsvc.New(branchscope.System(tdb, "superadmin: limpieza de ventas rápidas abandonadas")).CleanupAbandonedQuickSales()
+		release()
 		if err != nil {
 			failed = append(failed, t.Slug)
 			continue
@@ -698,13 +713,15 @@ func (s *TenantService) CleanupAbandonedQuickSalesFleet() (cleaned int64, failed
 
 func (s *TenantService) Stats() (map[string]int64, error) {
 	stats := make(map[string]int64)
-	var total, active, inactive int64
+	var total, active, inactive, suspended int64
 	s.db.Model(&database.Tenant{}).Count(&total)
 	s.db.Model(&database.Tenant{}).Where("status = ?", "active").Count(&active)
 	s.db.Model(&database.Tenant{}).Where("status = ?", "inactive").Count(&inactive)
+	s.db.Model(&database.Tenant{}).Where("status = ?", database.TenantStatusSuspended).Count(&suspended)
 	stats["total"] = total
 	stats["active"] = active
 	stats["inactive"] = inactive
+	stats["suspended"] = suspended
 
 	// Conteo por plan REAL (suscripción vigente), no por la columna legacy tenants.plan que se
 	// desincroniza. Dinámico: una clave "plan_<nombre>" por cada plan del catálogo.
@@ -806,6 +823,8 @@ func (s *TenantService) DestroyTenantComplete(id uint, input DestroyTenantInput)
 type MasterAccessResult struct {
 	TenantURL string
 	Token     string
+	// Code: código de canje de UN SOLO USO (30 s) que va en la URL de la página en lugar del JWT (pkg/mastercode).
+	Code string
 }
 
 // MasterAccess genera JWT del usuario propietario del tenant para soporte técnico (ERP web).
@@ -837,9 +856,9 @@ func (s *TenantService) MasterAccess(tenantID, saUserID uint, saEmail, clientIP 
 		return nil, errors.New("el usuario propietario está inactivo")
 	}
 
-	session, err := authsvc.BuildTenantSession(tenant, tenantDB, user, legacyBranch, authsvc.TenantSessionOpts{
-		AuthMethod:       middleware.AuthMethodMasterAccess,
-		Impersonated:     true,
+	session, err := authsvc.DefaultIssuer().Issue(tenant, tenantDB, user, authsvc.IssueOpts{
+		Kind:             authsvc.KindMasterAccess,
+		Legacy:           legacyBranch,
 		MasterActorID:    saUserID,
 		MasterActorEmail: saEmail,
 	})
@@ -868,8 +887,13 @@ func (s *TenantService) MasterAccess(tenantID, saUserID uint, saEmail, clientIP 
 	if config.AppConfig != nil {
 		rootDomain = config.AppConfig.AppDomain
 	}
+	code, err := mastercode.Issue(context.Background(), tenant.Slug, session.Token)
+	if err != nil {
+		return nil, fmt.Errorf("generando código de acceso: %w", err)
+	}
 	return &MasterAccessResult{
 		TenantURL: domains.TenantURL(tenant.Slug, rootDomain),
 		Token:     session.Token,
+		Code:      code,
 	}, nil
 }

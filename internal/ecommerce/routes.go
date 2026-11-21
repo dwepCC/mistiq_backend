@@ -98,9 +98,14 @@ func RegisterPublicRoutes(app fiber.Router) {
 	h := handler.NewEcommerceHandler()
 	g := app.Group("/public/ecommerce", middleware.RequireTenant(), middleware.RequireEcommerceAvailable())
 	g.Get("/settings", h.PublicSettingsAPI)
+	// Meta HTML para bots de link preview (WhatsApp/Facebook/Telegram) — ver comentario en el handler.
+	g.Get("/meta", h.PublicMetaHTMLAPI)
 	g.Get("/categories", h.PublicCategoriesAPI)
 	g.Get("/price-bounds", h.PublicPriceBoundsAPI)
 	g.Get("/products", h.PublicProductsAPI)
+	g.Get("/products/:id/options", h.PublicProductOptionsAPI)
+	g.Get("/products/:id/gallery", h.PublicProductGalleryAPI)
+	g.Get("/orders/:id/pdf", h.PublicOrderPDFAPI)
 	g.Get("/carriers", h.PublicCarriersAPI)
 	// Seguimiento del pedido para el cliente (número + celular).
 	g.Get("/track", h.PublicTrackAPI)

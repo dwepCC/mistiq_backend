@@ -118,6 +118,14 @@ func (s *SaleService) pendingCreditNoteRefunds(branchID uint) ([]PendingRefund, 
 		if refundedSet["NC/"+nc.Number] {
 			continue
 		}
+		// Solo lo cobrado: una nota sobre una venta a crédito sin pagar no deja nada que devolver (baja la cuenta por cobrar).
+		refund, rerr := NoteRefundableAmount(s.db, &nc)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if refund <= 0 {
+			continue
+		}
 		saleID := uint(0)
 		if nc.OriginalSaleID != nil {
 			saleID = *nc.OriginalSaleID
@@ -128,7 +136,7 @@ func (s *SaleService) pendingCreditNoteRefunds(branchID uint) ([]PendingRefund, 
 			NoteNumber:    nc.Number,
 			SaleID:        saleID,
 			SaleNumber:    nc.Number,
-			Amount:        nc.Total,
+			Amount:        refund,
 			PaymentMethod: nc.PaymentMethod,
 			CancelledAt:   nc.IssueDate.Format("2006-01-02"),
 		})
@@ -196,6 +204,13 @@ func (s *SaleService) ApplyPendingNoteRefund(noteSaleID, sessionID, userID uint,
 	if already > 0 {
 		return nil
 	}
+	refund, err := NoteRefundableAmount(s.db, &nc)
+	if err != nil {
+		return err
+	}
+	if refund <= 0 {
+		return errNotFound("esta nota de crédito no tiene dinero por devolver: la venta no estaba cobrada en esa parte")
+	}
 	paymentMethod := strings.TrimSpace(nc.PaymentMethod)
 	if paymentMethod == "" {
 		paymentMethod = "efectivo"
@@ -203,7 +218,7 @@ func (s *SaleService) ApplyPendingNoteRefund(noteSaleID, sessionID, userID uint,
 	return s.db.Create(&database.TenantCashMovement{
 		CashSessionID: sessionID,
 		Type:          "expense",
-		Amount:        nc.Total,
+		Amount:        refund,
 		PaymentMethod: paymentMethod,
 		Category:      "Devolución por nota de crédito",
 		Reference:     ref,

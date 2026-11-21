@@ -31,7 +31,7 @@ func setupCashReportPhysicalBalanceTestDB(t *testing.T) *gorm.DB {
 		&database.TenantCashSession{}, &database.TenantCashMovement{},
 		&database.TenantPaymentMethod{}, &database.TenantBankAccount{}, &database.TenantBankMovement{},
 		&database.TenantSale{}, &database.TenantSalePayment{}, &database.TenantPurchase{},
-		&database.TenantBranch{}, &database.TenantUser{},
+		&database.TenantBranch{}, &database.TenantUser{}, &database.TenantAccountTransfer{}, &database.TenantBank{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {
 			t.Fatal(err)

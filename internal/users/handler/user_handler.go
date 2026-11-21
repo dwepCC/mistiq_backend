@@ -222,6 +222,8 @@ func (h *UserHandler) DeleteForm(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString("ID inválido")
 	}
-	service.NewUserService(tenantDB(c)).Delete(uint(id))
+	if err := service.NewUserService(tenantDB(c)).Delete(uint(id)); err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
 	return c.Redirect().To("/users?success=deleted")
 }

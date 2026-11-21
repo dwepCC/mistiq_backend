@@ -42,6 +42,11 @@ func DescriptionOf(b TenantBackfill) string {
 // V036SalePaymentCashSessionBackfill: ~8300 pagos históricos en ~190 tenants quedaron
 // resolubles y sin escribir tras marcarse "ya aplicado" prematuramente.
 //
+// Qué significa "repetible" para el motor (engine.backfillState.due): se vuelve a ejecutar
+// mientras no tenga un éxito registrado POSTERIOR a la última migración de schema del tenant —
+// una vez por cada cambio de schema, no en cada corrida del cron. Hasta el 14-oct-2026 se
+// re-ejecutaba siempre, y el cron lo corría cada 5 min sobre los mismos 100 tenants sin fin.
+//
 // Opcional (misma convención que Described): un TenantBackfill que no la implementa mantiene el
 // comportamiento run-once de siempre.
 type Repeatable interface {

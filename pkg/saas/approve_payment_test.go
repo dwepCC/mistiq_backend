@@ -78,7 +78,7 @@ func TestApprovePayment_extendsToPaidCyclePeriod(t *testing.T) {
 	}
 	db.Create(&pay)
 
-	if err := ApprovePayment(pay.ID, 0, 0, "ok", 1); err != nil {
+	if err := ApprovePayment(pay.ID, 0, 0, "ok", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestApprovePayment_rejectsPartialPayment(t *testing.T) {
 	pay := database.SaasPayment{TenantID: tenant.ID, BillingCycleID: &cycle.ID, Amount: 50, Currency: "PEN", Status: database.SaasPayPendingReview}
 	db.Create(&pay)
 
-	if err := ApprovePayment(pay.ID, 0, 0, "parcial", 1); err == nil {
+	if err := ApprovePayment(pay.ID, 0, 0, "parcial", 1, nil); err == nil {
 		t.Fatal("se esperaba rechazo por pago insuficiente")
 	}
 	var c database.SaasBillingCycle

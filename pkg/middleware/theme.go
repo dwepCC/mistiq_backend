@@ -12,7 +12,7 @@ import (
 // Requiere que PassLocalsToViews esté activo en la configuración de Fiber.
 func TenantTheme() fiber.Handler {
 	return func(c fiber.Ctx) error {
-		theme := utils.GetTheme("blue") // tema por defecto
+		theme := utils.GetTheme("green") // tema por defecto
 
 		if tdb, ok := c.Locals("tenantDB").(*gorm.DB); ok && tdb != nil {
 			var cfg database.TenantCompanyConfig

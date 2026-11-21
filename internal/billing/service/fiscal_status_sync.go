@@ -25,19 +25,30 @@ func (s *BillingService) ReconcileSaleFromFacturador(saleID uint) bool {
 	if err := s.db.First(&sale, saleID).Error; err != nil {
 		return false
 	}
-	if sale.BillingStatus == "accepted" || sale.BillingStatus == "rejected" {
-		return false
-	}
 	var inv database.TenantInvoice
 	if err := s.db.Where("sale_id = ?", saleID).First(&inv).Error; err != nil {
 		return false
 	}
-	if billingstate.HasFinalSunatOutcome(&inv) {
-		return false
+	// Un «rechazado» causado por una caída de SUNAT/red (o por un CDR todavía pendiente) no es definitivo: se vuelve a
+	// consultar al facturador, aplicando también estados no terminales, para devolverlo a «enviado» y llegar a «aceptado».
+	reopen := billingstate.LooksLikeFalseRejection(&inv)
+	if !reopen {
+		if sale.BillingStatus == "accepted" || sale.BillingStatus == "rejected" {
+			return false
+		}
+		if billingstate.HasFinalSunatOutcome(&inv) {
+			return false
+		}
 	}
 
 	before := sale.BillingStatus
-	fiscalStatus, applied := s.fetchAndApplyFromFacturadorTerminal(&inv, saleID)
+	var fiscalStatus string
+	var applied bool
+	if reopen {
+		fiscalStatus, applied = s.fetchAndApplyFiscalDocument(&inv, saleID, false, false)
+	} else {
+		fiscalStatus, applied = s.fetchAndApplyFromFacturadorTerminal(&inv, saleID)
+	}
 	if !applied {
 		return false
 	}

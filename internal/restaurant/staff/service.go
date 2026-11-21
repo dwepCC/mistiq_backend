@@ -11,6 +11,7 @@ import (
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	"tukifac/pkg/restaurantperm"
+	"tukifac/pkg/saas"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -24,10 +25,18 @@ var ErrTenantOwnerRoleLocked = errors.New("no se puede cambiar el rol del usuari
 
 type Service struct {
 	db *gorm.DB
+	// tenantID activa el tope de usuarios del plan al crear usuarios operativos (ver
+	// saas.ReserveUserSeat). 0 = sin validar.
+	tenantID uint
 }
 
 func New(db *gorm.DB) *Service {
 	return &Service{db: db}
+}
+
+// WithTenant devuelve el servicio validando el límite de usuarios del plan de ese tenant.
+func (s *Service) WithTenant(tenantID uint) *Service {
+	return &Service{db: s.db, tenantID: tenantID}
 }
 
 func (s *Service) GetPermCacheVersion() (uint, error) {
@@ -196,8 +205,10 @@ func (s *Service) UpsertStaffForUser(userID uint, employeeType string, pin strin
 	st.CanOpenTable = flags.CanOpenTable || employeeType == "waiter" || employeeType == "admin"
 	st.KitchenAccess = flags.KitchenAccess || employeeType == "cook" || employeeType == "admin"
 	st.DeliveryAccess = flags.DeliveryAccess || employeeType == "driver"
+	pinChanged := false
 	if flags.ClearPin {
 		st.PinHash = ""
+		pinChanged = true
 	} else if pin != "" {
 		pin = strings.TrimSpace(pin)
 		if err := ValidatePINFormat(pin); err != nil {
@@ -211,6 +222,7 @@ func (s *Service) UpsertStaffForUser(userID uint, employeeType string, pin strin
 			return err
 		}
 		st.PinHash = string(hash)
+		pinChanged = true
 	}
 	if isNew {
 		if err := s.db.Create(&st).Error; err != nil {
@@ -220,6 +232,10 @@ func (s *Service) UpsertStaffForUser(userID uint, employeeType string, pin strin
 		if err := s.db.Save(&st).Error; err != nil {
 			return err
 		}
+	}
+	if pinChanged {
+		// Cambiar o quitar el PIN revoca las sesiones vigentes del usuario (409 SESSION_UPDATED).
+		_ = branch.BumpSessionVersion(s.db, userID)
 	}
 	return s.BumpPermCacheVersion()
 }
@@ -245,6 +261,10 @@ type CreateStaffUserInput struct {
 	StaffCode    string
 	DisplayName  string
 	BranchIDs    []uint
+	// ReplaceDeleted: si el correo es de un usuario eliminado, libera ese correo (renombrando al
+	// eliminado, que conserva su historial) y crea un usuario nuevo. Sin esto CreateStaffUser
+	// devuelve *database.DeletedUserEmailError para que el cliente elija restaurar o crear nuevo.
+	ReplaceDeleted bool
 }
 
 func (s *Service) CreateStaffUser(in CreateStaffUserInput) (*StaffManagementItem, error) {
@@ -266,7 +286,7 @@ func (s *Service) CreateStaffUser(in CreateStaffUserInput) (*StaffManagementItem
 	if err := s.validatePINUnique(in.Pin, 0); err != nil {
 		return nil, err
 	}
-	if err := s.ensureEmailAvailable(email); err != nil {
+	if err := s.ensureEmailAvailable(email, in.ReplaceDeleted); err != nil {
 		return nil, err
 	}
 
@@ -289,6 +309,10 @@ func (s *Service) CreateStaffUser(in CreateStaffUserInput) (*StaffManagementItem
 
 	var createdUserID uint
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// Los usuarios operativos de Tukichef también ocupan un cupo de usuarios del plan.
+		if err := saas.ReserveUserSeat(tx, s.tenantID); err != nil {
+			return err
+		}
 		txSvc := &Service{db: tx}
 		user := &database.TenantUser{
 			RoleID:          roleID,
@@ -323,7 +347,7 @@ func (s *Service) CreateStaffUser(in CreateStaffUserInput) (*StaffManagementItem
 		return nil, err
 	}
 
-	items, err := s.ListStaffManagement()
+	items, err := s.ListStaffManagement(false)
 	if err != nil {
 		return nil, err
 	}
@@ -420,12 +444,31 @@ type StaffManagementItem struct {
 	BranchIDs         []uint   `json:"branch_ids,omitempty"`
 	BranchNames       []string `json:"branch_names,omitempty"`
 	RoleEditLocked    bool     `json:"role_edit_locked"`
+	// Solo en el listado de eliminados: cuándo se eliminó y si puede restaurarse desde Tukichef
+	// (solo los usuarios operativos; los del ERP se restauran desde Usuarios del ERP).
+	DeletedAt  *time.Time `json:"deleted_at,omitempty"`
+	Restorable bool       `json:"restorable,omitempty"`
 }
 
-func (s *Service) ListStaffManagement() ([]StaffManagementItem, error) {
+// ListStaffManagement lista usuarios + perfil de staff. Con onlyDeleted lista solo los eliminados
+// (borrado lógico) para poder restaurarlos.
+func (s *Service) ListStaffManagement(onlyDeleted bool) ([]StaffManagementItem, error) {
 	var users []database.TenantUser
-	if err := s.db.Order("name, email").Find(&users).Error; err != nil {
+	uq := s.db.Order("name, email")
+	if onlyDeleted {
+		uq = s.db.Unscoped().Where("deleted_at IS NOT NULL").Order("name, email")
+	}
+	if err := uq.Find(&users).Error; err != nil {
 		return nil, err
+	}
+	roleNames := map[uint]string{}
+	if onlyDeleted {
+		var roles []database.TenantRole
+		if err := s.db.Unscoped().Select("id", "name").Find(&roles).Error; err == nil {
+			for _, r := range roles {
+				roleNames[r.ID] = r.Name
+			}
+		}
 	}
 	var staffRows []database.TenantRestaurantStaff
 	if err := s.db.Find(&staffRows).Error; err != nil {
@@ -442,6 +485,11 @@ func (s *Service) ListStaffManagement() ([]StaffManagementItem, error) {
 			Name:   u.Name,
 			Email:  u.Email,
 			Active: u.Active,
+		}
+		if onlyDeleted {
+			t := u.DeletedAt.Time
+			item.DeletedAt = &t
+			item.Restorable = IsOperativeRestaurantRole(roleNames[u.RoleID])
 		}
 		if st, ok := byUser[u.ID]; ok {
 			item.StaffID = st.ID
@@ -525,38 +573,128 @@ func (s *Service) StaffDisplayName(st *database.TenantRestaurantStaff) string {
 	return ""
 }
 
-// ensureEmailAvailable rechaza emails en uso; elimina restos de altas fallidas (soft delete).
-func (s *Service) ensureEmailAvailable(email string) error {
-	var existing database.TenantUser
-	err := s.db.Unscoped().Where("email = ?", email).First(&existing).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil
+// ensureEmailAvailable rechaza correos en uso. Si el correo es de un usuario eliminado devuelve
+// *database.DeletedUserEmailError (restaurar o crear nuevo); con replaceDeleted libera el correo
+// renombrando al eliminado. NUNCA borra definitivamente a nadie: antes se purgaba (Unscoped) a
+// cualquier usuario eliminado —o a un usuario ERP activo sin perfil de staff— con ese correo,
+// dejando ventas y cajas con un user_id huérfano.
+func (s *Service) ensureEmailAvailable(email string, replaceDeleted bool) error {
+	var live database.TenantUser
+	err := s.db.Where("LOWER(email) = ?", strings.ToLower(strings.TrimSpace(email))).First(&live).Error
+	if err == nil {
+		return errors.New("el email ya está registrado")
 	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	deleted, err := database.FindDeletedUserByEmail(s.db, email)
 	if err != nil {
 		return err
 	}
-	if existing.DeletedAt.Valid {
-		s.purgeStaffUser(existing.ID)
+	if deleted == nil {
 		return nil
 	}
-	var st database.TenantRestaurantStaff
-	if err := s.db.Where("user_id = ?", existing.ID).First(&st).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		s.purgeStaffUser(existing.ID)
-		return nil
+	if !replaceDeleted {
+		return database.NewDeletedUserEmailError(s.db, deleted)
 	}
-	return errors.New("el email ya está registrado")
+	return database.ArchiveDeletedUserEmail(s.db, deleted)
 }
 
-// purgeStaffUser elimina por completo un usuario y su perfil (alta fallida o limpieza).
-func (s *Service) purgeStaffUser(userID uint) {
-	if userID == 0 {
-		return
+// IsOperativeRestaurantRole indica si el rol es el de usuarios operativos de Tukichef. Solo esos
+// usuarios se restauran desde Tukichef; los del ERP (con contraseña y permisos propios) se
+// restauran desde la pantalla de usuarios del ERP.
+func IsOperativeRestaurantRole(roleName string) bool {
+	return roleName == operativeRestaurantRoleName
+}
+
+// RestoreStaffUser reactiva a un usuario operativo eliminado conservando su id (y su historial).
+// Se exige PIN nuevo; el perfil de staff existente se reactiva con los datos de in. Ocupa un cupo.
+func (s *Service) RestoreStaffUser(userID uint, in CreateStaffUserInput) (*StaffManagementItem, error) {
+	name := strings.TrimSpace(in.Name)
+	employeeType := normalizeEmployeeType(in.EmployeeType)
+	if name == "" {
+		return nil, errors.New("nombre requerido")
 	}
-	_ = s.db.Where("user_id = ?", userID).Delete(&database.TenantRestaurantStaff{}).Error
-	if branch.UserBranchesReady(s.db) {
-		_ = s.db.Where("user_id = ?", userID).Delete(&database.TenantUserBranch{}).Error
+	if employeeType == "" {
+		return nil, errors.New("rol de restaurante requerido")
 	}
-	_ = s.db.Unscoped().Delete(&database.TenantUser{}, userID).Error
+	if err := ValidatePINFormat(in.Pin); err != nil {
+		return nil, err
+	}
+	if err := s.validatePINUnique(in.Pin, userID); err != nil {
+		return nil, err
+	}
+
+	var user database.TenantUser
+	if err := s.db.Unscoped().First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("usuario no encontrado")
+		}
+		return nil, err
+	}
+	if !user.DeletedAt.Valid {
+		return nil, errors.New("el usuario no está eliminado")
+	}
+	var role database.TenantRole
+	if err := s.db.Unscoped().First(&role, user.RoleID).Error; err != nil || !IsOperativeRestaurantRole(role.Name) {
+		return nil, errors.New("este usuario pertenece al ERP: restáurelo desde Usuarios del ERP o use otro correo")
+	}
+
+	branchIDs := in.BranchIDs
+	if len(branchIDs) == 0 {
+		mainID, err := s.mainBranchID()
+		if err != nil {
+			return nil, err
+		}
+		branchIDs = []uint{mainID}
+	}
+	if err := branch.ValidateBranchIDsExist(s.db, branchIDs); err != nil {
+		return nil, err
+	}
+
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := saas.ReserveUserSeat(tx, s.tenantID); err != nil {
+			return err
+		}
+		hasher := database.TenantUser{}
+		if err := hasher.SetPassword(randomOperativePassword()); err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Model(&database.TenantUser{}).Where("id = ?", userID).Updates(map[string]interface{}{
+			"deleted_at": nil,
+			"active":     true,
+			"name":       name,
+			"phone":      strings.TrimSpace(in.Phone),
+			"password":   hasher.Password,
+		}).Error; err != nil {
+			return err
+		}
+		if err := branch.SetUserAssignedBranches(tx, userID, branchIDs, true); err != nil {
+			return err
+		}
+		txSvc := &Service{db: tx}
+		return txSvc.UpsertStaffForUser(userID, employeeType, in.Pin, UpsertFlags{
+			DisplayName: strings.TrimSpace(in.DisplayName),
+			StaffCode:   strings.TrimSpace(in.StaffCode),
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items, err := s.ListStaffManagement(false)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.UserID == userID {
+			return &item, nil
+		}
+	}
+	return &StaffManagementItem{
+		UserID: userID, Name: name, Email: user.Email, Active: true,
+		EmployeeType: employeeType, HasPin: true, StaffActive: true, ProfileComplete: true,
+	}, nil
 }
 
 // validatePINUnique impide dos staff activos con el mismo PIN (login Tukichef).

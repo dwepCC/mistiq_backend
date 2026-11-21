@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"tukifac/internal/memberships/service"
+	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	"tukifac/pkg/saas/docusage"
 
@@ -38,12 +39,14 @@ func (h *MembershipHandler) ListAPI(c fiber.Ctx) error {
 			contactID = uint(n)
 		}
 	}
-	var branchID uint
+	var reqBranch uint
 	if v := strings.TrimSpace(c.Query("branch_id")); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
-			branchID = uint(n)
+			reqBranch = uint(n)
 		}
 	}
+	// Una sucursal no accesible cae a la activa; sin sucursal resuelta no lista nada (nunca "todas").
+	branchID := branch.ResolveReadBranchFilter(c, reqBranch)
 	limit, _ := strconv.Atoi(c.Query("limit"))
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	rows, total, err := svc.List(service.ListParams{
@@ -63,7 +66,7 @@ func (h *MembershipHandler) ListAPI(c fiber.Ctx) error {
 
 func (h *MembershipHandler) ReminderCountsAPI(c fiber.Ctx) error {
 	svc := service.NewMembershipService(db(c))
-	overdue, upcoming, err := svc.ReminderCounts()
+	overdue, upcoming, err := svc.ReminderCountsInBranch(branch.ResolveReadBranchFilter(c, 0))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -83,6 +86,9 @@ func (h *MembershipHandler) GetAPI(c fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	if !branch.RecordReadable(c, m.BranchID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": service.ErrMembershipNotFound.Error()})
+	}
 	return c.JSON(fiber.Map{"data": m})
 }
 
@@ -92,11 +98,15 @@ func (h *MembershipHandler) BillingHistoryAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	svc := service.NewMembershipService(db(c))
-	if _, err := svc.GetByID(uint(id)); err != nil {
+	bm, err := svc.GetByID(uint(id))
+	if err != nil {
 		if errors.Is(err, service.ErrMembershipNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if !branch.RecordReadable(c, bm.BranchID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": service.ErrMembershipNotFound.Error()})
 	}
 	rows, err := svc.ListBillingHistory(uint(id))
 	if err != nil {
@@ -110,6 +120,12 @@ func (h *MembershipHandler) CreateAPI(c fiber.Ctx) error {
 	if err := c.Bind().Body(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
+	// La sucursal del cliente se valida (solo la activa o una accesible); nunca se acepta cruda.
+	wb, werr := branch.ResolveWriteBranchID(c, body.BranchID)
+	if werr != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": werr.Error(), "code": branch.CodeBranchForbidden})
+	}
+	body.BranchID = wb
 	svc := service.NewMembershipService(db(c))
 	m, err := svc.Create(body)
 	if err != nil {
@@ -128,6 +144,11 @@ func (h *MembershipHandler) UpdateAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
 	svc := service.NewMembershipService(db(c))
+	if denied, resp := membershipWriteDenied(c, svc, uint(id)); denied {
+		return resp
+	}
+	// Una membresía no cambia de sucursal por edición (evita moverla a una sucursal ajena).
+	body.BranchID = nil
 	m, err := svc.Update(uint(id), body)
 	if err != nil {
 		if errors.Is(err, service.ErrMembershipNotFound) {
@@ -150,6 +171,9 @@ func (h *MembershipHandler) SetStatusAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
 	svc := service.NewMembershipService(db(c))
+	if denied, resp := membershipWriteDenied(c, svc, uint(id)); denied {
+		return resp
+	}
 	if err := svc.SetStatus(uint(id), body.Status); err != nil {
 		if errors.Is(err, service.ErrMembershipNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
@@ -165,6 +189,9 @@ func (h *MembershipHandler) DeleteAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
 	svc := service.NewMembershipService(db(c))
+	if denied, resp := membershipWriteDenied(c, svc, uint(id)); denied {
+		return resp
+	}
 	if err := svc.Delete(uint(id)); err != nil {
 		if errors.Is(err, service.ErrMembershipNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
@@ -190,6 +217,9 @@ func (h *MembershipHandler) GenerateSaleAPI(c fiber.Ctx) error {
 		body.PaymentMethod = "cash"
 	}
 	svc := service.NewMembershipService(db(c))
+	if denied, resp := membershipWriteDenied(c, svc, uint(id)); denied {
+		return resp
+	}
 	var centralTenantID uint
 	if tenant, ok := c.Locals("tenant").(*database.Tenant); ok && tenant != nil {
 		centralTenantID = tenant.ID
@@ -215,4 +245,25 @@ func (h *MembershipHandler) GenerateSaleAPI(c fiber.Ctx) error {
 			"invoice": inv,
 		},
 	})
+}
+
+// membershipWriteDenied guard de escritura por sucursal: inexistente o de una sucursal no visible -> 404;
+// visible (admin viendo todas) pero no de la sucursal activa -> 403 BRANCH_FORBIDDEN.
+func membershipWriteDenied(c fiber.Ctx, svc *service.MembershipService, id uint) (bool, error) {
+	m, err := svc.GetByID(id)
+	if err != nil {
+		if errors.Is(err, service.ErrMembershipNotFound) {
+			return true, c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+		}
+		return true, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if !branch.RecordReadable(c, m.BranchID) {
+		return true, c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": service.ErrMembershipNotFound.Error()})
+	}
+	if !branch.RecordWritable(c, m.BranchID) {
+		return true, c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Solo puede operar membresías de su sucursal activa; cambie de sucursal", "code": branch.CodeBranchForbidden,
+		})
+	}
+	return false, nil
 }

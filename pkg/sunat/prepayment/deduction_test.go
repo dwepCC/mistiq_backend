@@ -42,3 +42,27 @@ func TestSaleGroupDeductibleBase(t *testing.T) {
 		t.Fatal("gravado base")
 	}
 }
+
+// Casos reales del tenant 20612257320 (oct-2026): el IGV recalculado sobre la base redondeada
+// daba 100.01 y 44.99 en vez de 100.00 y 45.00.
+func TestApplyDeductionToSaleTotals_TotalExactoSinDerivaDeCentimo(t *testing.T) {
+	cases := []struct {
+		name                          string
+		gSub, gTax, gTotal, base, ded float64
+		wantSub, wantTax, wantTotal   float64
+	}{
+		{"130 menos anticipo de 30", 110.17, 19.83, 130, 25.42, 30, 84.75, 15.25, 100},
+		{"79.50 menos anticipo de 34.50", 67.37, 12.13, 79.5, 29.24, 34.5, 38.13, 6.87, 45},
+		{"59 menos anticipo de 50", 50, 9, 59, 42.37, 50, 7.63, 1.37, 9},
+	}
+	for _, c := range cases {
+		totals := SaleGroupTotals{GravadoSubtotal: c.gSub, GravadoTax: c.gTax, GravadoTotal: c.gTotal, Subtotal: c.gSub, TaxAmount: c.gTax, Total: c.gTotal}
+		res, err := ApplyDeductionToSaleTotals(AffectationGravado, totals, c.base, c.ded, 18)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if res.Totals.Subtotal != c.wantSub || res.Totals.TaxAmount != c.wantTax || res.Totals.Total != c.wantTotal {
+			t.Fatalf("%s: got sub=%v tax=%v total=%v want %v/%v/%v", c.name, res.Totals.Subtotal, res.Totals.TaxAmount, res.Totals.Total, c.wantSub, c.wantTax, c.wantTotal)
+		}
+	}
+}

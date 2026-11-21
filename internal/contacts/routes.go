@@ -17,7 +17,7 @@ import (
 // TenantPermission), así que quedaba SIEMPRE afuera de buscar/crear un cliente para su venta —
 // regresión real detectada en producción. RequireContactsAccess (pkg/middleware/contacts_access.go)
 // agrega el mismo puente que ya usan sales/cashbank: permiso tenant O staff de restaurante con
-// o.c (crear pedido). "delete" queda sin puente (no es una operación de POS).
+// o.c (crear pedido). "delete" queda sin puente (no es una operación de POS). Los permisos son por tipo: customers.* y suppliers.*; el handler aplica el alcance (middleware.ContactsScopeFrom).
 func RegisterRoutes(api fiber.Router) {
 	h := handler.NewContactHandler()
 	mod := middleware.RequireModule("contacts")
@@ -25,7 +25,7 @@ func RegisterRoutes(api fiber.Router) {
 	view := middleware.RequireContactsAccess("view")
 	create := middleware.RequireContactsAccess("create")
 	edit := middleware.RequireContactsAccess("edit")
-	del := middleware.RequirePermission("contacts.delete")
+	del := middleware.RequireContactsAccess("delete")
 
 	api.Get("/contacts/default", mod, loadRest, view, h.DefaultClientAPI)
 	api.Get("/contacts", mod, loadRest, view, h.SearchAPI)
@@ -35,6 +35,6 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/contacts/bulk-import", mod, loadRest, create, h.BulkImportAPI)
 	api.Put("/contacts/:id", mod, loadRest, edit, h.UpdateAPI)
 	api.Post("/contacts/:id/photo", mod, loadRest, edit, h.UploadPhotoAPI)
-	api.Delete("/contacts/:id", mod, del, h.DeleteAPI)
+	api.Delete("/contacts/:id", mod, loadRest, del, h.DeleteAPI)
 	api.Patch("/contacts/:id/toggle", mod, loadRest, edit, h.ToggleAPI)
 }

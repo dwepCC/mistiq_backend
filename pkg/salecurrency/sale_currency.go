@@ -23,7 +23,17 @@ const (
 	// OpDetraccion/OpDetraccionGeneral, porque ese paquete ya importa este y crear una dependencia
 	// inversa sería un ciclo.
 	OpDetraccionTransporte = "1004"
+
+	// Exportación de servicios (catálogo 51): el cliente está en el exterior y no paga IGV (afectación 40).
+	OpExportServicios = "0201" // servicios prestados íntegramente en el país a un no domiciliado
+	OpExportHospedaje = "0202" // hospedaje a no domiciliados (con alimentación)
+	OpExportParcial   = "0208" // servicios realizados parcialmente en el extranjero
 )
+
+// IsExportService indica si el código es una exportación de servicios habilitada.
+func IsExportService(opCode string) bool {
+	return opCode == OpExportServicios || opCode == OpExportHospedaje || opCode == OpExportParcial
+}
 
 // IsDetraccion agrupa las dos variantes de detracción (1001 general, 1004 transporte de carga):
 // comparten toda la validación de factura/moneda/cliente en sale_service.go, y solo difieren en
@@ -53,7 +63,7 @@ func NormalizeOperationType(raw string) (string, error) {
 		return OpVentaInterna, nil
 	}
 	switch code {
-	case OpVentaInterna, OpDetraccion, OpVentasNoDomiciliados, OpDetraccionTransporte:
+	case OpVentaInterna, OpDetraccion, OpVentasNoDomiciliados, OpDetraccionTransporte, OpExportServicios, OpExportHospedaje, OpExportParcial:
 		return code, nil
 	default:
 		if sunatpre.IsAllowedEmitOperationType(code) {

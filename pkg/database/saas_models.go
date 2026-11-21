@@ -20,6 +20,9 @@ const (
 	TenantStatusActive    = "active"
 	TenantStatusSuspended = "suspended"
 	TenantStatusBlocked   = "blocked"
+	// TenantStatusInactive lo pone el administrador desde el panel central ("desactivar empresa"). No es
+	// una suspensión por falta de pago: no hay acceso ni siquiera al portal de pagos.
+	TenantStatusInactive = "inactive"
 )
 
 // Ciclos de facturación.
@@ -110,6 +113,9 @@ type SaasBillingCycle struct {
 	Amount          float64 `gorm:"not null" json:"amount"`
 	GrossAmount     float64 `gorm:"default:0" json:"gross_amount"`   // precio del plan × meses, sin descuento
 	MonthsCovered   int     `gorm:"default:0" json:"months_covered"` // meses que cubre el cobro
+	// BonusMonths meses de cortesía incluidos en el período (period_start→period_end) que NO se
+	// cobran: Amount/GrossAmount salen de MonthsCovered.
+	BonusMonths     int     `gorm:"default:0" json:"bonus_months"`
 	DiscountType    string  `gorm:"size:10" json:"discount_type"`    // "" | percent | fixed
 	DiscountValue   float64 `gorm:"default:0" json:"discount_value"`
 	ReconnectionFee float64 `gorm:"default:0" json:"reconnection_fee"`

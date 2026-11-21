@@ -146,12 +146,14 @@ func RunMigrateFleet(args []string) int {
 	limit := fs.Int("limit", 100, "máximo tenants por ejecución")
 	workers := fs.Int("workers", 4, "workers concurrentes")
 	activeOnly := fs.Bool("active-only", true, "solo tenants activos")
+	skipDrift := fs.Bool("skip-drift-scan", false, "omitir el escaneo de deriva previo (lo usa el deploy: es secuencial y lento)")
 	_ = fs.Parse(args)
 
 	summary := engine.RunFleetMigrate(engine.FleetOptions{
-		Limit:      *limit,
-		Workers:    *workers,
-		ActiveOnly: *activeOnly,
+		Limit:         *limit,
+		Workers:       *workers,
+		ActiveOnly:    *activeOnly,
+		SkipDriftScan: *skipDrift,
 	})
 	return printFleetSummary(summary)
 }

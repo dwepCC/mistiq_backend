@@ -21,7 +21,7 @@ func tenantDB(c fiber.Ctx) *gorm.DB {
 }
 
 // ListOpenVouchersAPI GET /prepayment/vouchers?contact_id=&affectation_group=&tax_rate=
-// contact_id es opcional: si se omite, lista todos los anticipos abiertos (como PHP legacy).
+// Solo lista anticipos del cliente indicado; sin contact_id devuelve lista vacía.
 func (h *VoucherHandler) ListOpenVouchersAPI(c fiber.Ctx) error {
 	db := tenantDB(c)
 	if db == nil {

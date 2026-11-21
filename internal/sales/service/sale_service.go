@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -9,17 +10,20 @@ import (
 	"strings"
 	"time"
 
+	"tukifac/config"
 	cashbanksvc "tukifac/internal/cashbank/service"
 	detraccionsvc "tukifac/internal/detraccion"
 	salecontext "tukifac/internal/fiscal/salecontext"
 	invsvc "tukifac/internal/inventory/service"
 	prepaymentsvc "tukifac/internal/prepayment"
+	"tukifac/internal/exportacion"
 	"tukifac/internal/sales/nvdisplay"
 	"tukifac/pkg/billingstate"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/money"
 	"tukifac/pkg/paymentcondition"
+	"tukifac/pkg/productbranch"
 	"tukifac/pkg/saas/docusage"
 	"tukifac/pkg/salecurrency"
 	"tukifac/pkg/salescope"
@@ -71,6 +75,32 @@ func validateSaleItemPrices(items []SaleItemInput) error {
 	return nil
 }
 
+// validateSaleItemQuantities exige quantity > 0 en toda línea. Antes de este chequeo, una
+// cantidad <= 0 solo se rechazaba dentro de RecordMovementTx, y solo cuando el producto tenía
+// ManageStock=true — para servicios, productos catálogo o líneas manuales, una cantidad negativa
+// o cero pasaba sin control y llegaba a construir totales con tax.CalcItem.
+func validateSaleItemQuantities(items []SaleItemInput) error {
+	for _, it := range items {
+		if it.Quantity > 0 {
+			continue
+		}
+		return fmt.Errorf("'%s' tiene una cantidad inválida (%.3f); debe ser mayor a cero", saleItemLabel(it), it.Quantity)
+	}
+	return nil
+}
+
+// saleItemLabel arma una etiqueta legible para mensajes de error, igual que validateSaleItemPrices.
+func saleItemLabel(it SaleItemInput) string {
+	label := strings.TrimSpace(it.Description)
+	if label == "" {
+		label = strings.TrimSpace(it.Code)
+	}
+	if label == "" {
+		label = "un ítem de la venta"
+	}
+	return label
+}
+
 // productIsCatalogService: servicios no consumen inventario aunque un registro legacy tenga manage_stock en true.
 func productIsCatalogService(p *database.TenantProduct) bool {
 	if p == nil {
@@ -84,7 +114,13 @@ type SaleItemInput struct {
 	// PresentationID: variante/presentación elegida (ej. color) cuando el producto vende por
 	// presentación con stock propio (product.HasVariants). nil = producto sin variantes o venta
 	// que no distingue cuál se descuenta (comportamiento previo).
-	PresentationID     *uint   `json:"presentation_id"`
+	PresentationID *uint `json:"presentation_id"`
+	// SaleUnitID: unidad de venta con conversión elegida (ej. "Saco 100 KG"), cuando el producto
+	// vende en una unidad distinta de la base. Quantity sigue siendo la cantidad COMERCIAL (1.5),
+	// nunca la convertida — el backend calcula la cantidad base a partir de esto, siempre server-
+	// side (ver sale_unit_resolver.go). nil = línea legacy sin conversión (comportamiento previo,
+	// intacto). Mutuamente excluyente con PresentationID.
+	SaleUnitID         *uint   `json:"sale_unit_id"`
 	Code               string  `json:"code"`
 	Description        string  `json:"description"`
 	Unit               string  `json:"unit"`
@@ -98,11 +134,20 @@ type SaleItemInput struct {
 	PriceIncludesIgv   bool    `json:"price_includes_igv"`   // si el precio ya incluye IGV
 	ModifiersJSON      string  `json:"modifiers_json"`       // detalle de modificadores para ticket
 	ItemNote           string  `json:"item_note"`            // nota libre de la línea; no toca el catálogo
+	// PackLabel: contenido de la unidad de venta ("12 UND"). Vacío = se calcula de la unidad de venta de la línea; al emitir un
+	// comprobante desde una nota de venta se copia el de la nota para que ambos digan lo mismo.
+	PackLabel string `json:"pack_label,omitempty"`
 	// ComboJSON: elección del cliente cuando el producto es un combo/promoción.
 	// [{ group_id, items: [{ product_id, quantity }] }]. El servicio resuelve el precio,
 	// valida la selección y descuenta el stock de los componentes.
 	ComboJSON string   `json:"combo_json"`
 	Serials   []string `json:"serials"` // números de serie elegidos (productos con ManageSeries)
+	// PriceAuthorized: el UnitPrice de esta línea ya fue resuelto/autorizado por código de
+	// confianza antes de llegar aquí (combo, POS de Tukichef con "precio acordado en caja/mesa",
+	// reemisión de una nota de venta ya validada). Sin json tag a propósito: el body JSON del
+	// endpoint de ventas jamás puede poblarlo, así que ningún cliente puede autoexcluirse de
+	// validateAuthorizedPrices. Ver sale_price_authorization.go.
+	PriceAuthorized bool `json:"-"`
 }
 
 // ExtraStockMovement salida de kardex de un producto que no es línea de la venta
@@ -117,6 +162,8 @@ type PaymentInput struct {
 	Method    string  `json:"method"` // código: cash, yape, plin, etc.
 	Amount    float64 `json:"amount"`
 	Reference string  `json:"reference,omitempty"` // nro. transferencia, depósito, voucher, etc.
+	// DestinationAccountID: cuenta bancaria que recibe ESTE pago (nil = la del método de pago). No aplica al efectivo.
+	DestinationAccountID *uint `json:"destination_account_id,omitempty"`
 }
 
 type CreateSaleInput struct {
@@ -129,6 +176,12 @@ type CreateSaleInput struct {
 	IssueDate            time.Time
 	DueDate              *time.Time
 	Currency             string
+	// ApplyServiceCharge cobra el recargo al consumo de la empresa (el % sale de la configuración, no de la petición). Exige que el tenant lo
+	// tenga activado; no se combina con anticipos ni detracción.
+	ApplyServiceCharge bool
+	// PresetServiceChargeRate: solo para uso interno (emisión electrónica desde una nota de venta que ya cobró recargo): usa ese % en vez del de la
+	// configuración, aunque el tenant lo haya apagado desde entonces, para que el comprobante coincida con lo que el cliente ya pagó. Nunca viene de la petición.
+	PresetServiceChargeRate float64
 	OperationTypeCode    string
 	ExchangeRate         *float64
 	PaymentMethod        string                   // legacy: si Payments vacío, se usa para el total
@@ -156,6 +209,24 @@ type CreateSaleInput struct {
 	FiscalContext           *salecontext.FiscalContextInput
 	Detraccion              *detraccionsvc.SaleInput
 	Prepayment              *prepaymentsvc.SaleInput
+	// Export: datos de la exportación de servicios (operaciones 0201/0202/0208); nil en cualquier otra operación.
+	Export *exportacion.SaleInput
+	// UserCanOverridePrice: resuelto por el HANDLER contra los permisos del JWT del usuario
+	// autenticado (middleware.HasPermission(claims, "sales.override_price")) — nunca un valor que
+	// pueda mandar el cliente en el body. true exime a TODA la venta de validateAuthorizedPrices,
+	// igual que ya hacían las líneas con item.PriceAuthorized=true (combos/Tukichef/reconstrucción
+	// desde nota) antes de este permiso. Ver docs/INCIDENT-2026-09-17-PRICE-AUTHORIZATION.md.
+	UserCanOverridePrice bool
+	// IdempotencyKey: clave por intento de cobro generada por el cliente (ver sale_idempotency.go).
+	// Vacía = sin protección (flujos internos: ecommerce, membresías, cotizaciones, reemisión).
+	IdempotencyKey string
+	// OnCreatedTx se ejecuta DENTRO de la transacción de la venta, cuando ya está completamente
+	// persistida (cabecera, ítems, pagos, caja, kardex). Si devuelve error, la transacción entera
+	// hace rollback —venta, correlativo, caja y stock incluidos—. Sirve para atar a la venta una
+	// operación que debe ocurrir "o ambas o ninguna" (p. ej. marcar una cotización como
+	// convertida con un UPDATE condicional, para que dos conversiones simultáneas no creen dos
+	// ventas). nil = sin hook.
+	OnCreatedTx func(tx *gorm.DB, sale *database.TenantSale) error
 }
 
 // NextCorrelative retorna el siguiente correlativo para una serie y lo incrementa (transacción con bloqueo de fila).
@@ -169,6 +240,29 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 	}
 	if input.BranchID == 0 || input.UserID == 0 {
 		return nil, errors.New("sucursal y usuario son requeridos")
+	}
+
+	// Reintento de un cobro que ya se guardó (respuesta perdida, timeout, pantalla congelada):
+	// devolver la venta original ANTES de validar o reservar correlativo. Ver sale_idempotency.go.
+	input.IdempotencyKey = NormalizeIdempotencyKey(input.IdempotencyKey)
+	if existing, err := FindSaleByIdempotencyKey(s.db, input.UserID, input.IdempotencyKey); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, ErrIdempotentReplay
+	}
+
+	// Productos asignados a sucursales (tenant_product_branches): no se venden fuera de ellas.
+	// Sin asignación = todas, así que lo existente no cambia. Al emitir desde una NV ya se validó
+	// al registrar la NV.
+	if input.IssuedFromNotaSaleID == nil || *input.IssuedFromNotaSaleID == 0 {
+		for _, item := range input.Items {
+			if item.ProductID == nil {
+				continue
+			}
+			if err := productbranch.EnsureAvailable(s.db, *item.ProductID, input.BranchID, item.Description); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Combos/promociones: fija el precio del grupo y añade las salidas de almacén de sus
@@ -189,12 +283,54 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 	if err := validateSaleItemPrices(input.Items); err != nil {
 		return nil, err
 	}
+	// Cantidad estrictamente positiva en toda línea, sin excepción por ManageStock ni por
+	// tratarse de una línea manual — no depende de si más adelante se registra kardex.
+	if err := validateSaleItemQuantities(input.Items); err != nil {
+		return nil, err
+	}
+	// Unidad de venta: valida pertenencia al producto, que esté activa, el factor y AllowFraction
+	// ANTES de calcular ningún precio/stock con ella. Ver sale_unit_resolver.go.
+	if err := validateSaleUnits(s.db, input.Items); err != nil {
+		return nil, err
+	}
+	// Tipo de cambio: toda venta en USD queda registrada con el TC de su fecha de emisión; si el cliente no lo envía se
+	// completa con el TC guardado del día (y sin ninguno, se rechaza). Antes un USD sin TC quedaba con exchange_rate NULL.
+	if cur, rate, _, rerr := salecurrency.ResolveDocumentRate(input.Currency, input.ExchangeRate, input.IssueDate); rerr != nil {
+		return nil, rerr
+	} else {
+		input.Currency, input.ExchangeRate = cur, rate
+	}
+	// Precio autorizado: el unit_price de cada línea con producto real debe coincidir con el
+	// catálogo (o su presentación + extras, o el Price1 de su unidad de venta), SALVO que el
+	// usuario autenticado tenga el permiso sales.override_price (UserCanOverridePrice, resuelto
+	// server-side por el handler contra el JWT — nunca un flag que mande el cliente). Reactivada
+	// el 2026-09-17 tras el incidente que la desactivó por completo (ver
+	// docs/INCIDENT-2026-09-17-PRICE-AUTHORIZATION.md): el hueco real no era la validación en sí,
+	// sino la falta de una excepción para el precio pactado/corrección manual que el POS y
+	// "Registrar venta" ya permiten editar — sales.override_price es esa excepción. Las líneas ya
+	// vetadas por código de confianza (item.PriceAuthorized=true) no se reevalúan de todos modos.
+	// Ver sale_price_authorization.go.
+	if !input.UserCanOverridePrice {
+		if err := salecurrency.EnsureRateNearOfficial(input.Currency, input.ExchangeRate, input.IssueDate); err != nil {
+			return nil, err
+		}
+		// Documento en USD: el precio autorizado es el de catálogo (soles) convertido con el TC del documento.
+		if err := validateAuthorizedPricesFX(s.db, input.BranchID, input.Items, input.Currency, input.ExchangeRate); err != nil {
+			return nil, err
+		}
+	}
 
 	series, err := docseries.ValidateForBranch(s.db, input.SeriesID, input.BranchID)
 	if err != nil {
 		return nil, err
 	}
 	if err := docusage.GuardCountableSunatQuota(input.CentralTenantID, series.SunatCode); err != nil {
+		return nil, err
+	}
+
+	// Exportación de servicios (0201/0202/0208): valida, y fuerza IGV 0 (afectación 40) antes de calcular los totales.
+	exportRow, err := s.prepareExport(&input, strings.TrimSpace(series.SunatCode))
+	if err != nil {
 		return nil, err
 	}
 
@@ -246,6 +382,16 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		if sunatCode := strings.TrimSpace(series.SunatCode); sunatCode != "01" && sunatCode != "03" {
 			return nil, errors.New("la deducción de anticipos solo aplica a factura (01) o boleta (03)")
 		}
+		// Un anticipo se deduce en su misma moneda: restar un saldo en soles de un total en dólares (o al revés) descuadra el documento.
+		for _, d := range input.Prepayment.Deductions {
+			var srcCur string
+			if err := s.db.Model(&database.TenantSale{}).Where("id = ?", d.SourceSaleID).Select("currency").Scan(&srcCur).Error; err != nil {
+				return nil, err
+			}
+			if !strings.EqualFold(strings.TrimSpace(srcCur), strings.TrimSpace(input.Currency)) && !(strings.TrimSpace(srcCur) == "" && input.Currency == salecurrency.CurrencyPEN) {
+				return nil, errors.New("el anticipo está en una moneda distinta a la de esta venta: solo se puede deducir en la misma moneda")
+			}
+		}
 		plan, err := prepaymentsvc.NewService(s.db).PlanDeductions(
 			input.ContactID,
 			input.Prepayment.AffectationGroup,
@@ -260,6 +406,31 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		subtotal = plan.AdjustedSubtotal
 		taxAmount = plan.AdjustedTax
 		total = plan.AdjustedTotal
+	}
+
+	// Recargo al consumo: cargo global fuera de la base del IGV que suma al total a pagar (DL 25988, 5.ª disp. compl.).
+	serviceChargeRate, err := tax.ResolveServiceChargeRate(s.db, input.ApplyServiceCharge && input.PresetServiceChargeRate <= 0)
+	if err != nil {
+		return nil, err
+	}
+	if input.PresetServiceChargeRate > 0 {
+		if !tax.ValidServiceChargeRate(input.PresetServiceChargeRate) {
+			return nil, errors.New("el recargo al consumo de la nota de venta no es válido")
+		}
+		serviceChargeRate = input.PresetServiceChargeRate
+	}
+	var serviceChargeAmount float64
+	if serviceChargeRate > 0 {
+		if input.Prepayment != nil || input.Detraccion != nil || salecurrency.IsExportService(input.OperationTypeCode) {
+			return nil, errors.New("el recargo al consumo no se puede combinar con anticipos, detracción ni exportación de servicios")
+		}
+		serviceChargeAmount, total = tax.AddServiceCharge(subtotal, total, serviceChargeRate)
+	}
+
+	// Un total negativo (descuentos mayores al subtotal, p. ej.) nunca es una venta válida: antes se
+	// guardaba y restaba de todos los totales del dashboard y de los reportes.
+	if total < 0 {
+		return nil, errors.New("el total de la venta no puede ser negativo: revise los descuentos y los precios")
 	}
 
 	opCode, err := salecurrency.NormalizeOperationType(input.OperationTypeCode)
@@ -332,7 +503,7 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		// 0401 (ventas no domiciliados): el cliente no tiene RUC peruano —extranjero sin RUC,
 		// pasaporte, carné de extranjería—, así que no se exige RUC. Cualquier otro tipo de
 		// operación en factura sigue exigiéndolo (mismo comportamiento de siempre).
-		if opCode != salecurrency.OpVentasNoDomiciliados {
+		if opCode != salecurrency.OpVentasNoDomiciliados && !salecurrency.IsExportService(opCode) {
 			if contact.DocType != "6" {
 				return nil, errors.New("la factura solo puede emitirse a clientes con RUC (tipo de documento 6). El cliente seleccionado no tiene RUC")
 			}
@@ -370,13 +541,35 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				continue
 			}
 			if product.ManageStock && !productIsCatalogService(&product) {
-				if product.HasVariants && item.PresentationID != nil && *item.PresentationID > 0 {
+				// Producto con presentaciones: exige una presentación válida (del producto y activa)
+				// antes de mirar stock; sin esto la venta sin presentación (o con una ajena) caía en el
+				// stock "agregado" y fallaba con un engañoso "stock insuficiente… hay 0.00".
+				_, _, presErr := invsvc.CheckProductPresentation(s.db, *item.ProductID, item.PresentationID, true)
+				if presErr != nil {
+					return nil, presErr
+				}
+				switch {
+				case product.HasVariants && item.PresentationID != nil && *item.PresentationID > 0:
 					var pstock database.TenantProductPresentationStock
 					s.db.Where("presentation_id = ? AND branch_id = ?", *item.PresentationID, input.BranchID).First(&pstock)
 					if err := checkAvailableStock(s.db, item.Description, item.Quantity, pstock.Quantity, input.BranchID, input.ReservedOrderID, *item.ProductID, item.PresentationID); err != nil {
 						return nil, err
 					}
-				} else {
+				case item.SaleUnitID != nil && *item.SaleUnitID > 0:
+					// validateSaleUnits ya corrió antes y garantiza que esto no falle salvo carrera
+					// real entre esa validación y este chequeo (misma tolerancia que el resto del
+					// método: el guard definitivo contra sobreventa vive en RecordMovementTx).
+					res, err := resolveSaleUnitForLine(s.db, *item.ProductID, item.SaleUnitID, item.Quantity)
+					if err != nil {
+						return nil, err
+					}
+					var stock database.TenantProductStock
+					s.db.Where("product_id = ? AND branch_id = ?", *item.ProductID, input.BranchID).First(&stock)
+					if stock.Quantity < res.BaseQuantity {
+						return nil, fmt.Errorf("stock insuficiente para %s: requiere %.3f (equivalente a %.3f en unidad base), hay %.3f",
+							item.Description, item.Quantity, res.BaseQuantity, stock.Quantity)
+					}
+				default:
 					var stock database.TenantProductStock
 					s.db.Where("product_id = ? AND branch_id = ?", *item.ProductID, input.BranchID).First(&stock)
 					if err := checkAvailableStock(s.db, item.Description, item.Quantity, stock.Quantity, input.BranchID, input.ReservedOrderID, *item.ProductID, nil); err != nil {
@@ -436,8 +629,17 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		}
 	}
 
+	var retentionAmount float64
+	if !salecurrency.IsDetraccion(opCode) && total > 0 {
+		var contactSnap *salecontext.ContactSnapshot
+		if contact != nil {
+			contactSnap = salecontext.ContactFromModel(contact)
+		}
+		retentionAmount = igvRetentionAmountForPayments(input.FiscalContext, sunatCode, contactSnap, total, currency, exchangeRate)
+	}
+
 	isCreditSale := false
-	if emitFromNV && total > 0 && len(payments) > 0 {
+	if emitFromNV && total > 0 && len(payments) > 0 && normalizePaymentConditionCode(input.PaymentConditionCode) != paymentcondition.CodeCredit {
 		var sumPayments float64
 		for _, p := range payments {
 			sumPayments += p.Amount
@@ -458,7 +660,11 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		}
 		if len(payments) > 0 || input.DueDate != nil {
 			var credit bool
-			payments, credit, err = PrepareDetractionSalePaymentsAllowCredit(payments, total, eval)
+			if input.Detraccion != nil && input.Detraccion.SelfDetraction {
+				payments, credit, err = PrepareSelfDetractionSalePayments(payments, total, eval)
+			} else {
+				payments, credit, err = PrepareDetractionSalePaymentsAllowCredit(payments, total, eval)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -474,12 +680,14 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 			}
 			sumPayments += p.Amount
 		}
-		if !money.PaidCoversTotal(sumPayments, total) {
+		// Con retención IGV el cliente paga solo el neto (total − retención).
+		payTarget := total - retentionAmount
+		if !money.PaidCoversTotal(sumPayments, payTarget) {
 			if input.DueDate == nil {
 				return nil, fmt.Errorf(
 					"la suma de pagos (%.2f) no cubre el total (%.2f)",
 					money.RoundDisplay(sumPayments),
-					money.RoundDisplay(total),
+					money.RoundDisplay(payTarget),
 				)
 			}
 			isCreditSale = true
@@ -500,9 +708,11 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		isCreditSale = false
 	}
 
-	salePayable := total
+	salePayable := total - retentionAmount
 	if salecurrency.IsDetraccion(opCode) && total > 0 {
-		if eval, derr := s.evaluateDetractionForCreate(input, &series, total, saleItems, contact); derr == nil && eval.Applicable {
+		// Autodetracción: el cliente paga el TOTAL (neto + detracción); si no, solo el neto.
+		selfDetraction := input.Detraccion != nil && input.Detraccion.SelfDetraction
+		if eval, derr := s.evaluateDetractionForCreate(input, &series, total, saleItems, contact); derr == nil && eval.Applicable && !selfDetraction {
 			salePayable = eval.NetPayablePEN
 		}
 	}
@@ -525,6 +735,18 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				Amount:  creditTarget,
 			}}
 		}
+		// Conversión NV→comprobante: el total se recalcula (redondeo SUNAT) y puede diferir unos
+		// centavos del de la NV; se absorbe en la última cuota copiada.
+		if emitFromNV && len(installments) > 0 {
+			var instSum float64
+			for _, in := range installments {
+				instSum += in.Amount
+			}
+			if diff := money.RoundDisplay(creditTarget - instSum); diff != 0 && diff > -0.10 && diff < 0.10 {
+				installments = append([]CreditInstallmentInput(nil), installments...)
+				installments[len(installments)-1].Amount = money.RoundDisplay(installments[len(installments)-1].Amount + diff)
+			}
+		}
 		var lastDue *time.Time
 		var instErr error
 		creditInstallmentRows, lastDue, instErr = validateCreditInstallments(installments, creditTarget, currency, loc, input.IssueDate)
@@ -542,6 +764,16 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 			return nil, fmt.Errorf(
 				"venta al contado: los pagos (%.2f) deben cubrir el total (%.2f)",
 				sumDirectPaymentsExclSpecial(payments),
+				money.RoundDisplay(salePayable),
+			)
+		}
+		// El vuelto solo puede salir de efectivo (ver pkg/money/payment_report.go): ningún método
+		// no-efectivo puede por sí solo superar el total a pagar, porque no hay forma real de
+		// devolver cambio por Yape/Plin/tarjeta/transferencia.
+		if nonCash := sumNonCashDirectPayments(payments); nonCash > salePayable+money.PaymentTolerance {
+			return nil, fmt.Errorf(
+				"el vuelto solo aplica a efectivo: los métodos no efectivo (%.2f) superan el total a pagar (%.2f)",
+				nonCash,
 				money.RoundDisplay(salePayable),
 			)
 		}
@@ -579,6 +811,8 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		GlobalDiscountAmount:  money.RoundSunat(globalDiscAmt),
 		GlobalDiscountMode:    globalDiscMode,
 		GlobalDiscountValue:   globalDiscValue,
+		ServiceChargeRate:     serviceChargeRate,
+		ServiceChargeAmount:   serviceChargeAmount,
 		Currency:              currency,
 		OperationTypeCode:     opCode,
 		ExchangeRate:          exchangeRate,
@@ -590,13 +824,14 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		BillingStatus:         "pending",
 		IssuedFromNotaSaleID:  input.IssuedFromNotaSaleID,
 		IssuedFromQuotationID: input.IssuedFromQuotationID,
+		IdempotencyKey:        idempotencyKeyPtr(input.IdempotencyKey),
 	}
 
 	// Emisión electrónica desde NV: misma operación comercial; nunca repetir stock/seriales ni caja/bancos.
 	skipInv := input.SkipInventory || emitFromNV
 	skipPay := input.SkipPaymentDistribution || emitFromNV
 
-	return sale, s.db.Transaction(func(tx *gorm.DB) error {
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		correlative, seriesLocked, err := docseries.ReserveNext(tx, input.SeriesID)
 		if err != nil {
 			return err
@@ -642,14 +877,23 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				return err
 			}
 		}
-		var recordAmounts []float64
+		refLines := make([]cashbanksvc.PaymentRefLine, 0, len(payments))
+		for _, p := range payments {
+			if p.Amount > 0 && p.Method != "" {
+				refLines = append(refLines, cashbanksvc.PaymentRefLine{Method: p.Method, Reference: p.Reference})
+			}
+		}
+		if err := cbSvc.ValidatePaymentReferences(refLines); err != nil {
+			return err
+		}
+		var recordLines []money.SalePaymentLine
 		for _, p := range payments {
 			if p.Amount <= 0 || p.Method == "" {
 				continue
 			}
-			recordAmounts = append(recordAmounts, p.Amount)
+			recordLines = append(recordLines, money.SalePaymentLine{Amount: p.Amount, IsCash: money.IsCashMethod(p.Method)})
 		}
-		netRecordAmounts := money.AllocateSalePaymentNetAmounts(sale.Total, recordAmounts)
+		netRecordAmounts := money.AllocateSalePaymentNetAmounts(sale.Total, recordLines)
 		recordIdx := 0
 		for _, p := range payments {
 			if p.Amount <= 0 || p.Method == "" {
@@ -668,7 +912,7 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				desc := "Venta " + sale.Number
 				recordAmt := netRecordAmounts[recordIdx]
 				recordIdx++
-				if err := cbSvc.RecordPayment(tx, p.Method, recordAmt, input.CashSessionID, sale.Number, desc, &sale.ID, input.UserID); err != nil {
+				if err := cbSvc.RecordPaymentToDestination(tx, p.Method, recordAmt, input.CashSessionID, sale.Number, desc, &sale.ID, input.UserID, p.DestinationAccountID); err != nil {
 					return err
 				}
 			}
@@ -685,6 +929,9 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 				return err
 			}
 			if err := s.persistPrepaymentDeductionTx(tx, sale.ID, prepaymentDeductionPlan); err != nil {
+				return err
+			}
+			if err := exportacion.Persist(tx, sale.ID, exportRow); err != nil {
 				return err
 			}
 			return nil
@@ -709,20 +956,39 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 			}
 
 			var itemPresentationID *uint
-			if product.HasVariants && item.PresentationID != nil && *item.PresentationID > 0 {
+			movementQuantity := item.Quantity
+			var movementSaleUnitID *uint
+			var movementSaleUnitQuantity *float64
+			var movementConversionFactor *float64
+			switch {
+			case product.HasVariants && item.PresentationID != nil && *item.PresentationID > 0:
 				itemPresentationID = item.PresentationID
+			case item.SaleUnitID != nil && *item.SaleUnitID > 0:
+				res, err := resolveSaleUnitForLine(tx, product.ID, item.SaleUnitID, item.Quantity)
+				if err != nil {
+					return err
+				}
+				movementQuantity = res.BaseQuantity
+				movementSaleUnitID = item.SaleUnitID
+				commercialQty := item.Quantity
+				movementSaleUnitQuantity = &commercialQty
+				factor := res.ConversionFactor
+				movementConversionFactor = &factor
 			}
 			currentSaleItemID := saleItems[i].ID
 			if err := inv.RecordMovementTx(tx, invsvc.MovementInput{
-				ProductID:      *item.ProductID,
-				PresentationID: itemPresentationID,
-				BranchID:       input.BranchID,
-				Type:           "out",
-				Quantity:       item.Quantity,
-				Reference:      "VENTA/" + sale.Number,
-				UserID:         input.UserID,
-				OperationCode:  "SALE",
-				SaleItemID:     &currentSaleItemID,
+				ProductID:        *item.ProductID,
+				PresentationID:   itemPresentationID,
+				BranchID:         input.BranchID,
+				Type:             "out",
+				Quantity:         movementQuantity,
+				Reference:        "VENTA/" + sale.Number,
+				UserID:           input.UserID,
+				OperationCode:    "SALE",
+				SaleItemID:       &currentSaleItemID,
+				SaleUnitID:       movementSaleUnitID,
+				SaleUnitQuantity: movementSaleUnitQuantity,
+				ConversionFactor: movementConversionFactor,
 			}); err != nil {
 				return err
 			}
@@ -814,8 +1080,24 @@ func (s *SaleService) Create(input CreateSaleInput) (*database.TenantSale, error
 		if err := s.persistPrepaymentDeductionTx(tx, sale.ID, prepaymentDeductionPlan); err != nil {
 			return err
 		}
+		if err := exportacion.Persist(tx, sale.ID, exportRow); err != nil {
+			return err
+		}
+		if input.OnCreatedTx != nil {
+			if err := input.OnCreatedTx(tx, sale); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
+	if txErr != nil {
+		// Carrera: dos peticiones con la misma clave llegaron a la vez y la otra ganó el insert.
+		// La transacción ya hizo rollback (correlativo incluido); devolvemos la ganadora.
+		if winner, replayErr := ReplayIfIdempotentConflict(s.db, input.UserID, input.IdempotencyKey, txErr); winner != nil {
+			return winner, replayErr
+		}
+	}
+	return sale, txErr
 }
 
 func (s *SaleService) persistFiscalContextTx(tx *gorm.DB, sale *database.TenantSale, input CreateSaleInput, series database.TenantDocumentSeries) error {
@@ -1026,14 +1308,49 @@ type SaleListParams struct {
 	BillingStatus string
 	PaymentMethod string
 	PaymentMode   string // all | mixed | single
+	// UserID: usuario que registró la venta (tenant_sales.user_id).
+	UserID uint
+	// SellerUserID: vendedor atribuido a la venta (perfil fiscal); si la venta no tiene vendedor
+	// explícito, el vendedor es quien la registró (mismo criterio que el PDF y el formulario).
+	SellerUserID uint
 	// CancelledFilter: vacío = todas; exclude = no anuladas (status != cancelled); only = solo anuladas
 	CancelledFilter string
 	DateFrom        *time.Time
 	DateTo          *time.Time
 	Query           string
 	SunatCodes      []string
-	Limit           int // 0 = sin límite
-	Offset          int
+	// CommercialReport: el listado se calcula igual que el dashboard, para que las filas, las
+	// tarjetas de totales y los gráficos cuenten lo mismo. Excluye los comprobantes emitidos por
+	// conversión NV→FE (ya están representados por su nota de venta) y filtra SunatCodes por el
+	// tipo de comprobante EFECTIVO: una nota de venta convertida cuenta como la boleta o factura
+	// que originó, no como nota de venta. Sin este flag (pantallas de ventas y facturación) el
+	// listado conserva todas las filas, incluidos los comprobantes hijo, porque ahí se necesita ver
+	// el estado SUNAT de cada uno.
+	CommercialReport bool
+	Limit            int // 0 = sin límite
+	Offset           int
+	// SkipSummary no calcula los totales (summary queda en cero). Las pantallas que solo muestran
+	// filas (p. ej. Ventas) no los usan; calcularlos cuesta ~8 sentencias sobre todo el filtro.
+	SkipSummary bool
+}
+
+// ErrSaleListTimeout el listado/totales excedieron el tiempo máximo permitido para un reporte.
+var ErrSaleListTimeout = errors.New("el reporte tardó demasiado: acota el rango de fechas o los filtros e intenta de nuevo")
+
+// saleListTimeout tope de una llamada a List. Las consultas llevan este contexto para que un
+// reporte pesado no retenga indefinidamente una de las pocas conexiones del tenant (login y el
+// resto de requests esperan la misma conexión). La exportación completa (sin paginar) tiene más margen.
+func saleListTimeout(export bool) time.Duration {
+	if config.AppConfig == nil {
+		if export {
+			return 45 * time.Second
+		}
+		return 15 * time.Second
+	}
+	if export {
+		return config.AppConfig.DBBillingTimeout
+	}
+	return config.AppConfig.DBReportTimeout
 }
 
 // SaleListSummary totales sobre todas las ventas que cumplen los filtros (no solo la página).
@@ -1049,16 +1366,66 @@ type SaleListSummary struct {
 	SumNetPayable   float64 `json:"sum_net_payable"`
 	CountDetraccion int64   `json:"count_detraccion"`
 	SpotTotal       float64 `json:"spot_total"`
-	PaymentTotals   []struct {
-		Method string  `json:"method"`
-		Total  float64 `json:"total"`
-	} `json:"payment_totals"`
+	// Vuelto total entregado en las ventas del filtro (ver enrichSalesWithChangeAmount): suma de
+	// pagos directos por encima del importe cobrable de cada venta, nunca negativo por venta.
+	SumChangeAmount float64 `json:"sum_change_amount"`
+	// SumActivePEN: ventas vigentes de TODAS las monedas convertidas a soles (USD × TC de cada venta). RateEstimatedCount /
+	// RateMissingCount: ventas en USD sin TC guardado (estimadas con el TC del día / sin poder convertirse).
+	SumActivePEN       float64 `json:"sum_active_pen"`
+	RateEstimatedCount int64   `json:"rate_estimated_count"`
+	RateMissingCount   int64   `json:"rate_missing_count"`
+	// PaymentTotals: monto por método y MONEDA (una entrada por método+moneda; los montos de
+	// monedas distintas nunca se suman entre sí). La detracción SPOT va siempre en PEN.
+	PaymentTotals []SaleListPaymentTotal `json:"payment_totals"`
+	// ByCurrency: los mismos totales de cabecera (sum_*, count_*, vuelto) separados por moneda.
+	// Los campos sum_* planos de arriba suman todas las monedas tal cual (comportamiento legado,
+	// correcto solo si todo el filtro es una sola moneda): quien muestre importes debe usar este.
+	ByCurrency []SaleListCurrencySummary `json:"by_currency"`
 }
 
-func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64, SaleListSummary, error) {
-	var sales []database.TenantSale
+type SaleListPaymentTotal struct {
+	Method   string  `json:"method"`
+	Currency string  `json:"currency"`
+	Total    float64 `json:"total"`
+}
+
+type SaleListCurrencySummary struct {
+	Currency        string  `json:"currency"`
+	SumTotal        float64 `json:"sum_total"`
+	SumSubtotal     float64 `json:"sum_subtotal"`
+	SumTax          float64 `json:"sum_tax"`
+	SumCancelled    float64 `json:"sum_cancelled"`
+	SumActive       float64 `json:"sum_active"`
+	CountCancelled  int64   `json:"count_cancelled"`
+	CountActive     int64   `json:"count_active"`
+	SumChangeAmount float64 `json:"sum_change_amount"`
+	// SumActivePEN: ventas vigentes de esta moneda convertidas a SOLES con el TC de cada venta (en PEN = SumActive).
+	// RateEstimatedCount: ventas en USD sin TC guardado cuyo equivalente usa el TC del día de emisión.
+	// RateMissingCount: ventas en USD sin TC guardado ni TC del día (no entran en SumActivePEN).
+	SumActivePEN       float64 `json:"sum_active_pen"`
+	RateEstimatedCount int64   `json:"rate_estimated_count"`
+	RateMissingCount   int64   `json:"rate_missing_count"`
+}
+
+// saleCurrencySQL normaliza la moneda de cabecera: vacío = PEN (ventas antiguas sin moneda).
+const saleCurrencySQL = "UPPER(COALESCE(NULLIF(TRIM(tenant_sales.currency), ''), 'PEN'))"
+
+func (s *SaleService) List(params SaleListParams) (sales []database.TenantSale, total int64, summary SaleListSummary, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), saleListTimeout(params.Limit == 0))
+	defer cancel()
+	s = &SaleService{db: s.db.WithContext(ctx)}
+	defer func() {
+		if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = ErrSaleListTimeout
+		}
+	}()
+
 	q := s.db.Model(&database.TenantSale{})
 	useDistinct := false
+	if params.CommercialReport {
+		// Fecha de emisión: cuenta el comprobante (con su fecha, tipo y número); la NV de la que salió se omite mientras su hijo esté vigente.
+		q = salescope.EmittedSales(q)
+	}
 	if len(params.SunatCodes) > 0 {
 		q = q.Joins("JOIN tenant_document_series ON tenant_document_series.id = tenant_sales.series_id").
 			Where("tenant_document_series.sunat_code IN ?", params.SunatCodes)
@@ -1069,6 +1436,12 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 	}
 	if params.ContactID > 0 {
 		q = q.Where("tenant_sales.contact_id = ?", params.ContactID)
+	}
+	if params.UserID > 0 {
+		q = q.Where("tenant_sales.user_id = ?", params.UserID)
+	}
+	if params.SellerUserID > 0 {
+		q = q.Where("COALESCE((SELECT tsfp.seller_user_id FROM tenant_sale_fiscal_profiles tsfp WHERE tsfp.sale_id = tenant_sales.id), tenant_sales.user_id) = ?", params.SellerUserID)
 	}
 	if params.DocType != "" {
 		q = q.Where("tenant_sales.doc_type = ?", params.DocType)
@@ -1160,12 +1533,14 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 		q = q.Where("tenant_sales.issue_date <= ?", params.DateTo)
 	}
 
-	summary, sumErr := s.saleListSummary(q.Session(&gorm.Session{}), useDistinct)
-	if sumErr != nil {
-		return nil, 0, SaleListSummary{}, sumErr
+	if !params.SkipSummary {
+		var sumErr error
+		summary, sumErr = s.saleListSummary(q.Session(&gorm.Session{}), useDistinct, len(params.SunatCodes) > 0 && !params.CommercialReport)
+		if sumErr != nil {
+			return nil, 0, SaleListSummary{}, sumErr
+		}
 	}
 
-	var total int64
 	if params.Limit > 0 {
 		countQ := q
 		if useDistinct {
@@ -1179,11 +1554,12 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 	if useDistinct {
 		q = q.Distinct("tenant_sales.*")
 	}
-	err := q.Order("tenant_sales.issue_date DESC, tenant_sales.id DESC").Find(&sales).Error
+	err = q.Order("tenant_sales.issue_date DESC, tenant_sales.id DESC").Find(&sales).Error
 	if err != nil {
 		return sales, total, summary, err
 	}
 	billingstate.EnrichSalesBillingStatus(s.db, sales)
+	fillSalesPEN(sales)
 	// Rellenar nombre del cliente (contact_name)
 	if len(sales) > 0 {
 		ids := make(map[uint]struct{})
@@ -1261,6 +1637,7 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 		}
 	}
 	s.enrichSalesWithDetraccion(sales)
+	s.enrichSalesWithChangeAmount(sales)
 	nvdisplay.EnrichSales(s.db, sales)
 	// Notas de crédito/débito: documento afectado y tipo de nota para el listado.
 	enrichNotesAffectedDoc(s.db, sales)
@@ -1280,9 +1657,48 @@ func (s *SaleService) List(params SaleListParams) ([]database.TenantSale, int64,
 	return sales, total, summary, nil
 }
 
+// effectiveSunatCodeExpr código SUNAT efectivo de una venta: el de su comprobante electrónico hijo
+// si es una nota de venta convertida, y si no el de su propia serie. Equivale al
+// COALESCE(fe.doc_type, tenant_sales.doc_type) del dashboard. Requiere joinEffectiveSunatCode.
+const effectiveSunatCodeExpr = "COALESCE(eff_fds.sunat_code, eff_ds.sunat_code)"
+
+// joinEffectiveSunatCode agrega los JOIN que resuelven effectiveSunatCodeExpr.
+//
+// Antes esto era una subconsulta correlacionada sobre tenant_sales evaluada por cada venta. El
+// índice de issued_from_nota_sale_id tiene cardinalidad 1 en los tenants sin conversiones (todo
+// NULL), así que MySQL la resolvía con un recorrido completo de la tabla por fila: O(n²). Un tenant
+// con ~30 mil ventas tardaba más de 10 minutos por sentencia y agotaba su pool de conexiones
+// (incidente 2026-10-09, gylconcesioneseirl). Aquí los hijos se agrupan UNA vez (índice en rango
+// issued_from_nota_sale_id > 0) y se unen por hash: costo lineal. El hijo elegido es el de menor
+// id, igual que el ORDER BY fe.id LIMIT 1 anterior.
+func joinEffectiveSunatCode(q *gorm.DB) *gorm.DB {
+	return q.
+		Joins("LEFT JOIN (SELECT issued_from_nota_sale_id AS parent_id, MIN(id) AS child_id FROM tenant_sales " +
+			"WHERE issued_from_nota_sale_id > 0 AND deleted_at IS NULL GROUP BY issued_from_nota_sale_id) eff_ch " +
+			"ON eff_ch.parent_id = tenant_sales.id").
+		Joins("LEFT JOIN tenant_sales eff_fe ON eff_fe.id = eff_ch.child_id").
+		Joins("LEFT JOIN tenant_document_series eff_fds ON eff_fds.id = eff_fe.series_id").
+		Joins("LEFT JOIN tenant_document_series eff_ds ON eff_ds.id = tenant_sales.series_id")
+}
+
 // saleListSummary agrega montos sobre el mismo conjunto filtrado que List (sin paginar).
-func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSummary, error) {
+func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct, rowsAreDocuments bool) (SaleListSummary, error) {
 	var out SaleListSummary
+	// Un listado crudo filtrado por tipo de comprobante (Facturación de Tukichef: 01,03) muestra los
+	// comprobantes hijo de una conversión NV→FE como filas propias, y su nota de venta padre queda
+	// fuera por el filtro de tipo. Excluir los hijos del total dejaba esas ventas sin contar en
+	// ninguna parte: las filas y las tarjetas dejaban de coincidir (S/ 501 vs S/ 112, 2026-10).
+	type scopeFns struct {
+		sales func(*gorm.DB) *gorm.DB
+		alias func(string) func(*gorm.DB) *gorm.DB
+	}
+	sc := scopeFns{sales: salescope.EmittedSales, alias: salescope.ScopeEmitted}
+	if rowsAreDocuments {
+		sc = scopeFns{
+			sales: func(db *gorm.DB) *gorm.DB { return db },
+			alias: func(string) func(*gorm.DB) *gorm.DB { return func(db *gorm.DB) *gorm.DB { return db } },
+		}
+	}
 	idSub := q.Select("tenant_sales.id")
 	if useDistinct {
 		idSub = idSub.Distinct("tenant_sales.id")
@@ -1303,11 +1719,17 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 	// reversión se contaría dos veces (una por excluir la original, otra por restar la NC) y el
 	// neto quedaría negativo de más. netTotal simplemente la excluye (aporta 0): su efecto ya
 	// está reflejado en que la original no se cuenta como venta vigente.
-	const netTotal = "(CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN 0 ELSE tenant_sales.total END)"
-	const netSubtotal = "(CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN 0 ELSE tenant_sales.subtotal END)"
-	const netTax = "(CASE WHEN tenant_sales.doc_type = 'NOTA_CREDITO' THEN 0 ELSE tenant_sales.tax_amount END)"
+	//
+	// La nota de débito se trata igual (aporta 0): el dashboard excluye TODAS las notas
+	// (salescope.CommercialSalesNoNotes) porque una nota es el ajuste de un comprobante ya contado,
+	// y sumarla aquí hacía que este reporte y el dashboard dejaran de coincidir en cuanto se emitía
+	// una. Tampoco cuentan en count_*: son documentos, no operaciones de venta.
+	const isNote = "tenant_sales.doc_type IN ('NOTA_CREDITO', 'NOTA_DEBITO')"
+	const netTotal = "(CASE WHEN " + isNote + " THEN 0 ELSE tenant_sales.total END)"
+	const netSubtotal = "(CASE WHEN " + isNote + " THEN 0 ELSE tenant_sales.subtotal END)"
+	const netTax = "(CASE WHEN " + isNote + " THEN 0 ELSE tenant_sales.tax_amount END)"
 	var row aggRow
-	err := salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
+	err := sc.sales(s.db.Model(&database.TenantSale{})).
 		Where("tenant_sales.id IN (?)", idSub).
 		Select(`
 			COALESCE(SUM(` + netTotal + `), 0) AS sum_total,
@@ -1315,8 +1737,8 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 			COALESCE(SUM(` + netTax + `), 0) AS sum_tax,
 			COALESCE(SUM(CASE WHEN tenant_sales.status = 'cancelled' THEN tenant_sales.total ELSE 0 END), 0) AS sum_cancelled,
 			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' THEN ` + netTotal + ` ELSE 0 END), 0) AS sum_active,
-			COALESCE(SUM(CASE WHEN tenant_sales.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS count_cancelled,
-			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' THEN 1 ELSE 0 END), 0) AS count_active
+			COALESCE(SUM(CASE WHEN tenant_sales.status = 'cancelled' AND NOT ` + isNote + ` THEN 1 ELSE 0 END), 0) AS count_cancelled,
+			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' AND NOT ` + isNote + ` THEN 1 ELSE 0 END), 0) AS count_active
 		`).
 		Scan(&row).Error
 	if err != nil {
@@ -1329,6 +1751,78 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 	out.SumActive = row.SumActive
 	out.CountCancelled = row.CountCancelled
 	out.CountActive = row.CountActive
+
+	type curAggRow struct {
+		Currency       string  `gorm:"column:cur_code"`
+		SumTotal       float64 `gorm:"column:sum_total"`
+		SumSubtotal    float64 `gorm:"column:sum_subtotal"`
+		SumTax         float64 `gorm:"column:sum_tax"`
+		SumCancelled   float64 `gorm:"column:sum_cancelled"`
+		SumActive      float64 `gorm:"column:sum_active"`
+		CountCancelled int64   `gorm:"column:count_cancelled"`
+		CountActive    int64   `gorm:"column:count_active"`
+		// Ventas vigentes con TC guardado ya en soles (USD × TC) y cuántas vigentes no tienen TC guardado.
+		SumActivePENKnown float64 `gorm:"column:sum_active_pen_known"`
+		CountMissingRate  int64   `gorm:"column:count_missing_rate"`
+	}
+	var curRows []curAggRow
+	if err := sc.sales(s.db.Model(&database.TenantSale{})).
+		Where("tenant_sales.id IN (?)", idSub).
+		Select(saleCurrencySQL + ` AS cur_code,
+			COALESCE(SUM(` + netTotal + `), 0) AS sum_total,
+			COALESCE(SUM(` + netSubtotal + `), 0) AS sum_subtotal,
+			COALESCE(SUM(` + netTax + `), 0) AS sum_tax,
+			COALESCE(SUM(CASE WHEN tenant_sales.status = 'cancelled' THEN tenant_sales.total ELSE 0 END), 0) AS sum_cancelled,
+			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' THEN ` + netTotal + ` ELSE 0 END), 0) AS sum_active,
+			COALESCE(SUM(CASE WHEN tenant_sales.status = 'cancelled' AND NOT ` + isNote + ` THEN 1 ELSE 0 END), 0) AS count_cancelled,
+			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' AND NOT ` + isNote + ` THEN 1 ELSE 0 END), 0) AS count_active,
+			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' AND tenant_sales.exchange_rate > 0 THEN ` + netTotal + ` * tenant_sales.exchange_rate ELSE 0 END), 0) AS sum_active_pen_known,
+			COALESCE(SUM(CASE WHEN tenant_sales.status != 'cancelled' AND NOT ` + isNote + ` AND (tenant_sales.exchange_rate IS NULL OR tenant_sales.exchange_rate <= 0) THEN 1 ELSE 0 END), 0) AS count_missing_rate`).
+		Group("cur_code").
+		Order("cur_code ASC").
+		Scan(&curRows).Error; err != nil {
+		return out, err
+	}
+	// Equivalente en SOLES por moneda: PEN = su propio total; USD = suma de (total × TC de cada venta) + las ventas sin TC
+	// guardado convertidas con el TC del día de emisión (si existe).
+	penByCurrency := map[string]struct {
+		pen                  float64
+		estimated, missing   int64
+	}{}
+	for _, c := range curRows {
+		if c.Currency != salecurrency.CurrencyUSD {
+			penByCurrency[c.Currency] = struct {
+				pen                float64
+				estimated, missing int64
+			}{pen: c.SumActive}
+			continue
+		}
+		pen := c.SumActivePENKnown
+		var est, miss int64
+		if c.CountMissingRate > 0 {
+			var pending []struct {
+				IssueDate time.Time
+				Total     float64
+			}
+			if err := sc.sales(s.db.Model(&database.TenantSale{})).
+				Where("tenant_sales.id IN (?)", idSub).
+				Where(saleCurrencySQL+" = ?", salecurrency.CurrencyUSD).
+				Where("tenant_sales.status != 'cancelled' AND NOT "+isNote+" AND (tenant_sales.exchange_rate IS NULL OR tenant_sales.exchange_rate <= 0)").
+				Select("tenant_sales.issue_date AS issue_date, tenant_sales.total AS total").
+				Limit(5000).Scan(&pending).Error; err != nil {
+				return out, err
+			}
+			add, e, m := estimateMissingRatePEN(pending)
+			pen += add
+			est, miss = e, m
+		}
+		penByCurrency[c.Currency] = struct {
+			pen                float64
+			estimated, missing int64
+		}{pen: money.RoundDisplay(pen), estimated: est, missing: miss}
+	}
+	changeByCurrency := map[string]float64{}
+	currencyOfSale := map[uint]string{}
 
 	type detAggRow struct {
 		SumDetraccion   float64 `gorm:"column:sum_detraccion"`
@@ -1343,7 +1837,7 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 			COUNT(*) AS count_detraccion
 		`).
 		Joins("JOIN tenant_sales ts ON ts.id = d.sale_id").
-		Scopes(salescope.ScopeCommercial("ts")).
+		Scopes(sc.alias("ts")).
 		Where("ts.id IN (?)", idSub).
 		Where("ts.status != ?", "cancelled").
 		Scan(&detRow).Error; err != nil {
@@ -1355,43 +1849,152 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 
 	// Totales por método: si hay filas en tenant_sale_pagos, usar montos por línea; si no, el campo cabecera payment_method.
 	type payRow struct {
-		Method string  `gorm:"column:method"`
-		Total  float64 `gorm:"column:total"`
+		Method   string  `gorm:"column:method"`
+		Currency string  `gorm:"column:cur_code"`
+		Total    float64 `gorm:"column:total"`
 	}
-	byMethod := make(map[string]float64)
+	type methodCur struct{ method, currency string }
+	byMethod := make(map[methodCur]float64)
 	var spotTotal float64
 
-	var fromPayments []payRow
-	err = s.db.Table("tenant_sale_payments tsp").
-		Select("LOWER(TRIM(tsp.method)) AS method, COALESCE(SUM(tsp.amount), 0) AS total").
-		Joins("JOIN tenant_sales ts ON ts.id = tsp.sale_id").
-		Scopes(salescope.ScopeCommercial("ts")).
-		Where("ts.id IN (?)", idSub).
-		Where("ts.status != ?", "cancelled").
-		Group("LOWER(TRIM(tsp.method))").
-		Scan(&fromPayments).Error
-	if err != nil {
+	// Los montos por línea se acotan al total de la venta con AllocateSalePaymentReportAmounts —
+	// igual que ya hace el reporte de caja (buildSalePaymentReportAmountsFromPayments) — en vez de
+	// sumar tsp.amount tal cual. Un pago en efectivo guarda el monto ENTREGADO por el cliente, no
+	// el neto (el vuelto se calcula después, en print_data.change_amount): sumar esos montos brutos
+	// inflaba el total de "Efectivo" del reporte por encima de lo realmente vendido cada vez que
+	// alguien pagaba con un billete mayor al total (incidente reportado 2026-09-15, SEDE KEIKO:
+	// "Efectivo" S/139.20 vs. "Total no anuladas" S/122.00 del mismo filtro).
+	type saleTotalRow struct {
+		ID       uint    `gorm:"column:id"`
+		Total    float64 `gorm:"column:total"`
+		Currency string  `gorm:"column:currency"`
+	}
+	var saleTotals []saleTotalRow
+	if err := sc.sales(s.db.Model(&database.TenantSale{})).
+		Select(`tenant_sales.id AS id, `+netTotal+` AS total, `+saleCurrencySQL+` AS currency`).
+		Where("tenant_sales.id IN (?)", idSub).
+		Where("tenant_sales.status != ?", "cancelled").
+		Scan(&saleTotals).Error; err != nil {
 		return out, err
 	}
-	for _, p := range fromPayments {
-		if taxpayment.IsDetractionCode(p.Method) {
-			spotTotal += p.Total
-			continue
+	saleTotalByID := make(map[uint]float64, len(saleTotals))
+	for _, st := range saleTotals {
+		saleTotalByID[st.ID] = st.Total
+		currencyOfSale[st.ID] = st.Currency
+	}
+
+	type paymentLineRow struct {
+		ID     uint    `gorm:"column:id"`
+		SaleID uint    `gorm:"column:sale_id"`
+		Method string  `gorm:"column:method"`
+		Amount float64 `gorm:"column:amount"`
+	}
+	var paymentRows []paymentLineRow
+	if err := s.db.Table("tenant_sale_payments tsp").
+		Select("tsp.id AS id, tsp.sale_id AS sale_id, LOWER(TRIM(tsp.method)) AS method, tsp.amount AS amount").
+		Joins("JOIN tenant_sales ts ON ts.id = tsp.sale_id").
+		Scopes(sc.alias("ts")).
+		Where("ts.id IN (?)", idSub).
+		Where("ts.status != ?", "cancelled").
+		Scan(&paymentRows).Error; err != nil {
+		return out, err
+	}
+	paymentsBySale := make(map[uint][]paymentLineRow, len(paymentRows))
+	methodByPaymentID := make(map[uint]string, len(paymentRows))
+	for _, p := range paymentRows {
+		paymentsBySale[p.SaleID] = append(paymentsBySale[p.SaleID], p)
+		methodByPaymentID[p.ID] = p.Method
+	}
+	// currencyOf: moneda de la venta de un pago (sin dato = PEN).
+	currencyOf := func(saleID uint) string {
+		if c := currencyOfSale[saleID]; c != "" {
+			return c
 		}
-		m := strings.TrimSpace(p.Method)
+		return "PEN"
+	}
+	addToMethod := func(saleID uint, method string, amount float64) {
+		if taxpayment.IsDetractionCode(method) {
+			spotTotal += amount
+			return
+		}
+		m := strings.TrimSpace(method)
 		if m == "" {
 			m = "sin_definir"
 		}
-		byMethod[m] += p.Total
+		byMethod[methodCur{m, currencyOf(saleID)}] += amount
+	}
+	for saleID, rows := range paymentsBySale {
+		saleTotal, ok := saleTotalByID[saleID]
+		if !ok {
+			// No debería pasar (idSub ya excluye cancelled/otras sucursales), pero si ocurre no
+			// hay total contra el cual acotar: se conserva el monto tal cual, como antes.
+			for _, r := range rows {
+				addToMethod(saleID, r.Method, r.Amount)
+			}
+			continue
+		}
+		lines := make([]money.SalePaymentLine, 0, len(rows))
+		for _, r := range rows {
+			// El marcador "credito" no es dinero recibido — fuera de la base del prorrateo, mismo
+			// criterio que en el reporte de caja.
+			if paymentcondition.IsCreditCode(r.Method) {
+				continue
+			}
+			lines = append(lines, money.SalePaymentLine{ID: r.ID, Amount: r.Amount, IsCash: money.IsCashMethod(r.Method)})
+		}
+		for id, amt := range money.AllocateSalePaymentReportAmounts(saleTotal, lines) {
+			addToMethod(saleID, methodByPaymentID[id], amt)
+		}
+	}
+
+	// Vuelto total del filtro: compara la suma de pagos directos de cada venta contra su importe
+	// cobrable (net_payable si tiene detracción, si no el total) — mismo criterio que
+	// print_data.ChangeAmount/enrichSalesWithChangeAmount, agregado sobre todo el filtro en vez de
+	// por venta individual.
+	type netPayableRow struct {
+		SaleID     uint    `gorm:"column:sale_id"`
+		NetPayable float64 `gorm:"column:net_payable_pen"`
+	}
+	var netPayableRows []netPayableRow
+	if err := s.db.Table("tenant_sale_detraccion d").
+		Select("d.sale_id AS sale_id, d.net_payable_pen AS net_payable_pen").
+		Joins("JOIN tenant_sales ts ON ts.id = d.sale_id").
+		Scopes(sc.alias("ts")).
+		Where("ts.id IN (?)", idSub).
+		Where("ts.status != ?", "cancelled").
+		Scan(&netPayableRows).Error; err != nil {
+		return out, err
+	}
+	payableOverrideBySale := make(map[uint]float64, len(netPayableRows))
+	for _, r := range netPayableRows {
+		if r.NetPayable > 0 {
+			payableOverrideBySale[r.SaleID] = r.NetPayable
+		}
+	}
+	for saleID, rows := range paymentsBySale {
+		var directSum float64
+		for _, r := range rows {
+			if taxpayment.IsDetractionCode(r.Method) || paymentcondition.IsCreditCode(r.Method) {
+				continue
+			}
+			directSum += r.Amount
+		}
+		payable, ok := payableOverrideBySale[saleID]
+		if !ok {
+			payable = saleTotalByID[saleID]
+		}
+		chg := money.CalcPaymentChange(directSum, payable)
+		out.SumChangeAmount += chg
+		changeByCurrency[currencyOf(saleID)] += chg
 	}
 
 	var fromHeader []payRow
-	err = salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
-		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, COALESCE(SUM(` + netTotal + `), 0) AS total`).
+	err = sc.sales(s.db.Model(&database.TenantSale{})).
+		Select(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir'))) AS method, `+saleCurrencySQL+` AS cur_code, COALESCE(SUM(`+netTotal+`), 0) AS total`).
 		Where("tenant_sales.id IN (?)", idSub).
 		Where("tenant_sales.status != ?", "cancelled").
 		Where("NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp WHERE tsp.sale_id = tenant_sales.id)").
-		Group(`LOWER(TRIM(COALESCE(NULLIF(tenant_sales.payment_method, ''), 'sin_definir')))`).
+		Group("method, cur_code").
 		Scan(&fromHeader).Error
 	if err != nil {
 		return out, err
@@ -1401,63 +2004,94 @@ func (s *SaleService) saleListSummary(q *gorm.DB, useDistinct bool) (SaleListSum
 		if m == "" {
 			m = "sin_definir"
 		}
-		byMethod[m] += p.Total
+		byMethod[methodCur{m, p.Currency}] += p.Total
 	}
 
-	type kv struct {
-		method string
-		total  float64
+	pairs := make([]SaleListPaymentTotal, 0, len(byMethod))
+	for k, t := range byMethod {
+		pairs = append(pairs, SaleListPaymentTotal{Method: k.method, Currency: k.currency, Total: t})
 	}
-	pairs := make([]kv, 0, len(byMethod))
-	for m, t := range byMethod {
-		pairs = append(pairs, kv{m, t})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].total > pairs[j].total })
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].Total != pairs[j].Total {
+			return pairs[i].Total > pairs[j].Total
+		}
+		if pairs[i].Method != pairs[j].Method {
+			return pairs[i].Method < pairs[j].Method
+		}
+		return pairs[i].Currency < pairs[j].Currency
+	})
 	if len(pairs) > 12 {
 		pairs = pairs[:12]
 	}
-	for _, p := range pairs {
-		out.PaymentTotals = append(out.PaymentTotals, struct {
-			Method string  `json:"method"`
-			Total  float64 `json:"total"`
-		}{Method: p.method, Total: p.total})
-	}
+	out.PaymentTotals = append(out.PaymentTotals, pairs...)
 	if spotTotal > 0 {
 		out.SpotTotal = spotTotal
-		out.PaymentTotals = append(out.PaymentTotals, struct {
-			Method string  `json:"method"`
-			Total  float64 `json:"total"`
-		}{Method: taxpayment.CodeDetraccionBN, Total: spotTotal})
+		// La detracción SPOT existe solo en facturas en PEN.
+		out.PaymentTotals = append(out.PaymentTotals, SaleListPaymentTotal{Method: taxpayment.CodeDetraccionBN, Currency: "PEN", Total: spotTotal})
 	}
+	out.ByCurrency = make([]SaleListCurrencySummary, 0, len(curRows))
+	for _, c := range curRows {
+		out.ByCurrency = append(out.ByCurrency, SaleListCurrencySummary{
+			Currency: c.Currency, SumTotal: c.SumTotal, SumSubtotal: c.SumSubtotal, SumTax: c.SumTax,
+			SumCancelled: c.SumCancelled, SumActive: c.SumActive, CountCancelled: c.CountCancelled,
+			CountActive: c.CountActive, SumChangeAmount: changeByCurrency[c.Currency],
+			SumActivePEN: penByCurrency[c.Currency].pen, RateEstimatedCount: penByCurrency[c.Currency].estimated,
+			RateMissingCount: penByCurrency[c.Currency].missing,
+		})
+		out.SumActivePEN += penByCurrency[c.Currency].pen
+		out.RateEstimatedCount += penByCurrency[c.Currency].estimated
+		out.RateMissingCount += penByCurrency[c.Currency].missing
+	}
+	out.SumActivePEN = money.RoundDisplay(out.SumActivePEN)
 	return out, nil
 }
 
-// SalesByProductRow es una fila del reporte de ventas por producto.
+// SalesByProductRow es una fila del reporte de ventas por producto — Fase 7J: cada fila
+// representa una combinación INEQUÍVOCA producto+SaleUnit, nunca cantidades mezcladas de
+// distintas unidades comerciales. SaleUnitID nil = línea legacy/venta en unidad base (se trata
+// como una combinación propia, separada de cualquier SaleUnit real del mismo producto).
 type SalesByProductRow struct {
-	ProductID     uint    `json:"product_id"`
-	ProductCode   string  `json:"product_code"`
-	ProductName   string  `json:"product_name"`
-	CategoryID    *uint   `json:"category_id,omitempty"`
-	CategoryName  string  `json:"category_name"`
-	Unit          string  `json:"unit"`
-	QuantitySold  float64 `json:"quantity_sold"`
-	TotalAmount   float64 `json:"total_amount"`
+	ProductID    uint   `json:"product_id"`
+	ProductCode  string `json:"product_code"`
+	ProductName  string `json:"product_name"`
+	CategoryID   *uint  `json:"category_id,omitempty"`
+	CategoryName string `json:"category_name"`
+	// SaleUnitID: unidad de venta de ESTA combinación (nil = unidad base/legacy). El nombre
+	// comercial se resuelve en el frontend (productsService.getSaleUnit / saleUnitNames.ts),
+	// igual que ya se hace en Compras (7H) y Kardex (7I) — este endpoint no lo resuelve para no
+	// duplicar esa lógica.
+	SaleUnitID *uint `json:"sale_unit_id,omitempty"`
+	// Unit: código SUNAT de la línea (fallback de UI cuando SaleUnitID es nil) — nunca representa
+	// el nombre comercial de una SaleUnit. Dentro de una misma combinación producto+SaleUnit este
+	// valor ya es homogéneo (MAX() deja de ser arbitrario porque el grupo es una sola escala).
+	Unit string `json:"unit"`
+	// QuantitySold: cantidad COMERCIAL sumada SOLO dentro de esta combinación — nunca se suma
+	// contra otra fila de SaleUnit distinta del mismo producto.
+	QuantitySold float64 `json:"quantity_sold"`
+	TotalAmount  float64 `json:"total_amount"`
 	// LinesCount/AvgLineAmount: métricas técnicas de granularidad interna (cuántas filas de
-	// detalle tuvo el producto, no cuántas ventas) — no se muestran en el reporte del front
+	// detalle tuvo esta combinación, no cuántas ventas) — no se muestran en el reporte del front
 	// porque no tienen lectura de negocio clara, pero se dejan calculadas por si se reusan.
 	LinesCount    int64   `json:"lines_count"`
 	SalesCount    int64   `json:"sales_count"`
 	AvgLineAmount float64 `json:"avg_line_amount"` // total_amount / lines_count
-	AvgUnitPrice  float64 `json:"avg_unit_price"`  // total_amount / quantity_sold (precio promedio de venta por unidad)
+	// AvgUnitPrice: total_amount / quantity_sold — precio promedio, ahora siempre calculado DENTRO
+	// de una combinación producto+SaleUnit homogénea (antes de 7J mezclaba escalas distintas).
+	AvgUnitPrice float64 `json:"avg_unit_price"`
 }
 
-// SalesByProductSummary totales del período (mismos filtros que las filas).
+// SalesByProductSummary totales del período (mismos filtros que las filas). Fase 7J: se quitó
+// TotalQuantity — sumar cantidades comerciales de todas las combinaciones (distintos productos Y
+// distintas SaleUnits) no tiene ninguna lectura de negocio válida, decisión explícita del usuario.
+// ProductsCount ahora es COUNT(DISTINCT product_id) real (antes de 7J coincidía con len(rows)
+// porque había una fila por producto; con el desglose por SaleUnit, len(rows) pasó a ser el
+// número de combinaciones, no de productos, así que se calcula aparte para que la tarjeta
+// "Productos" siga significando lo que dice).
 type SalesByProductSummary struct {
 	TotalAmount   float64 `json:"total_amount"`
-	TotalQuantity float64 `json:"total_quantity"`
 	LineItems     int64   `json:"line_items"`
 	DistinctSales int64   `json:"distinct_sales"`
-	ProductsCount int     `json:"products_count"`
+	ProductsCount int64   `json:"products_count"`
 }
 
 // SalesByProductParams filtros para el reporte de ventas por producto.
@@ -1478,7 +2112,7 @@ func (s *SaleService) salesByProductBaseQuery(params SalesByProductParams) *gorm
 		Joins("INNER JOIN tenant_sales ON tenant_sales.id = tenant_sale_items.sale_id AND tenant_sales.status != 'cancelled'").
 		Joins("LEFT JOIN tenant_products p ON p.id = tenant_sale_items.product_id").
 		Joins("LEFT JOIN tenant_categories c ON c.id = p.category_id").
-		Scopes(salescope.ScopeCommercial("tenant_sales"))
+		Scopes(salescope.ScopeEmittedNoNotes("tenant_sales"))
 	if params.DateFrom != nil {
 		q = q.Where("tenant_sales.issue_date >= ?", params.DateFrom)
 	}
@@ -1501,7 +2135,12 @@ func (s *SaleService) salesByProductBaseQuery(params SalesByProductParams) *gorm
 	return q
 }
 
-// SalesByProduct agrupa ítems de ventas por producto (solo ventas no anuladas).
+// SalesByProduct agrupa ítems de ventas por PRODUCTO + SALEUNIT (solo ventas no anuladas) —
+// Fase 7J. Antes de esta fase agrupaba solo por product_id, mezclando en una sola suma cantidades
+// comerciales de distintas unidades (ej. "1 Caja" + "5 Unidades" = "6", número sin sentido de
+// negocio); ahora cada fila es una combinación homogénea — sale_unit_id=NULL (venta en unidad
+// base/legacy) se trata como una combinación propia, nunca se mezcla con ninguna SaleUnit real
+// del mismo producto. Ver FASE_7J_REPORTS_AUDIT_REPORT.md.
 func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProductRow, SalesByProductSummary, error) {
 	type row struct {
 		ProductID    uint
@@ -1509,6 +2148,7 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 		ProductName  string
 		CategoryID   *uint
 		CategoryName string
+		SaleUnitID   *uint
 		Unit         string
 		QuantitySold float64
 		TotalAmount  float64
@@ -1517,11 +2157,14 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 	}
 
 	var meta struct {
-		DistinctSales int64
-		LineItems     int64
+		DistinctSales    int64
+		LineItems        int64
+		DistinctProducts int64
 	}
 	qMeta := s.salesByProductBaseQuery(params).
-		Select("COUNT(DISTINCT tenant_sale_items.sale_id) as distinct_sales, COUNT(*) as line_items")
+		Select(`COUNT(DISTINCT tenant_sale_items.sale_id) as distinct_sales,
+			COUNT(*) as line_items,
+			COUNT(DISTINCT tenant_sale_items.product_id) as distinct_products`)
 	if err := qMeta.Scan(&meta).Error; err != nil {
 		return nil, SalesByProductSummary{}, err
 	}
@@ -1532,12 +2175,13 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 			COALESCE(MAX(NULLIF(TRIM(p.name), '')), MAX(tenant_sale_items.description)) as product_name,
 			MAX(p.category_id) as category_id,
 			COALESCE(MAX(c.name), '') as category_name,
+			tenant_sale_items.sale_unit_id as sale_unit_id,
 			COALESCE(MAX(NULLIF(TRIM(p.unit), '')), MAX(tenant_sale_items.unit)) as unit,
 			SUM(tenant_sale_items.quantity) as quantity_sold,
-			SUM(tenant_sale_items.total) as total_amount,
+			SUM(` + salecurrency.TotalPENSQL("tenant_sales", "tenant_sale_items.total") + `) as total_amount,
 			COUNT(*) as lines_count,
 			COUNT(DISTINCT tenant_sale_items.sale_id) as sales_count`).
-		Group("tenant_sale_items.product_id")
+		Group("tenant_sale_items.product_id, tenant_sale_items.sale_unit_id")
 
 	var raw []row
 	if err := q.Scan(&raw).Error; err != nil {
@@ -1545,7 +2189,7 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 	}
 
 	out := make([]SalesByProductRow, len(raw))
-	var sumAmt, sumQty float64
+	var sumAmt float64
 	for i, r := range raw {
 		catName := strings.TrimSpace(r.CategoryName)
 		if catName == "" {
@@ -1565,6 +2209,7 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 			ProductName:   r.ProductName,
 			CategoryID:    r.CategoryID,
 			CategoryName:  catName,
+			SaleUnitID:    r.SaleUnitID,
 			Unit:          strings.TrimSpace(r.Unit),
 			QuantitySold:  r.QuantitySold,
 			TotalAmount:   r.TotalAmount,
@@ -1574,26 +2219,213 @@ func (s *SaleService) SalesByProduct(params SalesByProductParams) ([]SalesByProd
 			AvgUnitPrice:  avgUnit,
 		}
 		sumAmt += r.TotalAmount
-		sumQty += r.QuantitySold
 	}
 
+	// Orden: categoría, luego producto (agrupa entre sí las combinaciones de un mismo producto,
+	// ej. "Caja" y "Unidad suelta" del mismo Arroz quedan una junto a la otra), y dentro del mismo
+	// producto por monto descendente — decisión explícita del usuario (Fase 7J).
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CategoryName != out[j].CategoryName {
 			return out[i].CategoryName < out[j].CategoryName
 		}
-		if out[i].TotalAmount != out[j].TotalAmount {
-			return out[i].TotalAmount > out[j].TotalAmount
+		if out[i].ProductName != out[j].ProductName {
+			return out[i].ProductName < out[j].ProductName
 		}
-		return out[i].ProductName < out[j].ProductName
+		return out[i].TotalAmount > out[j].TotalAmount
 	})
 
 	summary := SalesByProductSummary{
 		TotalAmount:   sumAmt,
-		TotalQuantity: sumQty,
 		LineItems:     meta.LineItems,
 		DistinctSales: meta.DistinctSales,
-		ProductsCount: len(out),
+		ProductsCount: meta.DistinctProducts,
 	}
+	return out, summary, nil
+}
+
+// ProfitDetailRow una línea de venta con su ganancia — precio_venta - precio_compra, ganancia
+// total = ganancia_unidad * cantidad. El costo es el snapshot guardado en
+// TenantSaleItem.PurchasePrice al momento de vender esa línea (ver
+// v145_sale_item_purchase_price_snapshot.go y resolveSaleItemPurchasePrice en
+// sale_service_calc.go) — no cambia si el costo del producto cambia después. Las líneas de venta
+// anteriores a esa migración no tienen snapshot (PurchasePrice=nil): para esas se usa el costo
+// ACTUAL del catálogo como resguardo (join a tenant_products), así el reporte nunca queda en
+// blanco para ventas viejas, aunque para esas sí puede diferir del costo real de ese día. Igual
+// que en el reporte por producto: si el producto no tiene costo (0 o sin catálogo), la ganancia
+// unidad es el precio de venta completo.
+type ProfitDetailRow struct {
+	SaleItemID    uint    `json:"sale_item_id"`
+	SaleID        uint    `json:"sale_id"`
+	IssueDate     string  `json:"issue_date"`
+	DocType       string  `json:"doc_type"`
+	Series        string  `json:"series"`
+	Number        string  `json:"number"`
+	ContactName   string  `json:"contact_name"`
+	ContactDoc    string  `json:"contact_doc_number"`
+	ProductName   string  `json:"product_name"`
+	Quantity      float64 `json:"quantity"`
+	PurchasePrice float64 `json:"purchase_price"`
+	SalePrice     float64 `json:"sale_price"`
+	ProfitUnit    float64 `json:"profit_unit"`
+	ProfitTotal   float64 `json:"profit_total"`
+}
+
+type ProfitDetailSummary struct {
+	LineItems     int64   `json:"line_items"`
+	DistinctSales int64   `json:"distinct_sales"`
+	TotalSales    float64 `json:"total_sales"`
+	TotalProfit   float64 `json:"total_profit"`
+	// TotalCost: costo de compra de lo vendido (precio de compra × cantidad); TotalSales - TotalCost = TotalProfit.
+	TotalCost float64 `json:"total_cost"`
+	// LinesWithoutCost: líneas sin precio de compra registrado (su utilidad es todo el precio).
+	LinesWithoutCost int64 `json:"lines_without_cost"`
+}
+
+// ProfitDetailParams filtros para el reporte de utilidades (ganancia por línea de venta).
+type ProfitDetailParams struct {
+	DateFrom   *time.Time
+	DateTo     *time.Time
+	BranchID   uint
+	CategoryID uint
+	// ProductID: solo las líneas de ese producto (0 = todos).
+	ProductID uint
+	// UserID: solo las ventas de ese usuario (0 = todos).
+	UserID uint
+	// Q busca por código o nombre de producto (LIKE, case-insensitive).
+	Q string
+}
+
+// ProfitDetail replica el reporte "Utilidades detallado" del sistema anterior (reports/
+// commissions-detail): una fila por línea de venta con su ganancia. Mismo scope que
+// SalesByProduct (ScopeCommercial + status != cancelled) — evita el doble conteo de una boleta/
+// factura emitida por conversión de una NV ya contada, y excluye ventas anuladas.
+func (s *SaleService) ProfitDetail(params ProfitDetailParams) ([]ProfitDetailRow, ProfitDetailSummary, error) {
+	q := s.db.Table("tenant_sale_items").
+		Select(`tenant_sale_items.id as sale_item_id,
+			tenant_sale_items.sale_id as sale_id,
+			tenant_sales.issue_date as issue_date,
+			tenant_sales.doc_type as doc_type,
+			tenant_sales.series as series,
+			tenant_sales.number as number,
+			COALESCE(NULLIF(TRIM(ct.business_name), ''), 'Clientes Varios') as contact_name,
+			COALESCE(ct.doc_number, '') as contact_doc,
+			COALESCE(NULLIF(TRIM(p.name), ''), tenant_sale_items.description) as product_name,
+			tenant_sale_items.quantity as quantity,
+			COALESCE(tenant_sale_items.purchase_price, p.purchase_price, 0) as purchase_price,
+			tenant_sale_items.unit_price as sale_price,
+			tenant_sale_items.subtotal as line_subtotal,
+			tenant_sale_items.line_discount_subtotal as line_discount_subtotal,
+			tenant_sale_items.global_discount_subtotal as global_discount_subtotal,
+			tenant_sales.currency as currency,
+			tenant_sales.exchange_rate as exchange_rate`).
+		Joins("INNER JOIN tenant_sales ON tenant_sales.id = tenant_sale_items.sale_id AND tenant_sales.status != 'cancelled'").
+		Joins("LEFT JOIN tenant_products p ON p.id = tenant_sale_items.product_id").
+		Joins("LEFT JOIN tenant_contacts ct ON ct.id = tenant_sales.contact_id").
+		Scopes(salescope.ScopeEmittedNoNotes("tenant_sales"))
+	if params.DateFrom != nil {
+		q = q.Where("tenant_sales.issue_date >= ?", params.DateFrom)
+	}
+	if params.DateTo != nil {
+		q = q.Where("tenant_sales.issue_date <= ?", params.DateTo)
+	}
+	if params.BranchID > 0 {
+		q = q.Where("tenant_sales.branch_id = ?", params.BranchID)
+	}
+	if params.CategoryID > 0 {
+		q = q.Where("p.category_id = ?", params.CategoryID)
+	}
+	if qStr := strings.TrimSpace(params.Q); qStr != "" {
+		like := "%" + qStr + "%"
+		q = q.Where("p.code LIKE ? OR p.name LIKE ? OR tenant_sale_items.description LIKE ?", like, like, like)
+	}
+	if params.ProductID > 0 {
+		q = q.Where("tenant_sale_items.product_id = ?", params.ProductID)
+	}
+	if params.UserID > 0 {
+		q = q.Where("tenant_sales.user_id = ?", params.UserID)
+	}
+	q = q.Order("tenant_sales.issue_date ASC, tenant_sale_items.id ASC")
+
+	type row struct {
+		SaleItemID             uint
+		SaleID                 uint
+		IssueDate              time.Time
+		DocType                string
+		Series                 string
+		Number                 string
+		ContactName            string
+		ContactDoc             string
+		ProductName            string
+		Quantity               float64
+		PurchasePrice          float64
+		SalePrice              float64
+		LineSubtotal           float64
+		LineDiscountSubtotal   float64
+		GlobalDiscountSubtotal float64
+		Currency               string
+		ExchangeRate           *float64
+	}
+	var raw []row
+	if err := q.Scan(&raw).Error; err != nil {
+		return nil, ProfitDetailSummary{}, err
+	}
+
+	out := make([]ProfitDetailRow, len(raw))
+	var summary ProfitDetailSummary
+	distinctSales := map[uint]struct{}{}
+	rateCache := dayRateCache{}
+	for i, r := range raw {
+		// SalePrice es el precio de lista de la línea; lo realmente cobrado descuenta los
+		// descuentos de línea y el descuento global de la venta (ya prorrateado por línea en
+		// subtotal/line_discount_subtotal/global_discount_subtotal). Sin esto la utilidad se
+		// calculaba sobre el precio sin descuento y no coincidía con "Ventas por producto".
+		// La proporción se calcula aquí (no en SQL): en SQL, según el motor, una división de
+		// columnas decimal puede truncarse a entero.
+		if listSubtotal := r.LineSubtotal + r.LineDiscountSubtotal + r.GlobalDiscountSubtotal; listSubtotal > 0 && r.LineSubtotal > 0 && r.LineSubtotal < listSubtotal {
+			r.SalePrice = money.RoundSunat(r.SalePrice * (r.LineSubtotal / listSubtotal))
+		}
+		// El costo (purchase_price) siempre está en soles; el precio de una venta en USD se lleva a soles con el TC de su
+		// venta (si no lo guardó, el del día de emisión) para que la utilidad no reste soles a dólares.
+		if strings.ToUpper(strings.TrimSpace(r.Currency)) == salecurrency.CurrencyUSD {
+			factor := 0.0
+			if r.ExchangeRate != nil && *r.ExchangeRate > 0 {
+				factor = *r.ExchangeRate
+			} else if v := rateCache.get(salecurrency.DayOf(r.IssueDate)); v != nil {
+				factor = *v
+			}
+			if factor > 0 {
+				r.SalePrice = money.RoundSunat(r.SalePrice * factor)
+			}
+		}
+		unitProfit := r.SalePrice - r.PurchasePrice
+		totalProfit := unitProfit * r.Quantity
+		out[i] = ProfitDetailRow{
+			SaleItemID:    r.SaleItemID,
+			SaleID:        r.SaleID,
+			IssueDate:     r.IssueDate.Format("2006-01-02"),
+			DocType:       r.DocType,
+			Series:        r.Series,
+			Number:        r.Number,
+			ContactName:   r.ContactName,
+			ContactDoc:    r.ContactDoc,
+			ProductName:   r.ProductName,
+			Quantity:      r.Quantity,
+			PurchasePrice: r.PurchasePrice,
+			SalePrice:     r.SalePrice,
+			ProfitUnit:    unitProfit,
+			ProfitTotal:   totalProfit,
+		}
+		summary.TotalSales += r.SalePrice * r.Quantity
+		summary.TotalProfit += totalProfit
+		summary.TotalCost += r.PurchasePrice * r.Quantity
+		if r.PurchasePrice <= 0 {
+			summary.LinesWithoutCost++
+		}
+		distinctSales[r.SaleID] = struct{}{}
+	}
+	summary.LineItems = int64(len(raw))
+	summary.DistinctSales = int64(len(distinctSales))
+
 	return out, summary, nil
 }
 
@@ -1623,7 +2455,7 @@ func (s *SaleService) CancelNotaVenta(id uint, userID uint, reason string) error
 		return errors.New("para anular facturas o boletas debe usar nota de crédito electrónica")
 	}
 	var electronicChild int64
-	if err := s.db.Model(&database.TenantSale{}).Where("issued_from_nota_sale_id = ?", id).Count(&electronicChild).Error; err != nil {
+	if err := s.db.Model(&database.TenantSale{}).Where("issued_from_nota_sale_id = ? AND status <> ?", id, "cancelled").Count(&electronicChild).Error; err != nil {
 		return err
 	}
 	if electronicChild > 0 {
@@ -1700,26 +2532,17 @@ func (s *SaleService) Cancel(id uint, userID uint, reason string) error {
 		} else {
 			cancelNotes = "ANULADA: " + reason
 		}
-		return tx.Model(&sale).Updates(map[string]interface{}{
+		if err := tx.Model(&sale).Updates(map[string]interface{}{
 			"status": "cancelled",
 			"notes":  cancelNotes,
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		// Si la venta era un anticipo, deja de ofrecerse para deducir. El bloqueo por anticipos ya
+		// deducidos se valida antes de emitir la nota de crédito (esta anulación llega cuando SUNAT
+		// ya la aceptó y no puede rechazarse aquí).
+		return prepaymentsvc.NewService(tx).VoidSourceVoucherTx(tx, sale.ID)
 	})
-}
-
-func parseIssueDateForSale(issueYMD string, fallback time.Time) time.Time {
-	s := strings.TrimSpace(issueYMD)
-	if s == "" {
-		return fallback
-	}
-	loc, err := time.LoadLocation("America/Lima")
-	if err != nil || loc == nil {
-		loc = time.Local
-	}
-	if t, err := time.ParseInLocation("2006-01-02", s, loc); err == nil {
-		return time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, loc)
-	}
-	return fallback
 }
 
 // GetPayments devuelve los pagos registrados de una venta.
@@ -1800,7 +2623,7 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 		return nil, errors.New("solo se puede emitir comprobante electrónico a partir de una nota de venta (SUNAT 00)")
 	}
 	var dup int64
-	if err := s.db.Model(&database.TenantSale{}).Where("issued_from_nota_sale_id = ?", notaSaleID).Count(&dup).Error; err != nil {
+	if err := s.db.Model(&database.TenantSale{}).Where("issued_from_nota_sale_id = ? AND status <> ?", notaSaleID, "cancelled").Count(&dup).Error; err != nil {
 		return nil, err
 	}
 	if dup > 0 {
@@ -1840,6 +2663,7 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 	for _, it := range items {
 		inputs = append(inputs, SaleItemInput{
 			ProductID:          it.ProductID,
+			SaleUnitID:         it.SaleUnitID,
 			Code:               it.Code,
 			Description:        it.Description,
 			Unit:               it.Unit,
@@ -1850,6 +2674,11 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 			PriceIncludesIgv:   inferPriceIncludesIgvFromSaleItem(s.db, it, taxCfg),
 			ModifiersJSON:      it.ModifiersJSON,
 			ItemNote:           it.ItemNote,
+			PackLabel:          it.PackLabel,
+			// Precio ya vetado cuando se creó la nota de venta original (pasó por
+			// validateAuthorizedPrices en ese momento); esto es un snapshot de datos ya
+			// persistidos, no un precio nuevo enviado por el cliente en esta llamada.
+			PriceAuthorized: true,
 		})
 	}
 	paymentsDB, err := s.GetPayments(nota.ID)
@@ -1858,18 +2687,34 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 	}
 	var pays []PaymentInput
 	for _, p := range paymentsDB {
-		if p.Amount > 0 && strings.TrimSpace(p.Method) != "" {
+		if p.Amount > 0 && strings.TrimSpace(p.Method) != "" && !paymentcondition.IsCreditCode(p.Method) {
 			pays = append(pays, PaymentInput{Method: p.Method, Amount: p.Amount, Reference: p.Reference})
 		}
 	}
-	if len(pays) == 0 && nota.Total > 0 {
+	notaInstallments, err := s.GetCreditInstallments(nota.ID)
+	if err != nil {
+		return nil, err
+	}
+	issueAt, dateErr := resolveElectronicIssueDate(issueYMD, nota.IssueDate, time.Now())
+	if dateErr != nil {
+		return nil, dateErr
+	}
+	// NV a crédito: el comprobante hereda la deuda (cuotas pendientes + abonos reales como pagos
+	// sin caja). Ver buildNotaCreditPlan. Si ya está saldada se emite por el camino de contado.
+	var creditPlan *notaCreditPlan
+	if isCreditNota(&nota, notaInstallments) {
+		creditPlan, err = buildNotaCreditPlan(&nota, notaInstallments, pays, issueAt)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(pays) == 0 && nota.Total > 0 && creditPlan == nil {
 		method := strings.TrimSpace(nota.PaymentMethod)
 		if method == "" {
 			method = "cash"
 		}
 		pays = []PaymentInput{{Method: method, Amount: nota.Total}}
 	}
-	issueAt := parseIssueDateForSale(issueYMD, nota.IssueDate)
 	nvRef := strings.TrimSpace(nota.Series) + "-" + strings.TrimSpace(nota.Number)
 	notes := strings.TrimSpace(nota.Notes)
 	if notes != "" {
@@ -1901,6 +2746,15 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 		return nil, fmt.Errorf("nota de venta en USD: %w", err)
 	}
 	nvID := notaSaleID
+	dueDate := electronicDueDate(nota.DueDate, nota.IssueDate, issueAt)
+	payCondCode := ""
+	var creditInsts []CreditInstallmentInput
+	if creditPlan != nil {
+		payCondCode = paymentcondition.CodeCredit
+		creditInsts = creditPlan.Installments
+		due := creditPlan.LastDue
+		dueDate = &due
+	}
 	issued, err := s.Create(CreateSaleInput{
 		BranchID:                nota.BranchID,
 		ContactID:               contactID,
@@ -1909,7 +2763,9 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 		SeriesID:                targetSeriesID,
 		DocType:                 strings.TrimSpace(target.DocType),
 		IssueDate:               issueAt,
-		DueDate:                 nota.DueDate,
+		DueDate:                 dueDate,
+		PaymentConditionCode:    payCondCode,
+		CreditInstallments:      creditInsts,
 		Currency:                nota.Currency,
 		OperationTypeCode:       opCode,
 		ExchangeRate:            nota.ExchangeRate,
@@ -1922,6 +2778,7 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 		SkipPaymentDistribution: true,
 		IssuedFromNotaSaleID:    &nvID,
 		CentralTenantID:         centralTenantID,
+		PresetServiceChargeRate: nota.ServiceChargeRate * boolToFloat(nota.ServiceChargeAmount > 0),
 	})
 	if err != nil {
 		return nil, err
@@ -1952,19 +2809,30 @@ func (s *SaleService) IssueElectronicFromNota(notaSaleID uint, targetSeriesID ui
 
 // SummaryStats retorna estadísticas resumidas de ventas.
 func (s *SaleService) SummaryStats(branchID uint, from, to time.Time) map[string]interface{} {
-	q := salescope.CommercialSales(s.db.Model(&database.TenantSale{})).
+	q := salescope.EmittedSalesNoNotes(s.db.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date <= ? AND status != ?", from, to, "cancelled")
 	if branchID > 0 {
 		q = q.Where("branch_id = ?", branchID)
 	}
 
 	var count int64
-	var totalAmount float64
+	var totalAmount, serviceCharge float64
+	q = q.Session(&gorm.Session{})
 	q.Count(&count)
 	q.Select("COALESCE(SUM(total), 0)").Scan(&totalAmount)
+	// Recargo al consumo incluido en «total»: no es ingreso del negocio (va a los trabajadores); se informa aparte para poder restarlo.
+	q.Select("COALESCE(SUM(service_charge_amount), 0)").Scan(&serviceCharge)
 
 	return map[string]interface{}{
-		"count": count,
-		"total": totalAmount,
+		"count":                count,
+		"total":                totalAmount,
+		"service_charge_total": serviceCharge,
 	}
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }

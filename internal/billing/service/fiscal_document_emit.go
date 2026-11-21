@@ -220,6 +220,11 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 	if err != nil {
 		return nil, err
 	}
+	// Si el comprobante tenía descuento global o anticipo, las líneas de la nota deben ir ya netas (ver note_payload_net.go).
+	// Solo aplica a la nota con líneas propias; las que toman las de la venta afectada (len(items) vacío arriba) no se tocan.
+	if noteSale.ID > 0 {
+		items = netNoteItemsForPayload(items, &noteSale)
+	}
 	details, err := BuildInvoiceDetailsFromSaleItems(items, companyTaxRate, normUnit)
 	if err != nil {
 		return nil, err
@@ -256,7 +261,7 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 	}
 	var legends []facturador.InvoiceLegend
 	facturador.SetSUNATLegend1000(&legends, sunatTotals.MtoImpVenta, tipoMoneda)
-	return &facturador.NotePayload{
+	notePayload := &facturador.NotePayload{
 		UBLVersion:   "2.1",
 		TipoDoc:      tipoDoc,
 		Serie:        noteSale.Series,
@@ -285,7 +290,9 @@ func (s *BillingService) buildNotePayload(noteSaleID uint) (*facturador.NotePayl
 		MtoImpVenta:       sunatTotals.MtoImpVenta,
 		Details:           details,
 		Legends:           legends,
-	}, nil
+	}
+	applyServiceChargeToNotePayload(notePayload, &noteSale)
+	return notePayload, nil
 }
 
 // buildCreditNotePayload compatibilidad interna.
@@ -325,7 +332,7 @@ func formatAffectedDocumentNumber(orig *database.TenantSale) string {
 	return nro
 }
 
-func (s *BillingService) resolveInvoiceClient(contact *database.TenantContact) (tipoDoc, numDoc, rzn string, addr facturador.InvoiceAddress, err error) {
+func (s *BillingService) resolveInvoiceClient(contact *database.TenantContact) (tipoDoc, numDoc, rzn string, addr *facturador.InvoiceAddress, err error) {
 	tipoDoc = "6"
 	numDoc = "00000000000"
 	rzn = "CLIENTE VARIOS"
@@ -363,16 +370,20 @@ func (s *BillingService) resolveInvoiceClient(contact *database.TenantContact) (
 		numDoc = "99999999999"
 	}
 	if contact == nil || contact.ID == 0 {
-		return "", "", "", addr, errors.New("cliente con dirección y ubigeo requerido")
+		return "", "", "", addr, errors.New("debe asignar un cliente")
 	}
-	depC, provC, distC, errC := s.resolveUbigeoToAddress(clientUbigeo)
-	if errC != nil {
-		return "", "", "", addr, fmt.Errorf("cliente: %w", errC)
-	}
-	addr = facturador.InvoiceAddress{
-		Ubigueo: clientUbigeo, CodigoPais: "PE",
-		Departamento: depC, Provincia: provC, Distrito: distC,
-		Direccion: clientDir,
+	// Dirección: SUNAT no la exige para el cliente en NC/ND (solo la del emisor) — si no hay
+	// dirección/ubigeo real, se omite el campo entero (ver NormalizeTenantContactAddressUbigeo).
+	if clientDir != "" && clientUbigeo != "" {
+		depC, provC, distC, errC := s.resolveUbigeoToAddress(clientUbigeo)
+		if errC != nil {
+			return "", "", "", addr, fmt.Errorf("cliente: %w", errC)
+		}
+		addr = &facturador.InvoiceAddress{
+			Ubigueo: clientUbigeo, CodigoPais: "PE",
+			Departamento: depC, Provincia: provC, Distrito: distC,
+			Direccion: clientDir,
+		}
 	}
 	return tipoDoc, numDoc, rzn, addr, nil
 }

@@ -194,3 +194,129 @@ func detractionEval1180(t *testing.T) sunatdet.CalcResult {
 	}
 	return res
 }
+
+// Autodetracción: el cliente paga el TOTAL al proveedor; no hay SPOT pendiente de confirmar y la BN no se confirma.
+func TestSaleBalance_autodetraccionCobraElTotalSinSpotPendiente(t *testing.T) {
+	sale := database.TenantSale{Total: 2000}
+	det := &database.TenantSaleDetraccion{
+		InvoiceTotalPen: 2000, NetPayablePen: 1760, DetractionAmountPen: 240, BnConfirmationStatus: "self_pending",
+	}
+	target, paid, due, spotAmount, spotPending, status := SaleBalance(sale, det, nil)
+	if target != 2000 || paid != 0 || due != 2000 {
+		t.Errorf("objetivo/pagado/saldo = %v/%v/%v, want 2000/0/2000", target, paid, due)
+	}
+	if spotAmount != 0 || spotPending != 0 {
+		t.Errorf("sin SPOT: amount %v pending %v", spotAmount, spotPending)
+	}
+	if status != "self_pending" {
+		t.Errorf("estado = %q", status)
+	}
+	// Detracción normal: sin cambios.
+	norm := &database.TenantSaleDetraccion{InvoiceTotalPen: 2000, NetPayablePen: 1760, DetractionAmountPen: 240, BnConfirmationStatus: "pending"}
+	target, _, due, spotAmount, spotPending, _ = SaleBalance(sale, norm, nil)
+	if target != 1760 || due != 1760 || spotAmount != 240 || spotPending != 240 {
+		t.Errorf("normal: target %v due %v spot %v/%v, want 1760/1760/240/240", target, due, spotAmount, spotPending)
+	}
+}
+
+func TestReceivableService_ListAndSummary_SeparaMonedas(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:recv_currency?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&database.TenantSale{}, &database.TenantSaleDetraccion{},
+		&database.TenantSalePayment{}, &database.TenantSaleCreditInstallment{}, &database.TenantContact{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	rate := 3.75
+	for _, s := range []database.TenantSale{
+		{Number: "F001-1", DocType: "FACTURA", Status: "credit", Total: 100, Currency: "PEN"},
+		{Number: "F001-2", DocType: "FACTURA", Status: "credit", Total: 200, Currency: "USD", ExchangeRate: &rate},
+		{Number: "F001-3", DocType: "FACTURA", Status: "credit", Total: 50, Currency: ""},
+	} {
+		s := s
+		if err := db.Create(&s).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewReceivableService(db)
+	rows, _, err := svc.List(ListFilter{Status: "all", Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := map[string]string{}
+	for _, r := range rows {
+		cur[r.SaleNumber] = r.Currency
+	}
+	if cur["F001-1"] != "PEN" || cur["F001-2"] != "USD" || cur["F001-3"] != "PEN" {
+		t.Fatalf("monedas por fila: %+v", cur)
+	}
+	sum, err := svc.Summary(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, c := range sum.ByCurrency {
+		got[c.Currency] = c.DirectDue
+	}
+	if len(got) != 2 || got["PEN"] != 150 || got["USD"] != 200 {
+		t.Fatalf("by_currency = %+v, quería PEN=150 y USD=200 sin mezclar", sum.ByCurrency)
+	}
+}
+
+// Cuentas por cobrar: el saldo consolidado va en SOLES (cada USD al TC de su documento) y el estado de cuenta no mezcla dólares con soles.
+func TestReceivableService_SummaryAndStatement_InSoles(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:recv_pen?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&database.TenantSale{}, &database.TenantSaleDetraccion{},
+		&database.TenantSalePayment{}, &database.TenantSaleCreditInstallment{}, &database.TenantContact{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	contact := database.TenantContact{BusinessName: "Cliente SAC", Type: "customer", Active: true}
+	db.Create(&contact)
+	cid := contact.ID
+	rate := 3.5
+	for _, s := range []database.TenantSale{
+		{Number: "F001-1", DocType: "FACTURA", Status: "credit", Total: 100, Currency: "PEN", ContactID: &cid},
+		{Number: "F001-2", DocType: "FACTURA", Status: "credit", Total: 200, Currency: "USD", ExchangeRate: &rate, ContactID: &cid}, // S/ 700
+	} {
+		s := s
+		if err := db.Create(&s).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewReceivableService(db)
+	sum, err := svc.Summary(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]CurrencySummary{}
+	for _, c := range sum.ByCurrency {
+		by[c.Currency] = c
+	}
+	if by["PEN"].DirectDuePEN != 100 || by["USD"].DirectDue != 200 || by["USD"].DirectDuePEN != 700 || sum.TotalDirectDuePEN != 800 {
+		t.Errorf("resumen en soles: PEN=%+v USD=%+v total=%v", by["PEN"], by["USD"], sum.TotalDirectDuePEN)
+	}
+	st, err := svc.Statement(cid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TotalDue != 800 || len(st.TotalDueByCurrency) != 2 {
+		t.Errorf("estado de cuenta: total_due=%v por moneda=%+v", st.TotalDue, st.TotalDueByCurrency)
+	}
+	var usdLine *StatementLine
+	for i := range st.Lines {
+		if st.Lines[i].Reference == "F001-2" {
+			usdLine = &st.Lines[i]
+		}
+	}
+	if usdLine == nil || usdLine.Currency != "USD" || usdLine.Debit != 200 || usdLine.DebitPEN != 700 || usdLine.Balance != 800 {
+		t.Errorf("línea USD: %+v", usdLine)
+	}
+}

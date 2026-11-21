@@ -1,6 +1,7 @@
 package service
 
 import (
+	detraccionsvc "tukifac/internal/detraccion"
 	"tukifac/pkg/database"
 	"tukifac/pkg/facturador"
 	"tukifac/pkg/paymentcondition"
@@ -29,15 +30,24 @@ func applyCreditTermsToInvoicePayload(db *gorm.DB, sale *database.TenantSale, pa
 		payload.FormaPago = &facturador.InvoiceFormaPago{Tipo: "Credito", Moneda: payload.TipoMoneda, Monto: sale.Total}
 		return
 	}
+	// Autodetracción: las cuotas guardadas incluyen la detracción (se cobran por el total), pero SUNAT debe
+	// recibir las cuotas NETAS de siempre (saldo − detracción). Sin autodetracción esto no cambia nada.
+	amounts := make([]float64, len(rows))
+	for i, row := range rows {
+		amounts[i] = row.Amount
+	}
+	if selfDet := detraccionsvc.NewService(db).SelfDetractionAmount(sale.ID); selfDet > 0 {
+		amounts = detraccionsvc.NetInstallmentAmounts(amounts, selfDet)
+	}
 	cuotas := make([]facturador.InvoiceCuota, len(rows))
 	pendingTotal := 0.0
 	for i, row := range rows {
 		cuotas[i] = facturador.InvoiceCuota{
 			Moneda:    row.Currency,
-			Monto:     row.Amount,
+			Monto:     amounts[i],
 			FechaPago: facturador.FormatFiscalDateTime(row.DueDate),
 		}
-		pendingTotal += row.Amount
+		pendingTotal += amounts[i]
 	}
 	// Monto Neto Pendiente de Pago = suma de las cuotas (validateCreditInstallments ya
 	// garantiza al crear la venta que esa suma cubre el saldo a crédito real).

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	cashbanksvc "tukifac/internal/cashbank/service"
 	invsvc "tukifac/internal/inventory/service"
 	"tukifac/internal/restaurant/staff"
+	salesvc "tukifac/internal/sales/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/gormutil"
@@ -186,19 +188,22 @@ type TableWithSession struct {
 	SessionID   *uint   `json:"session_id"`
 	TotalAmount float64 `json:"total_amount"`
 	WaiterName  string  `json:"waiter_name"`
+	// SessionNotes: nota escrita al abrir la mesa (solo si está ocupada).
+	SessionNotes string `json:"session_notes"`
 }
 
 func (s *RestaurantService) ListTables(branchID, floorID uint) ([]TableWithSession, error) {
 	type raw struct {
 		database.TenantRestaurantTable
-		FloorName   string  `gorm:"column:floor_name"`
-		SessionID   *uint   `gorm:"column:session_id"`
-		TotalAmount float64 `gorm:"column:total_amount"`
-		WaiterName  string  `gorm:"column:waiter_name"`
+		FloorName    string  `gorm:"column:floor_name"`
+		SessionID    *uint   `gorm:"column:session_id"`
+		TotalAmount  float64 `gorm:"column:total_amount"`
+		WaiterName   string  `gorm:"column:waiter_name"`
+		SessionNotes string  `gorm:"column:session_notes"`
 	}
 	var rows []raw
 	q := s.db.Table("tenant_restaurant_tables t").
-		Select("t.*, f.name AS floor_name, ts.id AS session_id, COALESCE(ts.total_amount,0) AS total_amount, COALESCE(NULLIF(st.display_name,''), u.name, '') AS waiter_name").
+		Select("t.*, f.name AS floor_name, ts.id AS session_id, COALESCE(ts.total_amount,0) AS total_amount, COALESCE(NULLIF(st.display_name,''), u.name, '') AS waiter_name, COALESCE(ts.notes,'') AS session_notes").
 		Joins("JOIN tenant_restaurant_floors f ON f.id = t.floor_id").
 		Joins(`LEFT JOIN tenant_table_sessions ts ON ts.id = (
 			SELECT s2.id FROM tenant_table_sessions s2
@@ -228,6 +233,7 @@ func (s *RestaurantService) ListTables(branchID, floorID uint) ([]TableWithSessi
 			SessionID:             r.SessionID,
 			TotalAmount:           r.TotalAmount,
 			WaiterName:            r.WaiterName,
+			SessionNotes:          r.SessionNotes,
 		}
 	}
 	return result, nil
@@ -603,10 +609,16 @@ func (s *RestaurantService) AddOrder(sessionID uint, staffID *uint, userID uint,
 
 		var sessionTotal float64
 		taxCfg := tax.LoadFromDB(tx)
+		requestedStock := make(map[orderStockKey]float64, len(items))
 		for i := range items {
 			item := &items[i]
 			product, err := resolveRestaurantOrderItem(tx, item)
 			if err != nil {
+				return err
+			}
+			// Stock al pedir (por presentación si la tiene): evita mandar a cocina lo que no se
+			// podrá cobrar. Los combos validan stock de sus componentes al cobrar.
+			if err := checkOrderItemStock(tx, sess.BranchID, sessionID, product, item, requestedStock); err != nil {
 				return err
 			}
 			comboDrafts, err := resolveComboOrderItem(tx, item, product)
@@ -1085,6 +1097,8 @@ type BillInput struct {
 	DiscountAmount  float64 // descuento global en moneda sobre base imponible (subtotal)
 	DiscountMode    string  // "percent" | "amount" (opcional; recalcula descuento en servidor)
 	DiscountValue   float64 // valor del descuento (% o monto según DiscountMode)
+	// ApplyServiceCharge cobra el recargo al consumo de la empresa (% de la configuración, calculado en servidor).
+	ApplyServiceCharge bool
 	CentralTenantID uint    // tenant SaaS (cupo documentos electrónicos)
 	// ComandaIDs: dividir cuenta — factura solo estas comandas (deben estar pendientes de cobro
 	// en la sesión) en vez de todo lo pendiente. Vacío = comportamiento clásico (todo lo
@@ -1093,13 +1107,46 @@ type BillInput struct {
 	// mande el cliente en ese caso se ignora, para que el cierre de mesa no dependa de que el
 	// cliente cuente bien lo que queda.
 	ComandaIDs []uint
+	// ComandaSplits: dividir cuenta con cantidades parciales — igual que ComandaIDs pero cada
+	// entrada indica cuántas unidades de esa comanda van en este cobro (Quantity <= 0 o >= la
+	// cantidad pendiente = la línea completa). Se combina con ComandaIDs (que equivale a la línea
+	// completa). Una comanda cobrada parcialmente se parte: la fila original conserva el resto
+	// pendiente y se inserta una fila hermana ya facturada con las unidades cobradas.
+	ComandaSplits []ComandaSplit
+	// IdempotencyKey: clave por intento de cobro (ver internal/sales/service/sale_idempotency.go).
+	IdempotencyKey string
 }
+
+// ComandaSplit: unidades de una comanda que entran en un cobro parcial (dividir cuenta).
+type ComandaSplit struct {
+	ComandaID uint    `json:"comanda_id"`
+	Quantity  float64 `json:"quantity"`
+}
+
+// comandaQtyEpsilon: tolerancia para comparar cantidades (columna decimal(15,3)).
+const comandaQtyEpsilon = 0.0005
 
 type PaymentInput struct {
 	Method    string  `json:"method"`
 	Amount    float64 `json:"amount"`
 	Reference string  `json:"reference"`
 	Notes     string  `json:"notes"`
+	// DestinationAccountID: cuenta bancaria que recibe este pago (nil = la vinculada al método). No aplica al efectivo.
+	DestinationAccountID *uint `json:"destination_account_id,omitempty"`
+}
+
+// sumNonCashPayments suma los pagos que NO son efectivo — usado para bloquear el vuelto vía
+// métodos electrónicos (mismo criterio que sale_service.go::sumNonCashDirectPayments; acá no
+// existen los marcadores credito/detraccion que sí hay en el flujo de ventas del ERP).
+func sumNonCashPayments(payments []PaymentInput) float64 {
+	var sum float64
+	for _, p := range payments {
+		if p.Amount <= 0 || p.Method == "" || money.IsCashMethod(p.Method) {
+			continue
+		}
+		sum += p.Amount
+	}
+	return money.RoundDisplay(sum)
 }
 
 func resolveBillDiscountAmount(subtotalBase float64, input BillInput) float64 {
@@ -1125,6 +1172,15 @@ func resolveBillDiscountAmount(subtotalBase float64, input BillInput) float64 {
 
 // BillTable cierra la sesión, genera una venta formal y registra los pagos.
 func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*database.TenantSale, error) {
+	// Reintento de un cobro ya guardado: la mesa ya quedó cerrada/facturada en el primer intento,
+	// así que sin este chequeo el reintento fallaría con "sesión ya cerrada" aunque la venta exista.
+	input.IdempotencyKey = salesvc.NormalizeIdempotencyKey(input.IdempotencyKey)
+	if existing, err := salesvc.FindSaleByIdempotencyKey(s.db, input.UserID, input.IdempotencyKey); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, salesvc.ErrIdempotentReplay
+	}
+
 	var sess database.TenantTableSession
 	if err := s.db.First(&sess, input.SessionID).Error; err != nil {
 		return nil, errors.New("sesión no encontrada")
@@ -1146,24 +1202,57 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 	}
 
 	var comandas []database.TenantComanda
-	splitBilling := len(input.ComandaIDs) > 0
+	splitBilling := len(input.ComandaIDs) > 0 || len(input.ComandaSplits) > 0
+	// partialQty: comanda → unidades cobradas cuando es menos que la línea completa.
+	partialQty := make(map[uint]float64)
 	if !splitBilling {
 		// Camino clásico: todo lo pendiente, respeta el CloseSession que mandó el caller (POS de
 		// venta directa, cierre normal de mesa).
 		comandas = allPending
 	} else {
-		wanted := make(map[uint]bool, len(input.ComandaIDs))
-		for _, id := range input.ComandaIDs {
+		// wantedQty: unidades pedidas por comanda; 0 = línea completa.
+		wanted := make(map[uint]bool, len(input.ComandaIDs)+len(input.ComandaSplits))
+		wantedQty := make(map[uint]float64, len(input.ComandaSplits))
+		wantedIDs := make([]uint, 0, len(input.ComandaIDs)+len(input.ComandaSplits))
+		addWanted := func(id uint, qty float64) error {
+			if wanted[id] {
+				// La misma comanda no puede venir dos veces: el reparto sería ambiguo.
+				return fmt.Errorf("la comanda %d viene repetida en la selección", id)
+			}
 			wanted[id] = true
+			wantedQty[id] = qty
+			wantedIDs = append(wantedIDs, id)
+			return nil
 		}
-		found := make(map[uint]bool, len(input.ComandaIDs))
-		for _, c := range allPending {
-			if wanted[c.ID] {
-				comandas = append(comandas, c)
-				found[c.ID] = true
+		for _, id := range input.ComandaIDs {
+			if err := addWanted(id, 0); err != nil {
+				return nil, err
 			}
 		}
-		for _, id := range input.ComandaIDs {
+		for _, sp := range input.ComandaSplits {
+			if sp.Quantity < 0 {
+				return nil, fmt.Errorf("cantidad inválida para la comanda %d", sp.ComandaID)
+			}
+			if err := addWanted(sp.ComandaID, sp.Quantity); err != nil {
+				return nil, err
+			}
+		}
+		found := make(map[uint]bool, len(wantedIDs))
+		for _, c := range allPending {
+			if !wanted[c.ID] {
+				continue
+			}
+			found[c.ID] = true
+			q := wantedQty[c.ID]
+			if q > comandaQtyEpsilon && q < c.Quantity-comandaQtyEpsilon && strings.TrimSpace(c.ComboParentKey) == "" {
+				partialQty[c.ID] = math.Round(q*1000) / 1000
+				c.Quantity = partialQty[c.ID]
+			} else if q > c.Quantity+comandaQtyEpsilon {
+				return nil, fmt.Errorf("la comanda %d tiene %.3g unidades pendientes, no se pueden cobrar %.3g", c.ID, c.Quantity, q)
+			}
+			comandas = append(comandas, c)
+		}
+		for _, id := range wantedIDs {
 			if !found[id] {
 				return nil, fmt.Errorf("la comanda %d no existe, ya fue cancelada o ya fue facturada", id)
 			}
@@ -1190,7 +1279,7 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		// El cierre de mesa depende de si esto cubre TODO lo pendiente, no de lo que mande el
 		// cliente — evita que la mesa quede "abierta" con todo ya cobrado, o "cerrada" con algo
 		// pendiente, por un desfase de conteo en el frontend.
-		input.CloseSession = len(comandas) == len(allPending)
+		input.CloseSession = len(comandas) == len(allPending) && len(partialQty) == 0
 	}
 
 	resolvedCash, err := s.resolveCashSessionForSale(sess.BranchID, input.UserID, input.EmployeeType, input.CashSessionID, input.Payments)
@@ -1207,7 +1296,10 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		return nil, err
 	}
 
-	// Construir ítems de venta desde las comandas (con tipo de afectación IGV para Lycet)
+	// Construir ítems de venta desde las comandas (con tipo de afectación IGV para Lycet).
+	// restaurantSaleItemPurchasePrice snapshotea el costo actual del producto al vender esta
+	// línea — mismo criterio que resolveSaleItemPurchasePrice en
+	// internal/sales/service/sale_service_calc.go (ver v145_sale_item_purchase_price_snapshot.go).
 	type saleItemData struct {
 		ProductID          *uint
 		PresentationID     *uint
@@ -1296,6 +1388,7 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 			Unit:                   item.Unit,
 			Quantity:               item.Quantity,
 			UnitPrice:              item.UnitPrice,
+			PurchasePrice:          restaurantSaleItemPurchasePrice(s.db, item.ProductID),
 			Discount:               lr.StoredDiscount,
 			LineDiscountSubtotal:   lr.LineDiscountSubtotal,
 			GlobalDiscountSubtotal: lr.GlobalDiscountSubtotal,
@@ -1311,6 +1404,15 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 	taxAmount := calcResult.TaxAmount
 	total := calcResult.Total
 	discountAmount := calcResult.GlobalDiscountAmount
+	// Recargo al consumo: sobre el valor de venta sin IGV (tras el descuento global); no integra la base del IGV y suma al total a pagar.
+	serviceChargeRate, scErr := tax.ResolveServiceChargeRate(s.db, input.ApplyServiceCharge)
+	if scErr != nil {
+		return nil, scErr
+	}
+	var serviceChargeAmount float64
+	if serviceChargeRate > 0 {
+		serviceChargeAmount, total = tax.AddServiceCharge(subtotal, total, serviceChargeRate)
+	}
 
 	var totalPaid float64
 	for _, p := range input.Payments {
@@ -1318,6 +1420,15 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 	}
 	if !money.PaidCoversTotal(totalPaid, total) {
 		return nil, fmt.Errorf("monto pagado (%.2f) es menor al total (%.2f)", money.RoundDisplay(totalPaid), money.RoundDisplay(total))
+	}
+	// El vuelto solo puede salir de efectivo (ver pkg/money/payment_report.go): ningún método
+	// no-efectivo puede por sí solo superar el total a pagar, mismo criterio que
+	// sale_service.go::sumNonCashDirectPayments.
+	if nonCash := sumNonCashPayments(input.Payments); nonCash > total+money.PaymentTolerance {
+		return nil, fmt.Errorf(
+			"el vuelto solo aplica a efectivo: los métodos no efectivo (%.2f) superan el total a pagar (%.2f)",
+			money.RoundDisplay(nonCash), money.RoundDisplay(total),
+		)
 	}
 
 	currency := input.Currency
@@ -1344,14 +1455,21 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 		GlobalDiscountAmount: money.RoundSunat(discountAmount),
 		GlobalDiscountMode:   globalMode,
 		GlobalDiscountValue:  globalValue,
+		ServiceChargeRate:    serviceChargeRate,
+		ServiceChargeAmount:  serviceChargeAmount,
 		Currency:             currency,
 		PaymentMethod:        input.Payments[0].Method, // método principal
 		Status:               "paid",
 		BillingStatus:        "pending",
 	}
+	input.IdempotencyKey = salesvc.NormalizeIdempotencyKey(input.IdempotencyKey)
+	if input.IdempotencyKey != "" {
+		key := input.IdempotencyKey
+		sale.IdempotencyKey = &key
+	}
 
 	now := time.Now()
-	return sale, s.db.Transaction(func(tx *gorm.DB) error {
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var lockedSess database.TenantTableSession
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&lockedSess, input.SessionID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1446,14 +1564,14 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 
 		// Registrar pagos múltiples: distribuir a caja o cuenta bancaria según método
 		cbSvc := cashbanksvc.NewCashBankService(s.db)
-		var recordAmounts []float64
+		var recordLines []money.SalePaymentLine
 		for _, p := range input.Payments {
 			if p.Amount <= 0 || p.Method == "" {
 				continue
 			}
-			recordAmounts = append(recordAmounts, p.Amount)
+			recordLines = append(recordLines, money.SalePaymentLine{Amount: p.Amount, IsCash: money.IsCashMethod(p.Method)})
 		}
-		netRecordAmounts := money.AllocateSalePaymentNetAmounts(total, recordAmounts)
+		netRecordAmounts := money.AllocateSalePaymentNetAmounts(total, recordLines)
 		recordIdx := 0
 		for _, p := range input.Payments {
 			tx.Create(&database.TenantSalePayment{
@@ -1470,7 +1588,15 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 				recordAmt = netRecordAmounts[recordIdx]
 				recordIdx++
 			}
-			_ = cbSvc.RecordPayment(tx, p.Method, recordAmt, input.CashSessionID, sale.Number, desc, &sale.ID, input.UserID)
+			if err := cbSvc.RecordPaymentToDestination(tx, p.Method, recordAmt, input.CashSessionID, sale.Number, desc, &sale.ID, input.UserID, p.DestinationAccountID); err != nil {
+				log.Printf("[restaurant] ERROR al registrar el pago %s de %s en caja/banco: %v", p.Method, sale.Number, err)
+				// Antes el error se ignoraba y la venta quedaba cobrada SIN movimiento de caja/banco. Los errores de reglas (método solo de
+				// pagos, método sin cuenta, cuenta en dólares sin TC, esquema sin migrar) ahora revierten la venta con un mensaje claro; solo
+				// se tolera la falta de sesión de caja, como hasta ahora.
+				if !strings.Contains(err.Error(), "sesión de caja") {
+					return err
+				}
+			}
 		}
 
 		if input.CloseSession {
@@ -1499,12 +1625,40 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 				Update("status", sessionStatusOpen).Error; err != nil {
 				return err
 			}
-			tx.Model(&lockedSess).UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", total))
+			// total_amount de la sesión es lo consumido en comandas: el recargo al consumo se cobra encima y no forma parte de él.
+			tx.Model(&lockedSess).UpdateColumn("total_amount", gorm.Expr("GREATEST(0, total_amount - ?)", billedConsumption(total, serviceChargeAmount)))
 			// Marcar solo las comandas facturadas en este cobro (evita doble facturación en cobros
 			// parciales); billed_at, no status — status sigue siendo 100% de cocina.
 			billedIDs := make([]uint, 0, len(comandas))
 			for _, c := range comandas {
-				billedIDs = append(billedIDs, c.ID)
+				billedQty, partial := partialQty[c.ID]
+				if !partial {
+					billedIDs = append(billedIDs, c.ID)
+					continue
+				}
+				// Cobro parcial de una línea: la fila original conserva el resto pendiente
+				// (cocina, impresión y estado intactos) y las unidades cobradas pasan a una
+				// fila hermana ya facturada. Se relee la cantidad vigente dentro de la
+				// transacción para no dejar la fila original en ≤ 0 ante una carrera.
+				var orig database.TenantComanda
+				if err := tx.First(&orig, c.ID).Error; err != nil {
+					return err
+				}
+				remaining := math.Round((orig.Quantity-billedQty)*1000) / 1000
+				if orig.BilledAt != nil || orig.CancelledAt != nil || remaining <= 0 {
+					return fmt.Errorf("la comanda %d cambió mientras se cobraba; recarga la mesa", c.ID)
+				}
+				sibling := orig
+				sibling.ID = 0
+				sibling.Quantity = billedQty
+				sibling.BilledAt = &now
+				if err := tx.Create(&sibling).Error; err != nil {
+					return err
+				}
+				if err := tx.Model(&database.TenantComanda{}).Where("id = ?", orig.ID).
+					Update("quantity", remaining).Error; err != nil {
+					return err
+				}
 			}
 			if len(billedIDs) > 0 {
 				tx.Model(&database.TenantComanda{}).Where("id IN ?", billedIDs).
@@ -1514,6 +1668,28 @@ func (s *RestaurantService) BillTable(input BillInput, taxCfg tax.Config) (*data
 
 		return nil
 	})
+	if txErr != nil {
+		// Carrera: otra petición con la misma clave ganó el insert; el rollback ya liberó la sesión.
+		if winner, replayErr := salesvc.ReplayIfIdempotentConflict(s.db, input.UserID, input.IdempotencyKey, txErr); winner != nil {
+			return winner, replayErr
+		}
+	}
+	return sale, txErr
+}
+
+// restaurantSaleItemPurchasePrice snapshotea el costo actual del producto al vender esta línea —
+// nil para líneas sin producto de catálogo, mismo criterio que resolveSaleItemPurchasePrice en
+// internal/sales/service/sale_service_calc.go (ver v145_sale_item_purchase_price_snapshot.go).
+func restaurantSaleItemPurchasePrice(db *gorm.DB, productID *uint) *float64 {
+	if productID == nil || *productID == 0 {
+		return nil
+	}
+	var product database.TenantProduct
+	if err := db.Select("purchase_price").First(&product, *productID).Error; err != nil {
+		return nil
+	}
+	price := product.PurchasePrice
+	return &price
 }
 
 // CancelSession anula un pedido abierto: exige PIN, sin venta asociada, elimina registros (hard delete).
@@ -1614,17 +1790,26 @@ func (s *RestaurantService) RegisterPayments(saleID uint, payments []PaymentInpu
 	if !money.PaidCoversTotal(totalPaid, sale.Total) {
 		return fmt.Errorf("el total pagado (%.2f) es menor al total de la venta (%.2f)", totalPaid, sale.Total)
 	}
+	// El vuelto solo puede salir de efectivo — mismo criterio que BillTable/sale_service.go.
+	// Se compara contra sale.Total (no contra el saldo restante) porque AllocateSalePaymentNetAmounts,
+	// más abajo, reparte este lote de payments contra ese mismo total.
+	if nonCash := sumNonCashPayments(payments); nonCash > sale.Total+money.PaymentTolerance {
+		return fmt.Errorf(
+			"el vuelto solo aplica a efectivo: los métodos no efectivo (%.2f) superan el total a pagar (%.2f)",
+			money.RoundDisplay(nonCash), money.RoundDisplay(sale.Total),
+		)
+	}
 
 	cbSvc := cashbanksvc.NewCashBankService(s.db)
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		var recordAmounts []float64
+		var recordLines []money.SalePaymentLine
 		for _, p := range payments {
 			if p.Amount <= 0 || p.Method == "" {
 				continue
 			}
-			recordAmounts = append(recordAmounts, p.Amount)
+			recordLines = append(recordLines, money.SalePaymentLine{Amount: p.Amount, IsCash: money.IsCashMethod(p.Method)})
 		}
-		netRecordAmounts := money.AllocateSalePaymentNetAmounts(sale.Total, recordAmounts)
+		netRecordAmounts := money.AllocateSalePaymentNetAmounts(sale.Total, recordLines)
 		recordIdx := 0
 		for _, p := range payments {
 			tx.Create(&database.TenantSalePayment{
@@ -1641,7 +1826,15 @@ func (s *RestaurantService) RegisterPayments(saleID uint, payments []PaymentInpu
 				recordAmt = netRecordAmounts[recordIdx]
 				recordIdx++
 			}
-			_ = cbSvc.RecordPayment(tx, p.Method, recordAmt, sale.CashSessionID, sale.Number, desc, &sale.ID, userID)
+			if err := cbSvc.RecordPaymentToDestination(tx, p.Method, recordAmt, sale.CashSessionID, sale.Number, desc, &sale.ID, userID, p.DestinationAccountID); err != nil {
+				log.Printf("[restaurant] ERROR al registrar el pago %s de %s en caja/banco: %v", p.Method, sale.Number, err)
+				// Antes el error se ignoraba y la venta quedaba cobrada SIN movimiento de caja/banco. Los errores de reglas (método solo de
+				// pagos, método sin cuenta, cuenta en dólares sin TC, esquema sin migrar) ahora revierten la venta con un mensaje claro; solo
+				// se tolera la falta de sesión de caja, como hasta ahora.
+				if !strings.Contains(err.Error(), "sesión de caja") {
+					return err
+				}
+			}
 		}
 		// Actualizar método de pago principal en la venta
 		if len(payments) > 0 {
@@ -1688,4 +1881,9 @@ func (s *RestaurantService) resolveCashSessionForSale(
 		}
 	}
 	return cbSvc.ResolveCashSessionForSale(branchID, userID, cashSessionID, payLines)
+}
+
+// billedConsumption parte del total cobrado que sale del consumo de la sesión: el recargo al consumo se cobra encima de las comandas y no se descuenta de ellas.
+func billedConsumption(total, serviceCharge float64) float64 {
+	return money.RoundSunat(total - serviceCharge)
 }

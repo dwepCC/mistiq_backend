@@ -19,6 +19,7 @@ func RegisterRoutes(api fiber.Router) {
 	api.Get("/users", middleware.RequirePermission("users.view"), userH.ListAPI)
 	api.Get("/users/:id", middleware.RequirePermission("users.view"), userH.GetAPI)
 	api.Post("/users", middleware.RequirePermission("users.create"), userH.CreateAPI)
+	api.Post("/users/:id/restore", middleware.RequirePermission("users.create"), userH.RestoreAPI)
 	api.Put("/users/:id", middleware.RequirePermission("users.edit"), userH.UpdateAPI)
 	api.Delete("/users/:id", middleware.RequirePermission("users.delete"), userH.DeleteAPI)
 	api.Patch("/users/:id/toggle", middleware.RequirePermission("users.edit"), userH.ToggleAPI)

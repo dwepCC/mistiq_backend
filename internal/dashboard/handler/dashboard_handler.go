@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"tukifac/pkg/salecurrency"
 	"time"
 
 	"tukifac/config"
@@ -39,24 +40,24 @@ func (h *DashboardHandler) Home(c fiber.Ctx) error {
 	var salesCount, purchasesCount int64
 	tdb.Model(&database.TenantContact{}).Where("active = ?", true).Count(&contactsCount)
 	tdb.Model(&database.TenantProduct{}).Where("active = ?", true).Count(&productsCount)
-	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).Where("status != ?", "cancelled").Count(&salesCount)
-	tdb.Model(&database.TenantPurchase{}).Count(&purchasesCount)
+	salescope.EmittedSalesNoNotes(tdb.Model(&database.TenantSale{})).Where("status != ?", "cancelled").Count(&salesCount)
+	tdb.Model(&database.TenantPurchase{}).Where("status != ?", "cancelled").Count(&purchasesCount)
 
 	// Ventas del mes
 	var monthSalesTotal float64
 	var monthSalesCount int64
-	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
+	salescope.EmittedSalesNoNotes(tdb.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date < ? AND status != ?", monthStart, monthEnd, "cancelled").
 		Count(&monthSalesCount)
-	salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
+	salescope.EmittedSalesNoNotes(tdb.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date < ? AND status != ?", monthStart, monthEnd, "cancelled").
-		Select("COALESCE(SUM(total), 0)").Scan(&monthSalesTotal)
+		Select(sumSalesPENSelect()).Scan(&monthSalesTotal)
 
 	// Compras del mes
 	var monthPurchasesTotal float64
 	tdb.Model(&database.TenantPurchase{}).
-		Where("issue_date >= ? AND issue_date < ?", monthStart, monthEnd).
-		Select("COALESCE(SUM(total), 0)").Scan(&monthPurchasesTotal)
+		Where("status != ? AND issue_date >= ? AND issue_date < ?", "cancelled", monthStart, monthEnd).
+		Select("COALESCE(SUM(" + salecurrency.TotalPENSQL("", "total") + "), 0)").Scan(&monthPurchasesTotal)
 
 	// Ventas por mes (últimos 6 meses)
 	type MonthStat struct {
@@ -72,9 +73,9 @@ func (h *DashboardHandler) Home(c fiber.Ctx) error {
 		start := time.Date(now.Year(), time.Month(i), 1, 0, 0, 0, 0, time.Local)
 		end := start.AddDate(0, 1, 0)
 		var sum float64
-		salescope.CommercialSales(tdb.Model(&database.TenantSale{})).
+		salescope.EmittedSalesNoNotes(tdb.Model(&database.TenantSale{})).
 			Where("issue_date >= ? AND issue_date < ? AND status != ?", start, end, "cancelled").
-			Select("COALESCE(SUM(total), 0)").Scan(&sum)
+			Select(sumSalesPENSelect()).Scan(&sum)
 		monthly[i-1] = MonthStat{Label: labels[i-1], Amount: sum}
 		if sum > maxAmount {
 			maxAmount = sum
@@ -109,7 +110,7 @@ func (h *DashboardHandler) Home(c fiber.Ctx) error {
 
 	// Últimas ventas
 	var recentSales []database.TenantSale
-	tdb.Order("created_at DESC").Limit(5).Find(&recentSales)
+	tdb.Where("status != ? AND doc_type NOT IN ?", "cancelled", salescope.NoteDocTypes).Order("created_at DESC").Limit(5).Find(&recentSales)
 
 	// Sesiones de caja abiertas
 	var openCashSessions int64
@@ -119,6 +120,7 @@ func (h *DashboardHandler) Home(c fiber.Ctx) error {
 	var pendingBilling int64
 	tdb.Model(&database.TenantSale{}).
 		Where("billing_status = ? AND doc_type IN (?, ?)", "pending", "FACTURA", "BOLETA").
+		Where("status != ?", "cancelled"). // una anulada no se envía a SUNAT: no es "pendiente"
 		Count(&pendingBilling)
 
 	return c.Render("dashboard/home", fiber.Map{

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -156,7 +157,9 @@ func (h *CompanyHandler) DeleteBranchForm(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString("ID inválido")
 	}
-	service.NewCompanyService(db(c)).DeleteBranch(uint(id))
+	if err := service.NewCompanyService(db(c)).DeleteBranch(uint(id)); err != nil {
+		return c.Redirect().To("/company/branches?error=" + url.QueryEscape(err.Error()))
+	}
 	return c.Redirect().To("/company/branches?success=deleted")
 }
 

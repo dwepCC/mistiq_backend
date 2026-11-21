@@ -10,6 +10,7 @@ import (
 	"tukifac/internal/restaurant/service"
 	"tukifac/internal/restaurant/staff"
 	billingsvc "tukifac/internal/billing/service"
+	"tukifac/internal/sales/branchguard"
 	salesvc "tukifac/internal/sales/service"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
@@ -80,7 +81,13 @@ func (h *RestaurantHandler) GetSettings(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"has_deletion_pin": hasPin})
+	// Recargo al consumo: el POS de PIN no puede leer /api/company/config, así que su activación y % viajan aquí. Solo lectura; el % que se cobra
+	// siempre lo vuelve a leer el servidor al cobrar.
+	scEnabled, scRate := tax.LoadServiceChargeFromDB(db(c))
+	if !tax.ValidServiceChargeRate(scRate) {
+		scEnabled, scRate = false, 0
+	}
+	return c.JSON(fiber.Map{"has_deletion_pin": hasPin, "service_charge_enabled": scEnabled, "service_charge_rate": scRate})
 }
 
 // PUT /api/restaurant/settings  — guarda el PIN de anulación (desde panel tenant)
@@ -140,6 +147,9 @@ func (h *RestaurantHandler) UpdateFloor(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardFloor(c, id, true); !ok {
+		return gerr
+	}
 	var body struct {
 		Name   string `json:"name"`
 		Order  int    `json:"sort_order"`
@@ -160,6 +170,9 @@ func (h *RestaurantHandler) DeleteFloor(c fiber.Ctx) error {
 	id, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardFloor(c, id, true); !ok {
+		return gerr
 	}
 	if err := svc(c).DeleteFloor(id); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
@@ -215,6 +228,9 @@ func (h *RestaurantHandler) UpdateTable(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardTable(c, id, true); !ok {
+		return gerr
+	}
 	var body struct {
 		FloorID  *uint  `json:"floor_id"`
 		Name     string `json:"name"`
@@ -239,6 +255,9 @@ func (h *RestaurantHandler) DeleteTable(c fiber.Ctx) error {
 	id, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardTable(c, id, true); !ok {
+		return gerr
 	}
 	if err := svc(c).DeleteTable(id); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
@@ -298,6 +317,9 @@ func (h *RestaurantHandler) GetSession(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardSession(c, id, false); !ok {
+		return gerr
+	}
 	detail, err := svc(c).GetSessionDetail(id)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
@@ -310,6 +332,9 @@ func (h *RestaurantHandler) GetTableSession(c fiber.Ctx) error {
 	tableID, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardTable(c, tableID, false); !ok {
+		return gerr
 	}
 	sess, err := svc(c).GetActiveSessionByTable(tableID)
 	if err != nil {
@@ -327,6 +352,9 @@ func (h *RestaurantHandler) CancelSession(c fiber.Ctx) error {
 	id, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardSession(c, id, true); !ok {
+		return gerr
 	}
 	var body struct {
 		Reason string `json:"reason"`
@@ -346,6 +374,9 @@ func (h *RestaurantHandler) CancelAllComandas(c fiber.Ctx) error {
 	id, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardSession(c, id, true); !ok {
+		return gerr
 	}
 	var body struct {
 		Reason  string `json:"reason"`
@@ -371,6 +402,9 @@ func (h *RestaurantHandler) AddOrder(c fiber.Ctx) error {
 	sessionID, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardSession(c, sessionID, true); !ok {
+		return gerr
 	}
 	var body struct {
 		StaffID *uint                  `json:"staff_id"`
@@ -398,6 +432,9 @@ func (h *RestaurantHandler) UpdateComandaNotes(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardComanda(c, id, true); !ok {
+		return gerr
+	}
 	var body struct {
 		Notes string `json:"notes"`
 	}
@@ -416,6 +453,9 @@ func (h *RestaurantHandler) UpdateComandaStatus(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardComanda(c, id, true); !ok {
+		return gerr
+	}
 	var body struct {
 		Status string `json:"status"`
 	}
@@ -433,6 +473,9 @@ func (h *RestaurantHandler) CancelComanda(c fiber.Ctx) error {
 	id, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardComanda(c, id, true); !ok {
+		return gerr
 	}
 	var body struct {
 		Reason string `json:"reason"`
@@ -456,6 +499,9 @@ func (h *RestaurantHandler) PrintComanda(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardComanda(c, id, true); !ok {
+		return gerr
+	}
 	if err := svc(c).MarkComandaPrinted(id, uid(c)); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -468,6 +514,9 @@ func (h *RestaurantHandler) MarkTableOrderPrinted(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardTableOrder(c, id, true); !ok {
+		return gerr
+	}
 	if err := svc(c).MarkTableOrderPrinted(id, uid(c)); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -475,6 +524,31 @@ func (h *RestaurantHandler) MarkTableOrderPrinted(c fiber.Ctx) error {
 }
 
 // GET /api/restaurant/kitchen   — vista de cocina: comandas activas
+// GET /api/restaurant/comandas/cancelled?from=YYYY-MM-DD&to=YYYY-MM-DD&q=&page=&per_page=
+func (h *RestaurantHandler) ListCancelledComandas(c fiber.Ctx) error {
+	bid, err := activeBranch(c)
+	if err != nil {
+		return c.Status(403).JSON(fiber.Map{"error": err.Error(), "code": branch.CodeBranchRequired})
+	}
+	f := service.CancelledComandasFilter{
+		BranchID: bid,
+		Query:    c.Query("q"),
+		Page:     fiber.Query[int](c, "page", 1),
+		PerPage:  fiber.Query[int](c, "per_page", 50),
+	}
+	if t, err := time.ParseInLocation("2006-01-02", c.Query("from"), time.Local); err == nil {
+		f.From = t
+	}
+	if t, err := time.ParseInLocation("2006-01-02", c.Query("to"), time.Local); err == nil {
+		f.To = t
+	}
+	rows, total, err := svc(c).ListCancelledComandas(f)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": rows, "total": total, "page": f.Page, "per_page": f.PerPage})
+}
+
 func (h *RestaurantHandler) KitchenView(c fiber.Ctx) error {
 	bid, err := activeBranch(c)
 	if err != nil {
@@ -497,6 +571,9 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardSession(c, sessionID, true); !ok {
+		return gerr
+	}
 	var body struct {
 		SeriesID       uint                   `json:"series_id"`
 		DocType        string                 `json:"doc_type"`
@@ -509,9 +586,14 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		DiscountAmount float64                `json:"discount_amount"`
 		DiscountMode   string                 `json:"discount_mode"`
 		DiscountValue  float64                `json:"discount_value"`
+		ApplyServiceCharge bool                `json:"apply_service_charge"`
 		// ComandaIDs: dividir cuenta — factura solo estas comandas (deben estar pendientes en la
 		// sesión). Vacío = cobra todo lo pendiente (comportamiento clásico).
 		ComandaIDs []uint `json:"comanda_ids"`
+		// ComandaSplits: igual que ComandaIDs pero con cantidad parcial por línea.
+		ComandaSplits []service.ComandaSplit `json:"comanda_splits"`
+		// IdempotencyKey: UUID por intento de cobro; el reintento devuelve la venta ya creada.
+		IdempotencyKey string `json:"idempotency_key"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -551,7 +633,7 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		SeriesID:        body.SeriesID,
 		DocType:         body.DocType,
 		IssueDate:       issueDate,
-		Currency:        body.Currency,
+		Currency:        "PEN", // Tukichef solo opera en soles
 		ContactID:       body.ContactID,
 		Payments:        body.Payments,
 		CashSessionID:   body.CashSessionID,
@@ -559,10 +641,21 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		DiscountAmount:  body.DiscountAmount,
 		DiscountMode:    body.DiscountMode,
 		DiscountValue:   body.DiscountValue,
+		ApplyServiceCharge: body.ApplyServiceCharge,
 		CentralTenantID: centralTenantID,
 		ComandaIDs:      body.ComandaIDs,
+		ComandaSplits:   body.ComandaSplits,
+		IdempotencyKey:  body.IdempotencyKey,
 	}, taxCfg)
-	if err != nil {
+	return respondRestaurantSale(c, dbc, sale, err, body.Payments)
+}
+
+// respondRestaurantSale cierra el cobro de restaurante: traduce errores, y si el resultado es un
+// reintento idempotente (ErrIdempotentReplay) responde con la venta original SIN volver a encolarla
+// a SUNAT — ese efecto ya ocurrió en el primer intento.
+func respondRestaurantSale(c fiber.Ctx, dbc *gorm.DB, sale *database.TenantSale, err error, payments []service.PaymentInput) error {
+	replayed := errors.Is(err, salesvc.ErrIdempotentReplay)
+	if err != nil && !replayed {
 		st := fiber.StatusBadRequest
 		payload := fiber.Map{"error": err.Error()}
 		if errors.Is(err, docusage.ErrQuotaExceeded) {
@@ -571,11 +664,17 @@ func (h *RestaurantHandler) BillSession(c fiber.Ctx) error {
 		}
 		return c.Status(st).JSON(payload)
 	}
-	if tenant, ok := c.Locals("tenant").(*database.Tenant); ok && tenant != nil {
-		_ = billingsvc.TriggerAutoEnqueueAfterSaleCommit(dbc, tenant, sale.ID)
+	if !replayed {
+		if tenant, ok := c.Locals("tenant").(*database.Tenant); ok && tenant != nil {
+			_ = billingsvc.TriggerAutoEnqueueAfterSaleCommit(dbc, tenant, sale.ID)
+		}
 	}
-	printData := buildRestaurantPrintData(dbc, sale, body.Payments)
-	return c.Status(201).JSON(fiber.Map{"success": true, "data": sale, "print_data": printData})
+	printData := buildRestaurantPrintData(dbc, sale, payments)
+	resp := fiber.Map{"success": true, "data": sale, "print_data": printData}
+	if replayed {
+		resp["idempotent_replay"] = true
+	}
+	return c.Status(201).JSON(resp)
 }
 
 // POST /api/restaurant/pos/checkout
@@ -609,7 +708,10 @@ func (h *RestaurantHandler) POSCheckout(c fiber.Ctx) error {
 		DiscountMode   string                 `json:"discount_mode"`
 		DiscountValue  float64                `json:"discount_value"`
 		DiscountAmount float64                `json:"discount_amount"`
+		ApplyServiceCharge bool                `json:"apply_service_charge"`
 		Payments       []service.PaymentInput `json:"payments"`
+		// IdempotencyKey: UUID por intento de cobro; el reintento devuelve la venta ya creada.
+		IdempotencyKey string `json:"idempotency_key"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -626,6 +728,11 @@ func (h *RestaurantHandler) POSCheckout(c fiber.Ctx) error {
 	bid, err := activeBranch(c)
 	if err != nil {
 		return c.Status(403).JSON(fiber.Map{"error": err.Error(), "code": branch.CodeBranchRequired})
+	}
+	if body.SessionID != nil && *body.SessionID != 0 {
+		if ok, gerr := guardSession(c, *body.SessionID, true); !ok {
+			return gerr
+		}
 	}
 
 	issueDate := saas.NowLima()
@@ -665,29 +772,18 @@ func (h *RestaurantHandler) POSCheckout(c fiber.Ctx) error {
 		Items:             body.Items,
 		SeriesID:        body.SeriesID,
 		DocType:         body.DocType,
-		Currency:        body.Currency,
+		Currency:        "PEN", // Tukichef solo opera en soles
 		IssueDate:       issueDate,
 		CashSessionID:   body.CashSessionID,
 		DiscountMode:    body.DiscountMode,
 		DiscountValue:   body.DiscountValue,
 		DiscountAmount:  body.DiscountAmount,
+		ApplyServiceCharge: body.ApplyServiceCharge,
 		Payments:        body.Payments,
 		CentralTenantID: centralTenantID,
+		IdempotencyKey:  body.IdempotencyKey,
 	}, taxCfg)
-	if err != nil {
-		st := fiber.StatusBadRequest
-		payload := fiber.Map{"error": err.Error()}
-		if errors.Is(err, docusage.ErrQuotaExceeded) {
-			st = fiber.StatusPaymentRequired
-			payload["code"] = "DOCUMENT_QUOTA_EXCEEDED"
-		}
-		return c.Status(st).JSON(payload)
-	}
-	if tenant, ok := c.Locals("tenant").(*database.Tenant); ok && tenant != nil {
-		_ = billingsvc.TriggerAutoEnqueueAfterSaleCommit(dbc, tenant, sale.ID)
-	}
-	printData := buildRestaurantPrintData(dbc, sale, body.Payments)
-	return c.Status(201).JSON(fiber.Map{"success": true, "data": sale, "print_data": printData})
+	return respondRestaurantSale(c, dbc, sale, err, body.Payments)
 }
 
 // POST /api/restaurant/sessions/:id/close — cierra la mesa sin generar venta (mesa ya pagada).
@@ -695,6 +791,9 @@ func (h *RestaurantHandler) CloseSession(c fiber.Ctx) error {
 	sessionID, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardSession(c, sessionID, true); !ok {
+		return gerr
 	}
 	if err := svc(c).CloseSessionOnly(sessionID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
@@ -721,6 +820,9 @@ func (h *RestaurantHandler) RegisterPayments(c fiber.Ctx) error {
 	if len(body.Payments) == 0 {
 		return c.Status(400).JSON(fiber.Map{"error": "se requiere al menos un pago"})
 	}
+	if err := branchguard.SaleWritable(c, db(c), saleID); err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "venta no encontrada"})
+	}
 	if err := svc(c).RegisterPayments(saleID, body.Payments, uid(c)); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -733,6 +835,9 @@ func (h *RestaurantHandler) GetSalePayments(c fiber.Ctx) error {
 	saleID, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if err := branchguard.SaleReadable(c, db(c), saleID); err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "venta no encontrada"})
 	}
 	payments, err := svc(c).GetSalePayments(saleID)
 	if err != nil {
@@ -761,6 +866,9 @@ func (h *RestaurantHandler) UpdateSession(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardSession(c, id, true); !ok {
+		return gerr
+	}
 	var body service.UpdateSessionInput
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -776,6 +884,9 @@ func (h *RestaurantHandler) MoveSessionTable(c fiber.Ctx) error {
 	id, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardSession(c, id, true); !ok {
+		return gerr
 	}
 	var body struct {
 		TableID uint `json:"table_id"`
@@ -802,6 +913,9 @@ func (h *RestaurantHandler) UpdateOrderStatus(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if ok, gerr := guardSession(c, id, true); !ok {
+		return gerr
+	}
 	var body struct {
 		OrderStatus string `json:"order_status"`
 	}
@@ -819,6 +933,9 @@ func (h *RestaurantHandler) GetPrecuenta(c fiber.Ctx) error {
 	id, err := parseID(c)
 	if err != nil {
 		return err
+	}
+	if ok, gerr := guardSession(c, id, false); !ok {
+		return gerr
 	}
 	data, err := svc(c).GetPrecuenta(id)
 	if err != nil {

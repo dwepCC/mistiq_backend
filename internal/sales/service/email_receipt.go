@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -101,6 +102,11 @@ func decodeReceiptPdfBase64(pdfBase64 string) ([]byte, error) {
 	}
 	if len(pdf) == 0 {
 		return nil, errors.New("PDF del documento vacío")
+	}
+	// Cualquier rol con permiso de ver podía mandar por correo, desde la cuenta SMTP del sistema y
+	// a cualquier destinatario, un archivo arbitrario con nombre .pdf. Se exige la firma real.
+	if !bytes.HasPrefix(pdf, []byte("%PDF-")) {
+		return nil, errors.New("el archivo adjunto no es un PDF válido")
 	}
 	return pdf, nil
 }

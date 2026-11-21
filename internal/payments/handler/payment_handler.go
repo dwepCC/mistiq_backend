@@ -75,15 +75,25 @@ func (h *PaymentHandler) CreateAPI(c fiber.Ctx) error {
 	cycleID, _ := strconv.ParseUint(c.FormValue("billing_cycle_id"), 10, 32)
 	saUserID, _ := c.Locals("sa_user_id").(uint)
 
+	// Excepción del panel central (ver CreatePaymentInput): campo ausente/vacío = cobrar el
+	// recargo completo; presente (incluido "0") = condonar o descontar.
+	var reconnectionFeeOverride *float64
+	if raw := strings.TrimSpace(c.FormValue("reconnection_fee_override")); raw != "" {
+		if v, parseErr := strconv.ParseFloat(raw, 64); parseErr == nil {
+			reconnectionFeeOverride = &v
+		}
+	}
+
 	input := service.CreatePaymentInput{
-		TenantID:       uint(tenantID),
-		Amount:         amount,
-		Currency:       c.FormValue("currency"),
-		PeriodMonths:   months,
-		Notes:          c.FormValue("notes"),
-		PaymentMethod:  c.FormValue("payment_method"),
-		BillingCycleID: uint(cycleID),
-		ReviewedBy:     saUserID,
+		TenantID:                uint(tenantID),
+		Amount:                  amount,
+		Currency:                c.FormValue("currency"),
+		PeriodMonths:            months,
+		Notes:                   c.FormValue("notes"),
+		PaymentMethod:           c.FormValue("payment_method"),
+		BillingCycleID:          uint(cycleID),
+		ReviewedBy:              saUserID,
+		ReconnectionFeeOverride: reconnectionFeeOverride,
 	}
 
 	// Subida de comprobante
@@ -152,16 +162,21 @@ func (h *PaymentHandler) ApproveAPI(c fiber.Ctx) error {
 		// PeriodMonths opcional: si el admin lo deja en 0, ApprovePayment cae a
 		// payment.PeriodMonths (lo que pidió el tenant al enviarlo) — ver saas.ApprovePayment.
 		PeriodMonths int `json:"period_months"`
+		// ReconnectionFeeOverride: excepción del panel central para condonar (0) o descontar
+		// el recargo de reconexión al aprobar — ver saas.ApprovePayment. Ausente/null = cobrar
+		// el recargo completo, como siempre.
+		ReconnectionFeeOverride *float64 `json:"reconnection_fee_override"`
 	}
 	c.Bind().JSON(&body)
 
 	reviewerID, _ := c.Locals("sa_user_id").(uint)
 	previous, _ := h.svc.GetByID(uint(id))
 	if err := h.svc.Approve(uint(id), service.ApproveInput{
-		PlanID:       body.PlanID,
-		AdminNotes:   body.AdminNotes,
-		PeriodMonths: body.PeriodMonths,
-		ReviewerID:   reviewerID,
+		PlanID:                  body.PlanID,
+		AdminNotes:              body.AdminNotes,
+		PeriodMonths:            body.PeriodMonths,
+		ReviewerID:              reviewerID,
+		ReconnectionFeeOverride: body.ReconnectionFeeOverride,
 	}); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}

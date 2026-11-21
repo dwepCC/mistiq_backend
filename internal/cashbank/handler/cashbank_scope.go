@@ -3,6 +3,7 @@ package handler
 import (
 	"strings"
 
+	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	"tukifac/pkg/middleware"
 	"tukifac/pkg/restaurantperm"
@@ -33,6 +34,32 @@ func canAccessCashSession(c fiber.Ctx, sess *database.TenantCashSession) bool {
 		return true
 	}
 	return sess.OpenedBy == userID(c)
+}
+
+// sessionReadableInBranch: la sesión es de una sucursal que el usuario puede ver (sin sucursal = del tenant).
+// Si no, el handler responde 404 como si no existiera (no revela que existe en otra sucursal).
+func sessionReadableInBranch(c fiber.Ctx, sess *database.TenantCashSession) bool {
+	return sess != nil && branch.RecordReadable(c, sess.BranchID)
+}
+
+// sessionWritableInBranch: para operar (movimientos, cierre, arqueo, borrar) la sesión debe ser de la
+// sucursal ACTIVA; un administrador que ve todas debe cambiar de sucursal para operar otra.
+func sessionWritableInBranch(c fiber.Ctx, sess *database.TenantCashSession) bool {
+	return sess != nil && branch.RecordWritable(c, sess.BranchID)
+}
+
+// sessionWriteDenied centraliza el guard de escritura sobre una sesión: no visible (o inexistente) -> 404;
+// visible pero de otra sucursal que la activa (admin viendo todas) -> 403 BRANCH_FORBIDDEN.
+func sessionWriteDenied(c fiber.Ctx, sess *database.TenantCashSession) (bool, error) {
+	if !sessionReadableInBranch(c, sess) {
+		return true, c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Sesión no encontrada"})
+	}
+	if !sessionWritableInBranch(c, sess) {
+		return true, c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Solo puede operar cajas de su sucursal activa; cambie de sucursal", "code": branch.CodeBranchForbidden,
+		})
+	}
+	return false, nil
 }
 
 func callerUserIDOrZero(c fiber.Ctx) uint {

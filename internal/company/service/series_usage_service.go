@@ -129,6 +129,14 @@ func (s *SeriesUsageService) countDocuments(row *database.TenantDocumentSeries, 
 			"tenant_quotations",
 			"Esta serie ya fue utilizada por cotizaciones.",
 		)
+	case "orden_compra":
+		return s.countModel(
+			&database.TenantPurchaseOrder{},
+			"series_id = ?",
+			[]interface{}{row.ID},
+			"tenant_purchase_orders",
+			"Esta serie ya fue utilizada por órdenes de compra.",
+		)
 	case "almacen":
 		return s.countModel(
 			&database.TenantInventoryDocument{},

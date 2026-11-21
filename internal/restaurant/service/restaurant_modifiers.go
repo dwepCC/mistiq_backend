@@ -340,3 +340,29 @@ func validateRequiredSelections(
 	_ = groupByID
 	return nil
 }
+
+// nameWithPresentation agrega la presentación elegida (entrada type:"variant" de modifiers_json) al
+// nombre de la línea: "Pizza" + Familiar → "Pizza - Familiar". Sin esto el ticket, la precuenta y
+// el comprobante muestran varias líneas "Pizza" que solo se distinguen por el precio. Si el
+// nombre ya la incluye o no hay presentación, devuelve el nombre tal cual.
+func nameWithPresentation(name, modifiersJSON string) string {
+	raw := strings.TrimSpace(modifiersJSON)
+	if raw == "" {
+		return name
+	}
+	var entries []modifierPayloadEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return name
+	}
+	for _, e := range entries {
+		if e.Type != "variant" {
+			continue
+		}
+		pres := strings.TrimSpace(e.OptionName)
+		if pres == "" || strings.Contains(strings.ToLower(name), strings.ToLower(pres)) {
+			return name
+		}
+		return name + " - " + pres
+	}
+	return name
+}

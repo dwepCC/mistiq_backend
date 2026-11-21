@@ -16,6 +16,8 @@ func salesTenantPerm(action string) string {
 		// /sales/pending-refunds[/apply-note] en internal/sales/routes.go) pese a que el
 		// catálogo ya lo define y el frontend ya lo usaba para esconder el botón.
 		return "sales.cancel"
+	case "void_rejected":
+		return "sales.void_rejected"
 	default:
 		return "sales.view"
 	}
@@ -40,7 +42,7 @@ func RequireSalesAccess(action string) fiber.Handler {
 				if HasRestaurantPerm(c, restaurantperm.OrdersCharge) || HasRestaurantPerm(c, restaurantperm.CashView) {
 					return c.Next()
 				}
-			case "cancel":
+			case "cancel", "void_rejected":
 				if HasRestaurantPerm(c, restaurantperm.OrdersCancel) {
 					return c.Next()
 				}

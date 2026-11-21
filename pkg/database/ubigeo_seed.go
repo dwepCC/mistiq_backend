@@ -123,6 +123,7 @@ var ubiProvinciasPeru = []UbiProvincia{
 	{ID: "080100", Nombre: "Cusco", RegionID: "080000"},
 	{ID: "080200", Nombre: "Acomayo", RegionID: "080000"},
 	{ID: "080300", Nombre: "Anta", RegionID: "080000"},
+	{ID: "080400", Nombre: "Calca", RegionID: "080000"},
 	{ID: "080500", Nombre: "Canas", RegionID: "080000"},
 	{ID: "080600", Nombre: "Canchis", RegionID: "080000"},
 	{ID: "080700", Nombre: "Chumbivilcas", RegionID: "080000"},

@@ -150,6 +150,39 @@ func (m *TenantDBManager) release(dbName string) {
 	}
 }
 
+// acquireBackground es para jobs que recorren TODOS los tenants (scanners, reportes). Si el tenant ya
+// tiene pool abierto lo reutiliza; si no, abre una conexión efímera que NO entra al manager y se cierra
+// al liberar. Así un barrido de ~600 tenants no expulsa (LRU) los pools de los tenants que sí están
+// operando, que de otro modo pagan reconexión + cache de prepared statements frío en su siguiente request.
+func (m *TenantDBManager) acquireBackground(dbName string) (*gorm.DB, func(), error) {
+	if err := validateTenantDBName(dbName); err != nil {
+		return nil, nil, err
+	}
+	m.mu.Lock()
+	if e, ok := m.pools[dbName]; ok {
+		e.lastUsed = time.Now()
+		e.inUse.Add(1)
+		db := e.db
+		m.mu.Unlock()
+		return db, func() { m.release(dbName) }, nil
+	}
+	m.mu.Unlock()
+
+	db, err := openTenantDB(dbName)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, func() { closeDB(db) }, nil
+}
+
+// GetTenantDBBackground ver acquireBackground. El caller DEBE invocar el release devuelto.
+func GetTenantDBBackground(dbName string) (*gorm.DB, func(), error) {
+	if defaultManager == nil {
+		return nil, nil, ErrNoTenantDBManager
+	}
+	return defaultManager.acquireBackground(dbName)
+}
+
 // Get obtiene un pool e incrementa inUse; el caller debe invocar ReleaseTenantDB al terminar el request.
 func (m *TenantDBManager) Get(dbName string) (*gorm.DB, error) {
 	return m.acquire(dbName)
@@ -233,7 +266,9 @@ func (m *TenantDBManager) evictLRULocked() {
 	if oldestName == "" {
 		return
 	}
-	closeDB(m.pools[oldestName].db)
+	// Cierre asíncrono: closeDB hace I/O de red y se llamaba con m.mu tomado, bloqueando a todos los
+	// requests (acquire/release de cualquier tenant) mientras un barrido evictaba cientos de pools.
+	go closeDB(m.pools[oldestName].db)
 	delete(m.pools, oldestName)
 	metrics.TenantPoolEvicted.Add(1)
 	logger.L.Info("tenant_pool_evicted_lru", slog.String("db", oldestName), slog.Int("max_pools", m.maxPools))

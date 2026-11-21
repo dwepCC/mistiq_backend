@@ -55,6 +55,9 @@ func (s *BillingService) PostFiscalAcceptSideEffects(saleID uint, pipeline strin
 		return
 	}
 	if orig.Status == "cancelled" {
+		// Ya anulada en una pasada anterior: igual se reintenta la nota de venta de origen, por si esa
+		// vez falló (cancelSourceNotaVenta es idempotente).
+		s.cascadeCancelSourceNotaVenta(&orig, sale.Number)
 		return
 	}
 
@@ -83,6 +86,9 @@ func (s *BillingService) PostFiscalAcceptSideEffects(saleID uint, pipeline strin
 		slog.Uint64("nc_sale_id", uint64(saleID)),
 		slog.Uint64("original_sale_id", uint64(origID)),
 	)
+	// Si el comprobante anulado nació de una nota de venta, la operación entera termina: la nota de
+	// venta (donde viven el pago y el stock) se anula con su reversión.
+	s.cascadeCancelSourceNotaVenta(&orig, sale.Number)
 
 	// Si `orig` había deducido anticipos, repone el saldo de los vouchers origen y marca esas
 	// aplicaciones como revertidas — si no, esos anticipos quedaban con saldo reducido para
@@ -94,6 +100,19 @@ func (s *BillingService) PostFiscalAcceptSideEffects(saleID uint, pipeline strin
 			slog.Uint64("tenant_id", uint64(s.centralTenantID)),
 			slog.Uint64("nc_sale_id", uint64(saleID)),
 			slog.Uint64("original_sale_id", uint64(origID)),
+			slog.Any("error", err),
+		)
+	}
+}
+
+// cascadeCancelSourceNotaVenta anula la nota de venta de origen del comprobante `orig` ya anulado por
+// la nota de crédito `ncNumber`. Un fallo se registra y no interrumpe el resto de efectos.
+func (s *BillingService) cascadeCancelSourceNotaVenta(orig *database.TenantSale, ncNumber string) {
+	reason := "Anulada junto con el comprobante " + orig.Number + ": nota de crédito " + ncNumber + " aceptada por SUNAT"
+	if err := s.cancelSourceNotaVenta(orig, 0, reason); err != nil {
+		logger.L.Warn("nc_void_source_nota_venta_failed",
+			slog.Uint64("tenant_id", uint64(s.centralTenantID)),
+			slog.Uint64("original_sale_id", uint64(orig.ID)),
 			slog.Any("error", err),
 		)
 	}
@@ -114,20 +133,24 @@ func (s *BillingService) applyPartialCreditNoteSideEffects(saleID uint, sale *da
 			return
 		}
 	}
-	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		return salesvc.RestorePartialStockFromKardexTx(tx, sale, "NC/"+sale.Number, 0)
-	}); err != nil {
-		logger.L.Warn("nc_partial_restore_stock_failed",
+	// Descuento / disminución de valor: el cliente se queda con la mercadería, no vuelve stock (aunque la
+	// nota traiga líneas con cantidad). El resto de efectos (devolución del dinero) sí aplican.
+	if CreditNoteReturnsStock(sale.NoteReasonCode) {
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
+			return salesvc.RestorePartialStockFromKardexTx(tx, sale, "NC/"+sale.Number, 0)
+		}); err != nil {
+			logger.L.Warn("nc_partial_restore_stock_failed",
+				slog.Uint64("tenant_id", uint64(s.centralTenantID)),
+				slog.Uint64("nc_sale_id", uint64(saleID)),
+				slog.Any("error", err),
+			)
+			return
+		}
+		logger.L.Info("nc_partial_restore_stock_ok",
 			slog.Uint64("tenant_id", uint64(s.centralTenantID)),
 			slog.Uint64("nc_sale_id", uint64(saleID)),
-			slog.Any("error", err),
 		)
-		return
 	}
-	logger.L.Info("nc_partial_restore_stock_ok",
-		slog.Uint64("tenant_id", uint64(s.centralTenantID)),
-		slog.Uint64("nc_sale_id", uint64(saleID)),
-	)
 
 	// Devuelve el dinero en Cuentas/Bancos si la venta original se cobró ahí (independiente del
 	// resultado de la reposición de stock arriba: son efectos separados, uno no debe bloquear

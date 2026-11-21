@@ -63,6 +63,17 @@ func BackfillDocumentQuotaPeriods() (BackfillQuotaPeriodsResult, error) {
 			continue
 		}
 
+		// Esta reconstrucción calcula los meses desde el REGISTRO de la suscripción, que es el
+		// esquema anterior. Una suscripción que ya tiene períodos pasó por EnsureQuotaPeriod, que
+		// los calcula desde la renovación (ciclo de cobro): reconstruirla aquí crearía períodos
+		// solapados y desalineados con el cupo vigente. Solo aplica a las que nunca tuvieron uno.
+		var existing int64
+		database.CentralDB.Model(&database.SaasDocumentQuotaPeriod{}).
+			Where("subscription_id = ?", sub.ID).Count(&existing)
+		if existing > 0 {
+			continue
+		}
+
 		created, linked, err := backfillSubscriptionPeriods(sub, &cycle, &plan, now)
 		if err != nil {
 			return res, err

@@ -47,14 +47,14 @@ func TestResolveDocumentType_legacyLabels(t *testing.T) {
 
 func TestListFormDocumentTypes_withoutSunatOnlyInternalDocs(t *testing.T) {
 	types := ListFormDocumentTypes(false, false)
-	if len(types) != 4 {
-		t.Fatalf("want 4 tipos internos (nota_venta, cotizacion, inventario), got %d", len(types))
+	if len(types) != 5 {
+		t.Fatalf("want 5 tipos internos (nota_venta, cotizacion, orden_compra, inventario), got %d", len(types))
 	}
 	ids := map[string]bool{}
 	for _, item := range types {
 		ids[item.ID] = true
 	}
-	for _, want := range []string{"nota_venta", "cotizacion", "ingreso_inventario", "egreso_inventario"} {
+	for _, want := range []string{"nota_venta", "cotizacion", "orden_compra", "ingreso_inventario", "egreso_inventario"} {
 		if !ids[want] {
 			t.Fatalf("falta tipo %s en %v", want, types)
 		}

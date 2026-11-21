@@ -13,35 +13,45 @@ const restaurantPermsLocal = "restaurant_perm_set"
 // LoadRestaurantPermissions carga permisos en Locals desde cache (no en JWT).
 func LoadRestaurantPermissions() fiber.Handler {
 	return func(c fiber.Ctx) error {
-		claims, ok := c.Locals("tenant_claims").(*TenantClaims)
-		if !ok || claims == nil || claims.UserID == 0 {
-			return c.Next()
-		}
-		tenantDB, _ := c.Locals("tenantDB").(*gorm.DB)
-		if tenantDB == nil {
-			return c.Next()
-		}
-		tenantSlug := claims.TenantSlug
-		if tenantSlug == "" {
-			tenantSlug, _ = c.Locals("tenant_slug").(string)
-		}
-		svc := staff.New(tenantDB)
-		keys, err := svc.ResolvePermissionKeys(tenantSlug, claims.TenantID, claims.UserID, claims.PermVer)
-		if err != nil || len(keys) == 0 {
-			// Administrador tenant sin fila staff: acceso gestión vía RoleName en handlers dedicados.
-			if claims.RoleName == "Administrador" {
-				keys = append([]string{}, restaurantperm.AllKeys...)
-			} else {
-				return c.Next()
-			}
-		}
-		set := make(map[string]struct{}, len(keys))
-		for _, k := range keys {
-			set[k] = struct{}{}
-		}
-		c.Locals(restaurantPermsLocal, set)
+		ensureRestaurantPermissions(c)
 		return c.Next()
 	}
+}
+
+// ensureRestaurantPermissions hace el trabajo de LoadRestaurantPermissions y es idempotente: si
+// los permisos ya están en Locals no vuelve a resolverlos. Lo usan los helpers que necesitan el
+// puente de restaurante aunque la ruta no haya pasado por LoadRestaurantPermissions.
+func ensureRestaurantPermissions(c fiber.Ctx) {
+	if _, loaded := c.Locals(restaurantPermsLocal).(map[string]struct{}); loaded {
+		return
+	}
+	claims, ok := c.Locals("tenant_claims").(*TenantClaims)
+	if !ok || claims == nil || claims.UserID == 0 {
+		return
+	}
+	tenantDB, _ := c.Locals("tenantDB").(*gorm.DB)
+	if tenantDB == nil {
+		return
+	}
+	tenantSlug := claims.TenantSlug
+	if tenantSlug == "" {
+		tenantSlug, _ = c.Locals("tenant_slug").(string)
+	}
+	svc := staff.New(tenantDB)
+	keys, err := svc.ResolvePermissionKeys(tenantSlug, claims.TenantID, claims.UserID, claims.PermVer)
+	if err != nil || len(keys) == 0 {
+		// Administrador tenant sin fila staff: acceso gestión vía RoleName en handlers dedicados.
+		if claims.RoleName == "Administrador" {
+			keys = append([]string{}, restaurantperm.AllKeys...)
+		} else {
+			return
+		}
+	}
+	set := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		set[k] = struct{}{}
+	}
+	c.Locals(restaurantPermsLocal, set)
 }
 
 // HasRestaurantPerm consulta permisos cargados en Locals.

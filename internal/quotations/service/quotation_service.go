@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/money"
 	"tukifac/pkg/salecurrency"
-	"tukifac/pkg/sunat"
 	"tukifac/pkg/tax"
 
 	"gorm.io/gorm"
@@ -41,6 +41,16 @@ type QuotationItemInput struct {
 	PriceIncludesIgv   bool    `json:"price_includes_igv"`
 	ModifiersJSON      string  `json:"modifiers_json"`
 	ItemNote           string  `json:"item_note"`
+	// LineDiscountMode/Value: descuento de la línea tal como lo tecleó el usuario (percent|amount
+	// sobre la base imponible). Si no vienen y sí `discount` (clientes anteriores), se deriva.
+	LineDiscountMode  string  `json:"line_discount_mode"`
+	LineDiscountValue float64 `json:"line_discount_value"`
+	// SaleUnitID / ComboJSON / Serials: se conservan en la línea y se propagan a la venta al
+	// convertir. Antes se ignoraban y la venta descontaba mal el inventario (unidad de venta),
+	// no resolvía el combo ni respetaba las series elegidas.
+	SaleUnitID *uint    `json:"sale_unit_id"`
+	ComboJSON  string   `json:"combo_json"`
+	Serials    []string `json:"serials"`
 }
 
 type CreateQuotationInput struct {
@@ -52,10 +62,17 @@ type CreateQuotationInput struct {
 	ValidUntil          *time.Time
 	Currency            string
 	ExchangeRate        *float64
+	// PaymentMethods: métodos de pago de referencia (no son un cobro: no tocan caja ni saldos).
+	PaymentMethods      []QuotationPaymentRef
 	Notes               string
 	ShowTermsConditions bool
 	Items               []QuotationItemInput
 	TaxConfig           tax.Config
+	GlobalDiscountMode  string
+	GlobalDiscountValue float64
+	// UserCanOverridePrice: resuelto por el HANDLER contra los permisos del JWT (sales.override_price),
+	// nunca un valor que mande el cliente. false = los precios de catálogo deben coincidir.
+	UserCanOverridePrice bool
 }
 
 type UpdateQuotationInput struct {
@@ -65,10 +82,15 @@ type UpdateQuotationInput struct {
 	ValidUntil          *time.Time
 	Currency            string
 	ExchangeRate        *float64
+	// PaymentMethods: métodos de pago de referencia (no son un cobro: no tocan caja ni saldos).
+	PaymentMethods      []QuotationPaymentRef
 	Notes               string
 	ShowTermsConditions bool
 	Items               []QuotationItemInput
 	TaxConfig           tax.Config
+	GlobalDiscountMode  string
+	GlobalDiscountValue float64
+	UserCanOverridePrice bool
 }
 
 type QuotationListParams struct {
@@ -89,6 +111,10 @@ type ConvertInput struct {
 	UserID        uint
 	CentralTenant uint
 	TaxConfig     tax.Config
+	// Payments / PaymentConditionCode: opcionales. Sin pagos, la venta se cobra al contado en
+	// efectivo por su total REAL (el que calcula la venta, no el guardado en la cotización).
+	Payments             []salessvc.PaymentInput
+	PaymentConditionCode string
 }
 
 func productIsCatalogService(p *database.TenantProduct) bool {
@@ -96,70 +122,6 @@ func productIsCatalogService(p *database.TenantProduct) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(p.Type), "service")
-}
-
-func (s *QuotationService) buildItems(inputItems []QuotationItemInput, taxCfg tax.Config) ([]database.TenantQuotationItem, float64, float64, float64, error) {
-	if len(inputItems) == 0 {
-		return nil, 0, 0, 0, errors.New("la cotización debe tener al menos un ítem")
-	}
-	var subtotal, taxAmount, total float64
-	out := make([]database.TenantQuotationItem, 0, len(inputItems))
-	for _, item := range inputItems {
-		// Precio real obligatorio: si no se corrige aquí, la cotización se guarda igual y el
-		// error solo aparece tarde, al convertirla a venta (SaleService.Create lo rechaza).
-		if !(item.UnitPrice > 0) {
-			label := strings.TrimSpace(item.Description)
-			if label == "" {
-				label = strings.TrimSpace(item.Code)
-			}
-			if label == "" {
-				label = "un ítem de la cotización"
-			}
-			return nil, 0, 0, 0, fmt.Errorf("'%s' no tiene un precio de venta válido (S/ 0.00)", label)
-		}
-		affType := strings.TrimSpace(item.IgvAffectationType)
-		if affType == "" {
-			affType = "10"
-		}
-		effectiveRate := taxCfg.EffectiveRate(affType)
-		itemSub, itemTax, itemTotal := tax.CalcItem(
-			item.UnitPrice, item.Quantity, item.Discount,
-			affType, item.PriceIncludesIgv, taxCfg,
-		)
-		subtotal = money.RoundSunat(subtotal + itemSub)
-		taxAmount = money.RoundSunat(taxAmount + itemTax)
-		total = money.RoundSunat(total + itemTotal)
-
-		itemType := "product"
-		if item.ProductID != nil && *item.ProductID > 0 {
-			var prod database.TenantProduct
-			if s.db.Select("type").First(&prod, *item.ProductID).Error == nil && productIsCatalogService(&prod) {
-				itemType = "service"
-			}
-		} else if strings.EqualFold(strings.TrimSpace(item.Unit), "ZZ") {
-			itemType = "service"
-		}
-
-		out = append(out, database.TenantQuotationItem{
-			ProductID:          item.ProductID,
-			PresentationID:     item.PresentationID,
-			Code:               item.Code,
-			Description:        item.Description,
-			Unit:               sunat.NormalizeUnit(item.Unit, itemType),
-			Quantity:           item.Quantity,
-			UnitPrice:          item.UnitPrice,
-			Discount:           item.Discount,
-			TaxRate:            effectiveRate,
-			IgvAffectationType: affType,
-			PriceIncludesIgv:   item.PriceIncludesIgv,
-			Subtotal:           itemSub,
-			TaxAmount:          itemTax,
-			Total:              itemTotal,
-			ModifiersJSON:      item.ModifiersJSON,
-			ItemNote:           item.ItemNote,
-		})
-	}
-	return out, subtotal, taxAmount, total, nil
 }
 
 func (s *QuotationService) validateSeries(seriesID, branchID uint) (database.TenantDocumentSeries, error) {
@@ -184,18 +146,22 @@ func (s *QuotationService) Create(input CreateQuotationInput) (*database.TenantQ
 	if taxCfg.TaxRate == 0 {
 		taxCfg = tax.LoadFromDB(s.db)
 	}
-	currency, err := salecurrency.NormalizeCurrency(input.Currency)
+	currency, exchangeRate, err := s.validateHeader(input.ContactID, input.Currency, input.ExchangeRate, input.IssueDate, input.ValidUntil)
 	if err != nil {
 		return nil, err
 	}
-	exchangeRate, err := salecurrency.NormalizeExchangeRate(currency, input.ExchangeRate)
+	paymentRefs, err := normalizePaymentRefs(input.PaymentMethods)
 	if err != nil {
 		return nil, err
 	}
-	items, subtotal, taxAmount, total, err := s.buildItems(input.Items, taxCfg)
+	calc, err := s.buildQuotation(input.Items, input.GlobalDiscountMode, input.GlobalDiscountValue, taxCfg)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.checkAuthorizedPrices(input.BranchID, input.Items, input.UserCanOverridePrice, nil, currency, exchangeRate); err != nil {
+		return nil, err
+	}
+	items := calc.items
 
 	q := &database.TenantQuotation{
 		BranchID:            input.BranchID,
@@ -204,14 +170,18 @@ func (s *QuotationService) Create(input CreateQuotationInput) (*database.TenantQ
 		SeriesID:            input.SeriesID,
 		IssueDate:           input.IssueDate,
 		ValidUntil:          input.ValidUntil,
-		Subtotal:            money.RoundSunat(subtotal),
-		TaxAmount:           money.RoundSunat(taxAmount),
-		Total:               money.RoundSunat(total),
-		Currency:            currency,
-		ExchangeRate:        exchangeRate,
-		Notes:               input.Notes,
-		ShowTermsConditions: input.ShowTermsConditions,
-		Status:              "draft",
+		Subtotal:             money.RoundSunat(calc.subtotal),
+		TaxAmount:            money.RoundSunat(calc.taxAmount),
+		Total:                money.RoundSunat(calc.total),
+		GlobalDiscountMode:   calc.globalMode,
+		GlobalDiscountValue:  calc.globalValue,
+		GlobalDiscountAmount: calc.globalAmount,
+		Currency:             currency,
+		ExchangeRate:         exchangeRate,
+		PaymentMethodsJSON:   paymentRefs,
+		Notes:                input.Notes,
+		ShowTermsConditions:  input.ShowTermsConditions,
+		Status:               "draft",
 	}
 
 	err = s.db.Transaction(func(tx *gorm.DB) error {
@@ -234,6 +204,15 @@ func (s *QuotationService) Create(input CreateQuotationInput) (*database.TenantQ
 		return nil, err
 	}
 	return q, nil
+}
+
+// BranchOf devuelve la sucursal de una cotización (para comprobar acceso antes de operar sobre ella).
+func (s *QuotationService) BranchOf(id uint) (uint, error) {
+	var q database.TenantQuotation
+	if err := s.db.Select("id", "branch_id").First(&q, id).Error; err != nil {
+		return 0, errors.New("cotización no encontrada")
+	}
+	return q.BranchID, nil
 }
 
 func (s *QuotationService) GetByID(id uint) (*database.TenantQuotation, []database.TenantQuotationItem, error) {
@@ -326,6 +305,12 @@ func (s *QuotationService) Update(id uint, input UpdateQuotationInput) (*databas
 	if strings.EqualFold(strings.TrimSpace(q.Status), "converted") {
 		return nil, errors.New("no se puede editar una cotización ya convertida")
 	}
+	// La serie ya numeró esta cotización (series/correlative/number): cambiarla aquí dejaba
+	// series_id apuntando a una serie y el número a otra.
+	if input.SeriesID != 0 && input.SeriesID != q.SeriesID {
+		return nil, errors.New("no se puede cambiar la serie de una cotización ya numerada")
+	}
+	input.SeriesID = q.SeriesID
 	if _, err := s.validateSeries(input.SeriesID, q.BranchID); err != nil {
 		return nil, err
 	}
@@ -333,34 +318,68 @@ func (s *QuotationService) Update(id uint, input UpdateQuotationInput) (*databas
 	if taxCfg.TaxRate == 0 {
 		taxCfg = tax.LoadFromDB(s.db)
 	}
-	currency, err := salecurrency.NormalizeCurrency(input.Currency)
+	currency, exchangeRate, err := s.validateHeader(input.ContactID, input.Currency, input.ExchangeRate, input.IssueDate, input.ValidUntil)
 	if err != nil {
 		return nil, err
 	}
-	exchangeRate, err := salecurrency.NormalizeExchangeRate(currency, input.ExchangeRate)
+	paymentRefs, err := normalizePaymentRefs(input.PaymentMethods)
 	if err != nil {
 		return nil, err
 	}
-	items, subtotal, taxAmount, total, err := s.buildItems(input.Items, taxCfg)
+	calc, err := s.buildQuotation(input.Items, input.GlobalDiscountMode, input.GlobalDiscountValue, taxCfg)
 	if err != nil {
 		return nil, err
 	}
+	var storedItems []database.TenantQuotationItem
+	if err := s.db.Where("quotation_id = ?", id).Find(&storedItems).Error; err != nil {
+		return nil, err
+	}
+	// Los precios guardados solo cuentan como "sin cambios" si la cotización sigue en la misma moneda y TC; si cambió (p. ej.
+	// de soles a dólares con el mismo número), cada línea se vuelve a validar contra el catálogo.
+	if !strings.EqualFold(strings.TrimSpace(q.Currency), currency) || (q.ExchangeRate == nil) != (exchangeRate == nil) ||
+		(q.ExchangeRate != nil && exchangeRate != nil && math.Abs(*q.ExchangeRate-*exchangeRate) > 1e-9) {
+		storedItems = nil
+	}
+	if err := s.checkAuthorizedPrices(q.BranchID, input.Items, input.UserCanOverridePrice, storedItems, currency, exchangeRate); err != nil {
+		return nil, err
+	}
+	items := calc.items
 
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&q).Updates(map[string]interface{}{
-			"contact_id":            input.ContactID,
-			"series_id":             input.SeriesID,
-			"issue_date":            input.IssueDate,
-			"valid_until":           input.ValidUntil,
-			"currency":              currency,
-			"exchange_rate":         exchangeRate,
-			"notes":                 input.Notes,
-			"show_terms_conditions": input.ShowTermsConditions,
-			"subtotal":              money.RoundSunat(subtotal),
-			"tax_amount":            money.RoundSunat(taxAmount),
-			"total":                 money.RoundSunat(total),
-		}).Error; err != nil {
-			return err
+		// Reclamo condicional: si otra petición convirtió la cotización entre la lectura de arriba
+		// y este punto, no se edita una cotización que ya dio origen a una venta.
+		res := tx.Model(&database.TenantQuotation{}).
+			Where("id = ? AND status <> ?", id, "converted").
+			Updates(map[string]interface{}{
+				"contact_id":             input.ContactID,
+				"series_id":              input.SeriesID,
+				"issue_date":             input.IssueDate,
+				"valid_until":            input.ValidUntil,
+				"currency":               currency,
+				"exchange_rate":          exchangeRate,
+				"payment_methods_json":   paymentRefs,
+				"notes":                  input.Notes,
+				"show_terms_conditions":  input.ShowTermsConditions,
+				"subtotal":               money.RoundSunat(calc.subtotal),
+				"tax_amount":             money.RoundSunat(calc.taxAmount),
+				"total":                  money.RoundSunat(calc.total),
+				"global_discount_mode":   calc.globalMode,
+				"global_discount_value":  calc.globalValue,
+				"global_discount_amount": calc.globalAmount,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			// MySQL cuenta solo filas que cambiaron: guardar sin tocar nada también da 0. Se
+			// distingue releyendo el estado.
+			var status string
+			if err := tx.Model(&database.TenantQuotation{}).Where("id = ?", id).Select("status").Scan(&status).Error; err != nil {
+				return err
+			}
+			if strings.EqualFold(strings.TrimSpace(status), "converted") {
+				return errors.New("no se puede editar una cotización ya convertida")
+			}
 		}
 		if err := tx.Where("quotation_id = ?", id).Delete(&database.TenantQuotationItem{}).Error; err != nil {
 			return err
@@ -373,6 +392,8 @@ func (s *QuotationService) Update(id uint, input UpdateQuotationInput) (*databas
 	if err != nil {
 		return nil, err
 	}
+	// La cotización se editó a propósito: su foto de impresión se vuelve a congelar en la próxima impresión.
+	_ = s.db.Where("doc_kind = ? AND doc_id = ?", database.SnapshotKindQuotation, id).Delete(&database.TenantDocumentSnapshot{}).Error
 	return s.reloadHeader(id)
 }
 
@@ -396,28 +417,50 @@ func (s *QuotationService) Delete(id uint) error {
 		if err := tx.Where("quotation_id = ?", id).Delete(&database.TenantQuotationItem{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("doc_kind = ? AND doc_id = ?", database.SnapshotKindQuotation, id).Delete(&database.TenantDocumentSnapshot{}).Error; err != nil {
+			return err
+		}
 		return tx.Unscoped().Delete(&database.TenantQuotation{}, id).Error
 	})
 }
 
-func (s *QuotationService) MarkConverted(quotationID, saleID uint, target string) error {
-	var q database.TenantQuotation
-	if err := s.db.First(&q, quotationID).Error; err != nil {
-		return errors.New("cotización no encontrada")
+// ErrQuotationAlreadyConverted: la cotización ya dio origen a una venta.
+var ErrQuotationAlreadyConverted = errors.New("esta cotización ya fue convertida a una venta")
+
+// ClaimForConversionTx marca la cotización como convertida con un UPDATE CONDICIONAL
+// (status <> 'converted') dentro de la transacción de la venta. Es lo que hace la conversión
+// atómica: dos conversiones simultáneas crean cada una su venta, pero solo una consigue el UPDATE;
+// la otra recibe ErrQuotationAlreadyConverted y su transacción entera (venta, correlativo, caja,
+// stock) hace rollback. Antes la venta se creaba y la marca iba después, en otra transacción, y
+// cada petición que ganaba la carrera dejaba una venta duplicada.
+func ClaimForConversionTx(tx *gorm.DB, quotationID, saleID uint, target string) error {
+	res := tx.Model(&database.TenantQuotation{}).
+		Where("id = ? AND status <> ?", quotationID, "converted").
+		Updates(map[string]interface{}{
+			"status":            "converted",
+			"converted_sale_id": saleID,
+			"converted_at":      time.Now(),
+			"converted_target":  strings.TrimSpace(target),
+		})
+	if res.Error != nil {
+		return res.Error
 	}
-	if strings.EqualFold(strings.TrimSpace(q.Status), "converted") {
-		if q.ConvertedSaleID != nil && *q.ConvertedSaleID == saleID {
-			return nil
+	if res.RowsAffected == 0 {
+		var n int64
+		if err := tx.Model(&database.TenantQuotation{}).Where("id = ?", quotationID).Count(&n).Error; err != nil {
+			return err
 		}
-		return errors.New("esta cotización ya fue convertida a una venta")
+		if n == 0 {
+			return errors.New("cotización no encontrada")
+		}
+		return ErrQuotationAlreadyConverted
 	}
-	now := time.Now()
-	return s.db.Model(&q).Updates(map[string]interface{}{
-		"status":            "converted",
-		"converted_sale_id": saleID,
-		"converted_at":      now,
-		"converted_target":  strings.TrimSpace(target),
-	}).Error
+	return nil
+}
+
+// MarkConverted se conserva por compatibilidad; usa el mismo UPDATE condicional.
+func (s *QuotationService) MarkConverted(quotationID, saleID uint, target string) error {
+	return ClaimForConversionTx(s.db, quotationID, saleID, target)
 }
 
 func (s *QuotationService) EnsureCanLinkToSale(quotationID uint) (*database.TenantQuotation, error) {
@@ -483,10 +526,19 @@ func (s *QuotationService) ConvertToSale(quotationID uint, input ConvertInput) (
 			Quantity:           it.Quantity,
 			UnitPrice:          it.UnitPrice,
 			Discount:           it.Discount,
+			LineDiscountMode:   it.LineDiscountMode,
+			LineDiscountValue:  it.LineDiscountValue,
+			SaleUnitID:         it.SaleUnitID,
+			ComboJSON:          it.ComboJSON,
+			Serials:            parseSerialsJSON(it.SerialsJSON),
 			IgvAffectationType: it.IgvAffectationType,
 			PriceIncludesIgv:   it.PriceIncludesIgv,
 			ModifiersJSON:      it.ModifiersJSON,
 			ItemNote:           it.ItemNote,
+			// El precio ya fue pactado/autorizado al crear la cotización (puede ser distinto del
+			// catálogo vigente a propósito — precio negociado); convertir no debe reevaluarlo
+			// contra validateAuthorizedPrices.
+			PriceAuthorized: true,
 		})
 	}
 
@@ -521,9 +573,14 @@ func (s *QuotationService) ConvertToSale(quotationID uint, input ConvertInput) (
 		notes = "Referencia cotización " + qRef + "."
 	}
 
-	payments := []salessvc.PaymentInput{}
-	if q.Total > 0 {
-		payments = []salessvc.PaymentInput{{Method: "cash", Amount: q.Total}}
+	// Pagos: los que indique quien convierte; sin ellos, contado en efectivo por el total REAL de
+	// la venta (PaymentMethod sin Payments hace que SaleService use su propio total). Antes se
+	// registraba q.Total, y cualquier diferencia entre cotización y venta (bonificación, IGV no
+	// incluido) dejaba un pago de más o de menos en caja.
+	payments := input.Payments
+	paymentMethod := ""
+	if len(payments) == 0 {
+		paymentMethod = "cash"
 	}
 
 	taxCfg := input.TaxConfig
@@ -544,23 +601,23 @@ func (s *QuotationService) ConvertToSale(quotationID uint, input ConvertInput) (
 		Currency:              q.Currency,
 		OperationTypeCode:     salecurrency.OpVentaInterna,
 		ExchangeRate:          q.ExchangeRate,
+		PaymentMethod:         paymentMethod,
 		Payments:              payments,
+		PaymentConditionCode:  input.PaymentConditionCode,
 		Notes:                 notes,
 		Items:                 saleItems,
+		GlobalDiscountMode:    q.GlobalDiscountMode,
+		GlobalDiscountValue:   q.GlobalDiscountValue,
 		TaxConfig:             taxCfg,
 		CentralTenantID:       input.CentralTenant,
 		IssuedFromQuotationID: &qID,
+		// Atómico con la venta: o se crea la venta Y la cotización queda convertida, o ninguna.
+		OnCreatedTx: func(tx *gorm.DB, sale *database.TenantSale) error {
+			return ClaimForConversionTx(tx, quotationID, sale.ID, target)
+		},
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	convertedTarget := target
-	if target == "nota_venta" {
-		convertedTarget = "nota_venta"
-	}
-	if err := s.MarkConverted(quotationID, sale.ID, convertedTarget); err != nil {
-		return sale, err
 	}
 	return sale, nil
 }

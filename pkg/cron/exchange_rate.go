@@ -2,6 +2,7 @@ package cron
 
 import (
 	"log/slog"
+	"strconv"
 	"time"
 
 	"tukifac/internal/exchangerate"
@@ -33,13 +34,15 @@ func runExchangeRateSchedulerLoop() {
 
 	runExchangeRateDailyPrefetch(true)
 	runExchangeRateHourlyRetry()
+	// Cada día debe tener su TC guardado: al iniciar se completan los últimos 45 días que falten.
+	runExchangeRateGapFill(45)
 
 	dailyTicker := time.NewTicker(30 * time.Second)
 	hourlyTicker := time.NewTicker(1 * time.Hour)
 	defer dailyTicker.Stop()
 	defer hourlyTicker.Stop()
 
-	var lastDailyDate string
+	var lastDailyDate, lastGapFillDate string
 
 	for {
 		select {
@@ -49,6 +52,12 @@ func runExchangeRateSchedulerLoop() {
 			if now.Hour() == exchangeRateCronHour && now.Minute() == exchangeRateCronMinute && lastDailyDate != today {
 				lastDailyDate = today
 				runExchangeRateDailyPrefetch(false)
+			}
+			// 00:10: el día nuevo ya tiene fila (propagada del último TC confirmado) antes de que llegue la primera operación;
+			// a las 09:05 el prefetch la confirma con el TC publicado.
+			if now.Hour() == 0 && now.Minute() == 10 && lastGapFillDate != today {
+				lastGapFillDate = today
+				runExchangeRateGapFill(5)
 			}
 		case <-hourlyTicker.C:
 			runExchangeRateHourlyRetry()
@@ -76,6 +85,21 @@ func runExchangeRateDailyPrefetch(initial bool) {
 		slog.String("status", safeStatus(res)),
 		slog.Any("error", err),
 	)
+}
+
+// runExchangeRateGapFill completa los días sin TC guardado de los últimos daysBack días (idempotente; un solo nodo a la vez).
+func runExchangeRateGapFill(daysBack int) {
+	if !database.IsCentralSchemaReady() {
+		return
+	}
+	day := saas.NowLima().Format("2006-01-02")
+	release, acquired := cronlock.TryAcquireDaily("exchange_rate:gapfill:"+strconv.Itoa(daysBack), day, 30*time.Minute)
+	if !acquired {
+		return
+	}
+	defer release()
+	filled := exchangerate.DefaultService().EnsureRecentDays(daysBack)
+	logger.L.Info("exchange_rate_gap_fill", slog.Int("days_back", daysBack), slog.Int("filled", filled))
 }
 
 func runExchangeRateHourlyRetry() {

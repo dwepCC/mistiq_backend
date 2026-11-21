@@ -31,6 +31,12 @@ type SessionBalanceSummary struct {
 	ByMethod     []MethodBalance `json:"by_method"`
 	Total        float64         `json:"total"`
 	CashExpected float64         `json:"cash_expected"`
+	// Todos los importes de este resumen están en SOLES: los movimientos de documentos en USD entran con su equivalente
+	// (monto × TC del documento). HasForeign avisa que la sesión tuvo documentos en dólares; RateEstimatedCount/
+	// RateMissingCount, los de USD sin TC guardado (estimados con el TC del día / sin poder convertirse).
+	HasForeign         bool  `json:"has_foreign"`
+	RateEstimatedCount int64 `json:"rate_estimated_count"`
+	RateMissingCount   int64 `json:"rate_missing_count"`
 }
 
 // GetSessionBalanceSummary arma el desglose por método de tenant_cash_movements (siempre ligados
@@ -63,12 +69,15 @@ func (s *CashBankService) GetSessionBalanceSummary(sessionID uint) (*SessionBala
 
 	var cashMovs []database.TenantCashMovement
 	s.db.Where("cash_session_id = ? AND type IN ?", sessionID, []string{"income", "expense"}).Find(&cashMovs)
+	var bankMovs []database.TenantBankMovement
+	s.db.Where("cash_session_id = ?", sessionID).Find(&bankMovs)
+	pen := s.penAmounts(cashMovs, bankMovs) // equivalentes en soles (documentos en USD al TC de su documento)
 	for _, m := range cashMovs {
 		mb := ensure(m.PaymentMethod)
 		if m.Type == "income" {
-			mb.Income += m.Amount
+			mb.Income += pen.cash[m.ID]
 		} else {
-			mb.Expense += m.Amount
+			mb.Expense += pen.cash[m.ID]
 		}
 	}
 
@@ -79,8 +88,6 @@ func (s *CashBankService) GetSessionBalanceSummary(sessionID uint) (*SessionBala
 	// AddMovement ya no duplica: un manual vive en EXACTAMENTE una de las dos tablas según su
 	// método, así que ambas consultas (cashMovs arriba, bankMovs aquí) son necesariamente
 	// disjuntas por construcción y no hay riesgo de doble conteo.
-	var bankMovs []database.TenantBankMovement
-	s.db.Where("cash_session_id = ?", sessionID).Find(&bankMovs)
 	if len(bankMovs) > 0 {
 		methodByAccount := s.paymentMethodCodesByBankAccount(bankMovs)
 		for _, m := range bankMovs {
@@ -95,9 +102,9 @@ func (s *CashBankService) GetSessionBalanceSummary(sessionID uint) (*SessionBala
 			}
 			mb := ensure(code)
 			if m.Type == "credit" {
-				mb.Income += m.Amount
+				mb.Income += pen.bank[m.ID]
 			} else {
-				mb.Expense += m.Amount
+				mb.Expense += pen.bank[m.ID]
 			}
 		}
 	}
@@ -113,7 +120,8 @@ func (s *CashBankService) GetSessionBalanceSummary(sessionID uint) (*SessionBala
 		return order[i] < order[j]
 	})
 
-	out := &SessionBalanceSummary{CashExpected: s.getExpectedBalance(sessionID)}
+	out := &SessionBalanceSummary{CashExpected: s.getExpectedBalance(sessionID), HasForeign: pen.foreign,
+		RateEstimatedCount: pen.estimated, RateMissingCount: pen.missing}
 	for _, method := range order {
 		mb := totals[method]
 		// Income/Expense quedan como la suma pura de movimientos (útil para mostrar "Ingresos"/

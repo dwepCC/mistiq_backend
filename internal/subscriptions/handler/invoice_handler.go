@@ -19,15 +19,16 @@ type renewalInvoiceBody struct {
 
 func invoiceRow(c saas.InvoiceRow) fiber.Map {
 	return fiber.Map{
-		"id":           c.ID,
-		"tenant_id":    c.TenantID,
-		"period_start": c.PeriodStart,
-		"period_end":   c.PeriodEnd,
-		"due_date":     c.DueDate,
-		"amount":       c.Amount,
-		"currency":     c.Currency,
-		"status":       c.Status,
-		"paid_at":      c.PaidAt,
+		"id":               c.ID,
+		"tenant_id":        c.TenantID,
+		"period_start":     c.PeriodStart,
+		"period_end":       c.PeriodEnd,
+		"due_date":         c.DueDate,
+		"amount":           c.Amount,
+		"reconnection_fee": c.ReconnectionFee,
+		"currency":         c.Currency,
+		"status":           c.Status,
+		"paid_at":          c.PaidAt,
 	}
 }
 

@@ -11,16 +11,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"tukifac/pkg/branch"
 
 	"tukifac/config"
 	detraccionsvc "tukifac/internal/detraccion"
 	"tukifac/internal/fiscal/salecontext"
+	"tukifac/internal/exportacion"
 	prepaymentsvc "tukifac/internal/prepayment"
 	salesvc "tukifac/internal/sales/service"
 	"tukifac/pkg/billingstate"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/facturador"
+	"tukifac/pkg/money"
 	"tukifac/pkg/saas/docusage"
 	"tukifac/pkg/salecurrency"
 	"tukifac/pkg/sunat"
@@ -29,6 +32,7 @@ import (
 	"tukifac/pkg/tenantstorage"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type BillingService struct {
@@ -95,7 +99,7 @@ func (s *BillingService) resolveUbigeoToAddress(ubigeo string) (dep, prov, dist 
 	}
 	var distrito database.UbiDistrito
 	if err := s.db.Where("id = ?", ubigeo).First(&distrito).Error; err != nil || distrito.ID == "" {
-		return "", "", "", fmt.Errorf("ubigeo %s no encontrado en catálogo; configure un distrito válido", ubigeo)
+		return "", "", "", fmt.Errorf("ubigeo %s no encontrado en el catálogo de distritos; si es un distrito nuevo, agréguelo en Ajustes → Empresa (opción «Agregar distrito») o elija otro distrito válido", ubigeo)
 	}
 	var provincia database.UbiProvincia
 	if err := s.db.Where("id = ?", distrito.ProvinciaID).First(&provincia).Error; err != nil || provincia.ID == "" {
@@ -129,14 +133,23 @@ func (s *BillingService) buildInvoiceAddressFromUbigeo(ubigeo, direccion string)
 // GetNotificationCounts devuelve cantidades de comprobantes electrónicos por estado (solo 01, 03, 07, 08).
 // Para notificaciones en el header del tenant.
 func (s *BillingService) GetNotificationCounts() (pending, errorCount, rejected int64, err error) {
+	return s.GetNotificationCountsForBranch(0)
+}
+
+// GetNotificationCountsForBranch igual que GetNotificationCounts pero limitado a una sucursal
+// (branchID > 0). 0 = todo el tenant (solo para quien ve todas las sucursales o procesos internos).
+func (s *BillingService) GetNotificationCountsForBranch(branchID uint) (pending, errorCount, rejected int64, err error) {
 	electronicCodes := []string{"01", "03", "07", "08", "09", "31"}
 	for _, status := range []string{"pending", "error", "rejected"} {
 		var n int64
-		e := s.db.Model(&database.TenantSale{}).
+		q := s.db.Model(&database.TenantSale{}).
 			Joins("JOIN tenant_document_series ON tenant_document_series.id = tenant_sales.series_id").
 			Where("tenant_document_series.sunat_code IN ?", electronicCodes).
-			Where("tenant_sales.billing_status = ?", status).
-			Count(&n).Error
+			Where("tenant_sales.billing_status = ?", status)
+		if branchID > 0 {
+			q = q.Where("tenant_sales.branch_id = ?", branchID)
+		}
+		e := q.Count(&n).Error
 		if e != nil {
 			return 0, 0, 0, e
 		}
@@ -252,21 +265,23 @@ func (s *BillingService) emitInvoiceDocument(saleID uint, companyCfg *database.T
 		clientTipoDoc = "0"
 		clientNumDoc = "99999999999"
 	}
-	// Dirección cliente: SUNAT no acepta "-"; debe ser dirección y ubigeo reales
-	clientAddr := facturador.InvoiceAddress{Ubigueo: "150101", CodigoPais: "PE", Departamento: "Lima", Provincia: "Lima", Distrito: "Lima", Urbanizacion: "", Direccion: clientDir}
-	if contact.ID > 0 {
+	if contact.ID == 0 {
+		return nil, errors.New("para facturación electrónica debe asignar un cliente en la venta")
+	}
+	// Dirección cliente: SUNAT NO la exige en factura/boleta (solo la del emisor) — si el
+	// contacto no tiene dirección/ubigeo real, se omite el campo entero en vez de fabricar
+	// un valor (ver comentario en NormalizeTenantContactAddressUbigeo).
+	var clientAddr *facturador.InvoiceAddress
+	if clientDir != "" && clientUbigeo != "" {
 		depC, provC, distC, errC := s.resolveUbigeoToAddress(clientUbigeo)
 		if errC != nil {
 			return nil, fmt.Errorf("cliente: %w", errC)
 		}
-		clientAddr = facturador.InvoiceAddress{
+		clientAddr = &facturador.InvoiceAddress{
 			Ubigueo: clientUbigeo, CodigoPais: "PE",
 			Departamento: depC, Provincia: provC, Distrito: distC,
 			Urbanizacion: "", Direccion: clientDir,
 		}
-	} else {
-		// Cliente genérico (sin contacto): SUNAT exige dirección real; no se acepta "-"
-		return nil, errors.New("para facturación electrónica debe asignar un cliente con dirección y ubigeo completos en la venta")
 	}
 	companyTaxRate, err := s.resolveCompanyTaxRate()
 	if err != nil {
@@ -343,6 +358,7 @@ func (s *BillingService) emitInvoiceDocument(saleID uint, companyCfg *database.T
 		Details:            details,
 		Legends:            legends,
 	}
+	applyServiceChargeToInvoicePayload(payload, &sale)
 	if fiscalEnrich, err := salecontext.LoadInvoiceEnrichment(s.db, saleID, sale.Total); err == nil && fiscalEnrich != nil {
 		salecontext.ApplyToInvoicePayload(payload, fiscalEnrich)
 	}
@@ -351,6 +367,10 @@ func (s *BillingService) emitInvoiceDocument(saleID uint, companyCfg *database.T
 	}
 	if voucher, err := prepaymentsvc.NewService(s.db).LoadBySaleID(saleID); err == nil && voucher != nil {
 		prepaymentsvc.ApplyEmitToInvoicePayload(payload, voucher)
+	}
+	// Exportación de servicios (0201/0202/0208): adquirente con guion, datos del huésped o país de uso, leyenda.
+	if exp, err := exportacion.LoadBySaleID(s.db, saleID); err == nil && exp != nil {
+		exportacion.ApplyToInvoicePayload(payload, exp)
 	}
 	if apps, grossTotals, applyRes, ok, err := prepaymentsvc.NewService(s.db).DeductionFiscalContext(saleID, items, companyTaxRate); err == nil && ok {
 		prepaymentsvc.ApplyDeductionToInvoicePayload(payload, apps, applyRes, grossTotals, prepaymentsvc.SaleDeductionNet{
@@ -405,26 +425,20 @@ func (s *BillingService) ResendToSUNAT(saleID uint) (*database.TenantInvoice, er
 // no vacío; en ese caso la nota se arma SOLO con esas líneas, con sus propios totales
 // proporcionales — no se copia el 100% de la venta. Vacío o motivo no-parcial: comportamiento
 // de siempre (copia completa, mismos totales que la venta original).
-func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason string, reasonCode string, selections []NoteItemSelection) (*database.TenantSale, *database.TenantInvoice, error) {
+func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason string, reasonCode string, selections []NoteItemSelection, issueDate string) (*database.TenantSale, *database.TenantInvoice, error) {
+	return s.CreateCreditNote(originalSaleID, reason, reasonCode, selections, 0, issueDate)
+}
+
+// CreateCreditNote igual que CreateCreditNoteAndVoidSale, con la opción de acreditar un IMPORTE:
+// totalAmount > 0 (o NoteItemSelection.Amount por línea) arma una nota de ajuste de valor por ese
+// monto con IGV — solo motivos de IsAmountCreditNoteReason. No devuelve cantidades ni repone stock.
+func (s *BillingService) CreateCreditNote(originalSaleID uint, reason string, reasonCode string, selections []NoteItemSelection, totalAmount float64, issueDate string) (*database.TenantSale, *database.TenantInvoice, error) {
 	if !s.facturadorConfigured() {
 		return nil, nil, errors.New("la anulación con nota de crédito requiere facturador configurado")
 	}
 	var cfg database.TenantCompanyConfig
 	if err := s.db.First(&cfg).Error; err != nil || !cfg.SunatEnabled {
 		return nil, nil, errors.New("la conexión con SUNAT no está activada")
-	}
-	var orig database.TenantSale
-	if err := s.db.First(&orig, originalSaleID).Error; err != nil {
-		return nil, nil, errors.New("venta no encontrada")
-	}
-	if orig.Status == "cancelled" {
-		return nil, nil, errors.New("la venta ya está anulada")
-	}
-	if orig.DocType != "FACTURA" && orig.DocType != "BOLETA" {
-		return nil, nil, errors.New("solo se puede anular con nota de crédito una factura o boleta")
-	}
-	if orig.BillingStatus != "accepted" {
-		return nil, nil, errors.New("el comprobante debe estar aceptado por SUNAT antes de anularlo con nota de crédito")
 	}
 	reasonCode = strings.TrimSpace(reasonCode)
 	if reasonCode == "" {
@@ -437,91 +451,176 @@ func (s *BillingService) CreateCreditNoteAndVoidSale(originalSaleID uint, reason
 	if reason == "" {
 		reason = sunatnote.ReasonLabel("07", reasonCode)
 	}
-	if orig.ContactID == nil {
-		return nil, nil, errors.New("para nota de crédito electrónica debe asignar un cliente con dirección y ubigeo en la venta original")
-	}
-	ncSeries, err := s.resolveCreditNoteSeries(orig.BranchID, &orig)
-	if err != nil {
-		return nil, nil, err
-	}
-	saleSvc := salesvc.NewSaleService(s.db)
-	nextCorr, err := saleSvc.NextCorrelative(ncSeries.ID)
-	if err != nil {
-		return nil, nil, err
-	}
-	numberStr := fmt.Sprintf("%s-%08d", ncSeries.Series, nextCorr)
-	now := time.Now()
-	origIDRef := originalSaleID
 
-	var origItems []database.TenantSaleItem
-	s.db.Where("sale_id = ?", originalSaleID).Find(&origItems)
-
-	// Nota parcial (Fase 2): el usuario eligió ítems/cantidades y el motivo mueve bienes —
-	// la nota se arma solo con esas líneas y sus propios totales, no con el 100% de la venta.
-	partial := IsPartialCreditNoteReason(reasonCode) && len(selections) > 0
-	var partialItems []database.TenantSaleItem
-	subtotal, taxAmount, total := orig.Subtotal, orig.TaxAmount, orig.Total
-	if partial {
-		var err error
-		partialItems, subtotal, taxAmount, total, err = buildPartialNoteItems(originalSaleID, origItems, selections)
-		if err != nil {
-			return nil, nil, err
+	// Fase 7G — concurrencia: TODA la secuencia leer→validar cantidad acumulada→crear la nota→
+	// crear sus ítems se ejecuta en una única transacción, con un lock exclusivo (SELECT ... FOR
+	// UPDATE) sobre la fila `orig` (la venta original en tenant_sales). Dos solicitudes de nota de
+	// crédito concurrentes sobre la MISMA venta se serializan: la segunda espera a que la primera
+	// confirme (o falle) antes de poder leer "cuánto se devolvió ya" y crear su propia nota — así
+	// ninguna de las dos puede basar su validación en una lectura desactualizada de la otra. El
+	// lock se libera al terminar la transacción (commit o rollback), antes de construir el payload
+	// fiscal y encolar el envío a SUNAT (I/O externo que nunca debe correr con una fila bloqueada).
+	var orig database.TenantSale
+	var ncSale database.TenantSale
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&orig, originalSaleID).Error; err != nil {
+			return errors.New("venta no encontrada")
 		}
-	}
-
-	ncSale := database.TenantSale{
-		BranchID:       orig.BranchID,
-		ContactID:      orig.ContactID,
-		UserID:         orig.UserID,
-		CashSessionID:  nil,
-		SeriesID:       ncSeries.ID,
-		DocType:        "NOTA_CREDITO",
-		Series:         ncSeries.Series,
-		Correlative:    nextCorr,
-		Number:         numberStr,
-		IssueDate:      now,
-		Subtotal:       subtotal,
-		TaxAmount:      taxAmount,
-		Total:          total,
-		Currency:       orig.Currency,
-		PaymentMethod:  orig.PaymentMethod,
-		Notes:          reason,
-		NoteReasonCode: reasonCode,
-		Status:         "paid",
-		BillingStatus:  "pending",
-		OriginalSaleID: &origIDRef,
-	}
-	if err := s.db.Create(&ncSale).Error; err != nil {
-		return nil, nil, fmt.Errorf("crear venta nota de crédito: %w", err)
-	}
-	if err := s.reserveGenericDocument("credit_note", ncSale.ID, ncSale.Number); err != nil {
-		return nil, nil, err
-	}
-	if partial {
-		for i := range partialItems {
-			partialItems[i].SaleID = ncSale.ID
-			s.db.Create(&partialItems[i])
+		if orig.Status == "cancelled" {
+			return errors.New("la venta ya está anulada")
 		}
-	} else {
-		for _, it := range origItems {
-			ncItem := database.TenantSaleItem{
-				SaleID:             ncSale.ID,
-				ProductID:          it.ProductID,
-				Code:               it.Code,
-				Description:        it.Description,
-				Unit:               it.Unit,
-				Quantity:           it.Quantity,
-				UnitPrice:          it.UnitPrice,
-				Discount:           it.Discount,
-				TaxRate:            it.TaxRate,
-				IgvAffectationType: it.IgvAffectationType,
-				Subtotal:           it.Subtotal,
-				TaxAmount:          it.TaxAmount,
-				Total:              it.Total,
+		if orig.DocType != "FACTURA" && orig.DocType != "BOLETA" {
+			return errors.New("solo se puede anular con nota de crédito una factura o boleta")
+		}
+		if orig.BillingStatus != "accepted" {
+			return errors.New("el comprobante debe estar aceptado por SUNAT antes de anularlo con nota de crédito")
+		}
+		// Anular con motivo 01 un anticipo ya deducido dejaría los comprobantes que lo usaron apuntando a
+		// un anticipo inexistente: se bloquea antes de enviar nada a SUNAT.
+		if rc := strings.TrimSpace(reasonCode); rc == "" || rc == "01" {
+			if err := prepaymentsvc.EnsureVoucherVoidable(tx, orig.ID); err != nil {
+				return err
 			}
-			s.db.Create(&ncItem)
 		}
+		if orig.ContactID == nil {
+			return errors.New("para nota de crédito electrónica debe asignar un cliente con dirección y ubigeo en la venta original")
+		}
+		ncSeries, err := s.resolveCreditNoteSeries(orig.BranchID, &orig)
+		if err != nil {
+			return err
+		}
+		saleSvc := salesvc.NewSaleService(s.db)
+		nextCorr, err := saleSvc.NextCorrelative(ncSeries.ID)
+		if err != nil {
+			return err
+		}
+		numberStr := fmt.Sprintf("%s-%08d", ncSeries.Series, nextCorr)
+		// Fecha de emisión elegida por el usuario (vacía = hoy): hasta 3 días atrás y nunca futura.
+		// Se valida antes de reservar nada.
+		now, dateErr := ResolveCreditNoteIssueDate(issueDate, time.Now())
+		if dateErr != nil {
+			return dateErr
+		}
+		origIDRef := originalSaleID
+
+		var origItems []database.TenantSaleItem
+		tx.Where("sale_id = ?", originalSaleID).Find(&origItems)
+
+		// Nota parcial (Fase 2): el usuario eligió ítems/cantidades y el motivo mueve bienes —
+		// la nota se arma solo con esas líneas y sus propios totales, no con el 100% de la venta.
+		// Nota por monto: se acredita un importe, no cantidades. Solo motivos de ajuste de valor.
+		amountMode := isAmountNote(selections, totalAmount)
+		if amountMode && !IsAmountCreditNoteReason(reasonCode) {
+			return fmt.Errorf("el motivo %s no admite acreditar por monto: use un motivo de descuento/disminución (04, 05, 09, 10) o elija ítems y cantidades", reasonCode)
+		}
+		partial := (IsPartialCreditNoteReason(reasonCode) && len(selections) > 0) || amountMode
+		var partialItems []database.TenantSaleItem
+		subtotal, taxAmount, total := orig.Subtotal, orig.TaxAmount, orig.Total
+		// Recargo al consumo: la nota total devuelve el de la venta (orig.Total ya lo incluye); la parcial, su parte proporcional.
+		ncServiceCharge, ncServiceChargeRate := orig.ServiceChargeAmount, orig.ServiceChargeRate
+		if amountMode {
+			amounts, err := resolveAmountNoteAmounts(origItems, selections, totalAmount)
+			if err != nil {
+				return err
+			}
+			credited, err := creditedAmountOnSale(tx, originalSaleID)
+			if err != nil {
+				return err
+			}
+			partialItems, subtotal, taxAmount, total, err = buildAmountNoteItems(originalSaleID, origItems, amounts, credited)
+			if err != nil {
+				return err
+			}
+			// Un ajuste de valor no toca el recargo al consumo (se acredita solo en notas por cantidad).
+			ncServiceCharge = 0
+		} else if partial {
+			ids := make([]uint, len(selections))
+			for i, sel := range selections {
+				ids[i] = sel.OriginalItemID
+			}
+			alreadyReturned, err := sumReturnedQuantitiesByOriginalItem(tx, ids)
+			if err != nil {
+				return err
+			}
+			partialItems, subtotal, taxAmount, total, err = buildPartialNoteItems(originalSaleID, origItems, selections, alreadyReturned)
+			if err != nil {
+				return err
+			}
+			// Una nota por monto previa no consume cupo de cantidad: el tope del valor de la venta se
+			// controla también aquí para que devolución + ajuste de valor nunca superen lo vendido.
+			if credited, cerr := creditedAmountOnSale(tx, originalSaleID); cerr != nil {
+				return cerr
+			} else if credited > 0 {
+				var saleValue float64
+				for _, it := range origItems {
+					saleValue += it.Total
+				}
+				if remaining := money.RoundSunat(saleValue - credited); total > remaining+0.005 {
+					if remaining < 0 {
+						remaining = 0
+					}
+					return fmt.Errorf("la nota por S/ %.2f supera lo que aún se puede acreditar de esta venta (disponible S/ %.2f: ya hay notas por S/ %.2f)", total, remaining, credited)
+				}
+			}
+			ncServiceCharge, err = partialNoteServiceCharge(tx, &orig, origItems, selections, subtotal)
+			if err != nil {
+				return err
+			}
+			total = money.RoundSunat(total + ncServiceCharge)
+		}
+
+		ncSale = database.TenantSale{
+			BranchID:       orig.BranchID,
+			ContactID:      orig.ContactID,
+			UserID:         orig.UserID,
+			CashSessionID:  nil,
+			SeriesID:       ncSeries.ID,
+			DocType:        "NOTA_CREDITO",
+			Series:         ncSeries.Series,
+			Correlative:    nextCorr,
+			Number:         numberStr,
+			IssueDate:      now,
+			Subtotal:       subtotal,
+			TaxAmount:      taxAmount,
+			Total:          total,
+			Currency:       orig.Currency,
+			PaymentMethod:  orig.PaymentMethod,
+			Notes:          reason,
+			NoteReasonCode: reasonCode,
+			Status:         "paid",
+			BillingStatus:  "pending",
+			OriginalSaleID: &origIDRef,
+
+			ServiceChargeAmount: ncServiceCharge,
+			ServiceChargeRate:   ncServiceChargeRate,
+		}
+		if err := tx.Create(&ncSale).Error; err != nil {
+			return fmt.Errorf("crear venta nota de crédito: %w", err)
+		}
+		if err := s.reserveGenericDocument("credit_note", ncSale.ID, ncSale.Number); err != nil {
+			return err
+		}
+		if partial {
+			for i := range partialItems {
+				partialItems[i].SaleID = ncSale.ID
+				if err := tx.Create(&partialItems[i]).Error; err != nil {
+					return fmt.Errorf("crear ítem de nota de crédito: %w", err)
+				}
+			}
+		} else {
+			fullItems := buildFullNoteItems(ncSale.ID, origItems)
+			for i := range fullItems {
+				if err := tx.Create(&fullItems[i]).Error; err != nil {
+					return fmt.Errorf("crear ítem de nota de crédito: %w", err)
+				}
+			}
+		}
+		return nil
+	})
+	if txErr != nil {
+		return nil, nil, txErr
 	}
+
 	notePayload, err := s.buildCreditNotePayload(ncSale.ID)
 	if err != nil {
 		return nil, nil, err
@@ -611,6 +710,7 @@ func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint, reason stri
 		TaxAmount:      orig.TaxAmount,
 		Total:          orig.Total,
 		Currency:       orig.Currency,
+		ExchangeRate:   orig.ExchangeRate,
 		PaymentMethod:  orig.PaymentMethod,
 		Notes:          reason,
 		NoteReasonCode: reasonCode,
@@ -630,6 +730,7 @@ func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint, reason stri
 		ndItem := database.TenantSaleItem{
 			SaleID:             ndSale.ID,
 			ProductID:          it.ProductID,
+			SaleUnitID:         it.SaleUnitID,
 			Code:               it.Code,
 			Description:        it.Description,
 			Unit:               it.Unit,
@@ -641,6 +742,7 @@ func (s *BillingService) CreateDebitNoteForSale(originalSaleID uint, reason stri
 			Subtotal:           it.Subtotal,
 			TaxAmount:          it.TaxAmount,
 			Total:              it.Total,
+			PackLabel:          it.PackLabel,
 		}
 		s.db.Create(&ndItem)
 	}
@@ -1175,6 +1277,7 @@ func (s *BillingService) CreateSummary(fecResumen time.Time) (*database.TenantSu
 			Total:           sale.Total,
 			MtoOperGravadas: sale.Subtotal,
 			MtoIGV:          sale.TaxAmount,
+			MtoOtrosCargos:  sale.ServiceChargeAmount,
 		})
 	}
 
@@ -1579,8 +1682,15 @@ type CreateDespatchInput struct {
 	SourceSaleID *uint                     `json:"source_sale_id,omitempty"`
 	Destinatario DespatchDestinatarioInput `json:"destinatario"`
 	Remitente    DespatchDestinatarioInput `json:"remitente,omitempty"`
-	Envio        DespatchEnvioInput        `json:"envio"`
-	Details      []DespatchDetailInput     `json:"details"`
+	// Tercero: la otra parte cuando no es el destinatario. En compra (02) es el proveedor
+	// (SellerSupplierParty); el destinatario es la propia empresa.
+	Tercero     *DespatchDestinatarioInput `json:"tercero,omitempty"`
+	Observacion string                     `json:"observacion,omitempty"`
+	// DocsRelacionados documentos relacionados manuales (catálogo 61), p. ej. la GRE remitente
+	// en una guía transportista. Se suman al de la venta de origen.
+	DocsRelacionados []DespatchRelatedDocInput `json:"docs_relacionados,omitempty"`
+	Envio            DespatchEnvioInput        `json:"envio"`
+	Details          []DespatchDetailInput     `json:"details"`
 }
 
 type DespatchDestinatarioInput struct {
@@ -1615,6 +1725,34 @@ type DespatchEnvioInput struct {
 	ChoferLicencia          string  `json:"chofer_licencia,omitempty"`
 	ChoferNombres           string  `json:"chofer_nombres,omitempty"`
 	ChoferApellidos         string  `json:"chofer_apellidos,omitempty"`
+	// Indicadores y datos opcionales GRE 2022.
+	IndM1L                  bool `json:"ind_m1l,omitempty"`
+	IndRetornoEnvases       bool `json:"ind_retorno_envases,omitempty"`
+	IndRetornoVehiculoVacio bool `json:"ind_retorno_vehiculo_vacio,omitempty"`
+	IndTransbordo           bool `json:"ind_transbordo,omitempty"`
+	// PagaFleteRemitente (GRE transportista): el remitente paga el flete.
+	PagaFleteRemitente bool                   `json:"paga_flete_remitente,omitempty"`
+	ChoferSecundario   *DespatchChoferInput   `json:"chofer_secundario,omitempty"`
+	VehiculoSecundario *DespatchVehiculoInput `json:"vehiculo_secundario,omitempty"`
+}
+
+type DespatchChoferInput struct {
+	TipoDoc   string `json:"tipo_doc"`
+	Doc       string `json:"doc"`
+	Licencia  string `json:"licencia"`
+	Nombres   string `json:"nombres"`
+	Apellidos string `json:"apellidos"`
+}
+
+type DespatchVehiculoInput struct {
+	Placa   string `json:"placa"`
+	HabCert string `json:"hab_cert"`
+}
+
+type DespatchRelatedDocInput struct {
+	Tipo   string `json:"tipo"`
+	Nro    string `json:"nro"`
+	Emisor string `json:"emisor,omitempty"`
 }
 
 type DespatchDetailInput struct {
@@ -1729,6 +1867,11 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 	if sunatCode != "09" && sunatCode != "31" {
 		return nil, errors.New("Debe configurar una serie para Guía de Remisión Remitente (09) o Guía de Remisión Transportista (31) en Empresa → Series")
 	}
+	if err := normalizeDespatchMotivo(&input, sunatCode); err != nil {
+		return nil, err
+	}
+	applyDespatchMotivoParties(&input, sunatCode, companyCfg.RUC, companyCfg.BusinessName, companyAddr.Direccion, companyAddr.Ubigueo)
+	s.applyDespatchBranchDefaults(&input, sunatCode, companyCfg)
 	if err := validateDespatchInput(input, sunatCode); err != nil {
 		return nil, err
 	}
@@ -1757,9 +1900,14 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 	if llegadaUbi == "" {
 		return nil, fmt.Errorf("ubigeo de llegada es obligatorio")
 	}
-	destAddr, errDest := s.buildInvoiceAddressFromUbigeo(input.Destinatario.Ubigeo, input.Destinatario.Address)
-	if errDest != nil {
-		return nil, fmt.Errorf("destinatario: %w", errDest)
+	// Dirección del destinatario: opcional (SUNAT no la exige). Solo se arma si vino completa.
+	var destAddrPtr *facturador.InvoiceAddress
+	if strings.TrimSpace(input.Destinatario.Ubigeo) != "" && strings.TrimSpace(input.Destinatario.Address) != "" {
+		destAddr, errDest := s.buildInvoiceAddressFromUbigeo(input.Destinatario.Ubigeo, input.Destinatario.Address)
+		if errDest != nil {
+			return nil, fmt.Errorf("destinatario: %w", errDest)
+		}
+		destAddrPtr = &destAddr
 	}
 	partidaDir := strings.TrimSpace(input.Envio.PartidaDireccion)
 	if partidaDir == "" {
@@ -1811,6 +1959,14 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 	}
 	input.Envio.FecTraslado = fecTraslado
 	input.Envio.FecEntregaTransportista = fecEntrega
+	if despatchMotivo(input.Envio) == greMotivoTrasladoLocal && sunatCode == "09" {
+		// SUNAT pide el establecimiento anexo en ambos extremos del traslado entre locales.
+		partida.Ruc, partida.CodLocal = companyCfg.RUC, greCodLocalPrincipal
+		llegada.Ruc, llegada.CodLocal = companyCfg.RUC, greCodLocalPrincipal
+	}
+	if len([]rune(strings.TrimSpace(input.Observacion))) > greObservacionMax {
+		return nil, fmt.Errorf("las observaciones no pueden pasar de %d caracteres", greObservacionMax)
+	}
 	shipment := buildDespatchShipment(input, sunatCode, fechaEmision, companyCfg.RUC, companyCfg.BusinessName, partida, llegada)
 	details := make([]facturador.DespatchDetail, len(input.Details))
 	for i, d := range input.Details {
@@ -1826,7 +1982,8 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 		Correlativo:  correlativoStr,
 		FechaEmision: fechaEmision,
 		Company:      facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
-		Destinatario: facturador.InvoiceClient{TipoDoc: input.Destinatario.TipoDoc, NumDoc: input.Destinatario.NumDoc, RznSocial: input.Destinatario.RznSocial, Address: destAddr},
+		Destinatario: facturador.InvoiceClient{TipoDoc: input.Destinatario.TipoDoc, NumDoc: input.Destinatario.NumDoc, RznSocial: input.Destinatario.RznSocial, Address: destAddrPtr},
+		Observacion:  strings.TrimSpace(input.Observacion),
 		Envio:        shipment,
 		Details:      details,
 	}
@@ -1840,12 +1997,33 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 			TipoDoc:   remTipoDoc,
 			NumDoc:    remNumDoc,
 			RznSocial: strings.TrimSpace(input.Remitente.RznSocial),
-			Address:   remAddr,
+			Address:   &remAddr,
 		}
+	}
+	if sunatCode == "09" && input.Tercero != nil && strings.TrimSpace(input.Tercero.NumDoc) != "" {
+		tTipo, tNum := normalizeGrePartyDoc(input.Tercero.TipoDoc, input.Tercero.NumDoc)
+		payload.Tercero = &facturador.InvoiceClient{TipoDoc: tTipo, NumDoc: tNum, RznSocial: strings.TrimSpace(input.Tercero.RznSocial)}
 	}
 	if input.SourceSaleID != nil && *input.SourceSaleID > 0 {
 		if addDoc := s.despatchAddDocFromSale(*input.SourceSaleID, companyCfg.RUC); addDoc != nil {
-			payload.AddDocs = []facturador.DespatchAdditionalDoc{*addDoc}
+			payload.AddDocs = append(payload.AddDocs, *addDoc)
+		}
+	}
+	manualDocs, errDocs := buildDespatchRelatedDocs(input.DocsRelacionados)
+	if errDocs != nil {
+		return nil, errDocs
+	}
+	fillRelatedGreIssuer(manualDocs, sunatCode, input.Remitente)
+	for _, m := range manualDocs {
+		dup := false
+		for _, ex := range payload.AddDocs {
+			if ex.Tipo == m.Tipo && strings.EqualFold(ex.Nro, m.Nro) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			payload.AddDocs = append(payload.AddDocs, m)
 		}
 	}
 	payloadJSON, err := json.Marshal(payload)
@@ -1859,7 +2037,11 @@ func (s *BillingService) CreateAndSendDespatch(input CreateDespatchInput) (*data
 	// Destinatario → TenantContact real, tanto si la guía nace de una venta como si se emite de
 	// forma independiente: sin esto sale.ContactID quedaba siempre NULL y el PDF del panel caía
 	// al "Cliente genérico" (ver resolveOrCreateDespatchContact).
-	contactID, err := s.resolveOrCreateDespatchContact(input.Destinatario)
+	contactParty, contactType := input.Destinatario, "customer"
+	if sunatCode == "09" && despatchMotivo(input.Envio) == greMotivoCompra && input.Tercero != nil {
+		contactParty, contactType = *input.Tercero, "supplier"
+	}
+	contactID, err := s.resolveOrCreateDespatchContact(contactParty, contactType, companyCfg.RUC)
 	if err != nil {
 		return nil, fmt.Errorf("resolver contacto destinatario: %w", err)
 	}
@@ -2114,9 +2296,13 @@ func (s *BillingService) CreateAndSendRetention(input CreateRetentionInput) (*da
 	if errProv != nil {
 		return nil, fmt.Errorf("proveedor: %w", errProv)
 	}
-	fechaEmision := strings.TrimSpace(input.FechaEmision)
-	if fechaEmision == "" {
-		fechaEmision = facturador.FormatFiscalDateTime(time.Now())
+	// Toda fecha hacia el facturador va como Y-m-dTH:i:sP (hora de Lima); ver fiscalDateTime.
+	fechaEmision, err := fiscalDateTime(input.FechaEmision, "fecha de emisión")
+	if err != nil {
+		return nil, err
+	}
+	if err := validateFiscalEmissionNotFuture(fechaEmision); err != nil {
+		return nil, err
 	}
 	detailIn := make([]retentionDetailBuildInput, len(input.Details))
 	for i, d := range input.Details {
@@ -2138,7 +2324,7 @@ func (s *BillingService) CreateAndSendRetention(input CreateRetentionInput) (*da
 	payload := &facturador.RetentionPayload{
 		FechaEmision: fechaEmision,
 		Company:      facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
-		Proveedor:    facturador.InvoiceClient{TipoDoc: party.TipoDoc, NumDoc: party.NumDoc, RznSocial: party.RznSocial, Address: provAddr},
+		Proveedor:    facturador.InvoiceClient{TipoDoc: party.TipoDoc, NumDoc: party.NumDoc, RznSocial: party.RznSocial, Address: &provAddr},
 		Regimen:      strings.TrimSpace(input.Regimen),
 		Tasa:         input.Tasa,
 		ImpRetenido:  roundMoney(input.ImpRetenido),
@@ -2182,6 +2368,7 @@ func (s *BillingService) CreateAndSendRetention(input CreateRetentionInput) (*da
 		payloadJSON, _ := json.Marshal(payload)
 
 		retSale = database.TenantSale{
+			BranchID:      docBranchID(tx, input.BranchID, seriesRec),
 			SeriesID:      seriesRec.ID,
 			DocType:       "RETENCION",
 			Series:        seriesRec.Series,
@@ -2358,9 +2545,13 @@ func (s *BillingService) CreateAndSendPerception(input CreatePerceptionInput) (*
 	if errProv != nil {
 		return nil, fmt.Errorf("sujeto percibido: %w", errProv)
 	}
-	fechaEmision := strings.TrimSpace(input.FechaEmision)
-	if fechaEmision == "" {
-		fechaEmision = facturador.FormatFiscalDateTime(time.Now())
+	// Toda fecha hacia el facturador va como Y-m-dTH:i:sP (hora de Lima); ver fiscalDateTime.
+	fechaEmision, err := fiscalDateTime(input.FechaEmision, "fecha de emisión")
+	if err != nil {
+		return nil, err
+	}
+	if err := validateFiscalEmissionNotFuture(fechaEmision); err != nil {
+		return nil, err
 	}
 	detailIn := make([]perceptionDetailBuildInput, len(input.Details))
 	for i, d := range input.Details {
@@ -2382,7 +2573,7 @@ func (s *BillingService) CreateAndSendPerception(input CreatePerceptionInput) (*
 	payload := &facturador.PerceptionPayload{
 		FechaEmision: fechaEmision,
 		Company:      facturador.InvoiceCompany{RUC: companyCfg.RUC, RazonSocial: companyCfg.BusinessName, NombreComercial: nombreComercial, Address: companyAddr},
-		Proveedor:    facturador.InvoiceClient{TipoDoc: party.TipoDoc, NumDoc: party.NumDoc, RznSocial: party.RznSocial, Address: provAddr},
+		Proveedor:    facturador.InvoiceClient{TipoDoc: party.TipoDoc, NumDoc: party.NumDoc, RznSocial: party.RznSocial, Address: &provAddr},
 		Regimen:      strings.TrimSpace(input.Regimen),
 		Tasa:         input.Tasa,
 		ImpPercibido: roundMoney(input.ImpPercibido),
@@ -2426,6 +2617,7 @@ func (s *BillingService) CreateAndSendPerception(input CreatePerceptionInput) (*
 		payloadJSON, _ := json.Marshal(payload)
 
 		percSale = database.TenantSale{
+			BranchID:      docBranchID(tx, input.BranchID, seriesRec),
 			SeriesID:      seriesRec.ID,
 			DocType:       "PERCEPCION",
 			Series:        seriesRec.Series,
@@ -2655,4 +2847,53 @@ func (s *BillingService) GetReversionStatus(id uint) (*database.TenantSunatRever
 	}
 	s.db.Save(&rec)
 	return &rec, nil
+}
+
+// docBranchID sucursal de la fila "venta" de una retención/percepción: la pedida, o la de su serie, o la sucursal principal.
+// Nunca 0: un documento sin sucursal queda huérfano de los listados por sucursal (ver INFORME_BRANCH_ID_CERO.md).
+func docBranchID(db *gorm.DB, requested uint, series database.TenantDocumentSeries) uint {
+	if requested > 0 {
+		return requested
+	}
+	if series.BranchID > 0 {
+		return series.BranchID
+	}
+	if id, err := branch.GetMainBranchID(db); err == nil {
+		return id
+	}
+	return 0
+}
+
+// FiscalAuxPrintData es lo que necesita el cliente para imprimir una retención o percepción: el documento tal como se envió a
+// SUNAT (payload) más su estado. No se reconstruye desde la venta ficticia que lo respalda.
+type FiscalAuxPrintData struct {
+	Kind        string          `json:"kind"`
+	Series      string          `json:"series"`
+	Correlative string          `json:"correlative"`
+	Status      string          `json:"status"`
+	SunatCode   string          `json:"sunat_code,omitempty"`
+	Payload     json.RawMessage `json:"payload"`
+}
+
+func (s *BillingService) GetRetentionPrintData(id uint) (*FiscalAuxPrintData, error) {
+	var rec database.TenantRetention
+	if err := s.db.First(&rec, id).Error; err != nil {
+		return nil, err
+	}
+	return &FiscalAuxPrintData{Kind: "retention", Series: rec.Series, Correlative: rec.Correlative, Status: rec.Status, SunatCode: rec.SunatCode, Payload: rawJSONOrNull(rec.PayloadJSON)}, nil
+}
+
+func (s *BillingService) GetPerceptionPrintData(id uint) (*FiscalAuxPrintData, error) {
+	var rec database.TenantPerception
+	if err := s.db.First(&rec, id).Error; err != nil {
+		return nil, err
+	}
+	return &FiscalAuxPrintData{Kind: "perception", Series: rec.Series, Correlative: rec.Correlative, Status: rec.Status, SunatCode: rec.SunatCode, Payload: rawJSONOrNull(rec.PayloadJSON)}, nil
+}
+
+func rawJSONOrNull(s string) json.RawMessage {
+	if strings.TrimSpace(s) == "" || !json.Valid([]byte(s)) {
+		return json.RawMessage("null")
+	}
+	return json.RawMessage(s)
 }

@@ -97,3 +97,44 @@ func TestRequireContactsAccess(t *testing.T) {
 		})
 	}
 }
+
+func TestContactsScopeFromPermissions(t *testing.T) {
+	cases := []struct {
+		name   string
+		perms  []string
+		action string
+		want   ContactsScope
+	}{
+		{"solo clientes", []string{"customers.view"}, "view", ContactsScope{Customers: true}},
+		{"solo proveedores", []string{"suppliers.view"}, "view", ContactsScope{Suppliers: true}},
+		{"ambos", []string{"customers.edit", "suppliers.edit"}, "edit", ContactsScope{Customers: true, Suppliers: true}},
+		{"la acción importa", []string{"customers.view"}, "create", ContactsScope{}},
+		{"legacy contacts.* cubre ambos", []string{"contacts.view"}, "view", ContactsScope{Customers: true, Suppliers: true}},
+	}
+	for _, tc := range cases {
+		if got := contactsScopeFromPermissions(tc.perms, tc.action); got != tc.want {
+			t.Errorf("%s: got %+v want %+v", tc.name, got, tc.want)
+		}
+	}
+
+	s := ContactsScope{Customers: true}
+	if !s.Allows("customer", true) || s.Allows("supplier", false) || !s.Allows("both", false) || s.Allows("both", true) {
+		t.Errorf("Allows incorrecto para solo clientes: %+v", s)
+	}
+	if got := s.TypesFor(); len(got) != 2 || got[0] != "customer" || got[1] != "both" {
+		t.Errorf("TypesFor solo clientes = %v", got)
+	}
+	if (ContactsScope{Customers: true, Suppliers: true}).TypesFor() != nil {
+		t.Error("TypesFor ambos debe ser nil")
+	}
+}
+
+func TestRequireContactsAccess_SoloProveedoresNoEsCliente(t *testing.T) {
+	claims := &TenantClaims{Permissions: []string{"suppliers.view"}}
+	if got := statusForContactsAccess(t, claims, nil, "view"); got != fiber.StatusOK {
+		t.Errorf("suppliers.view debería pasar la ruta de ver, got %d", got)
+	}
+	if got := statusForContactsAccess(t, claims, nil, "create"); got != fiber.StatusForbidden {
+		t.Errorf("suppliers.view no permite crear, got %d", got)
+	}
+}

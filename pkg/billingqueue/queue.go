@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+	"tukifac/pkg/branchscope"
 
 	"tukifac/config"
 	"tukifac/pkg/billingstate"
@@ -295,6 +296,7 @@ func markJobDeadLetter(job Job, err error) {
 		return
 	}
 	defer database.ReleaseTenantDB(job.TenantDB)
+	db = branchscope.System(db, "billingqueue: marcar job como dead-letter")
 	_ = db.Model(&database.TenantInvoice{}).Where("sale_id = ?", job.SaleID).Updates(map[string]interface{}{
 		"job_status":      StatusDeadLetter,
 		"pipeline_status": billingstate.DEAD_LETTER,

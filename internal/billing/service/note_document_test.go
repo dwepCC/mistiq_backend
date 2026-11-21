@@ -43,6 +43,7 @@ func TestShouldRegenerateNotePayload(t *testing.T) {
 		{"nil", nil, true},
 		{"empty payload", &database.TenantInvoice{}, true},
 		{"error status", &database.TenantInvoice{NotePayloadJSON: `{"tipoDoc":"07"}`, SunatStatus: "error"}, true},
+		{"rejected status", &database.TenantInvoice{NotePayloadJSON: `{"tipoDoc":"07"}`, SunatStatus: "rejected"}, true},
 		{"pending cached", &database.TenantInvoice{NotePayloadJSON: `{"tipoDoc":"07"}`, SunatStatus: "pending"}, false},
 		{"accepted cached", &database.TenantInvoice{NotePayloadJSON: `{"tipoDoc":"08"}`, SunatStatus: "accepted"}, false},
 	}

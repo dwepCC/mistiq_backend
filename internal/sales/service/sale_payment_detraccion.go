@@ -20,6 +20,38 @@ func PrepareDetractionSalePayments(
 	return out, err
 }
 
+// PrepareSelfDetractionSalePayments pagos de una venta con AUTODETRACCIÓN: el cliente paga el TOTAL de la factura
+// al proveedor (que luego deposita la detracción en su propia cuenta BN), así que NO se agrega la línea
+// detraccion_bn y los pagos directos pueden llegar hasta el total. Devuelve solo los pagos directos y si queda
+// saldo a crédito (pagos directos < total). Nada de esto altera lo que se envía a SUNAT.
+func PrepareSelfDetractionSalePayments(
+	payments []PaymentInput,
+	saleTotal float64,
+	eval sunatdet.CalcResult,
+) ([]PaymentInput, bool, error) {
+	if !eval.Applicable {
+		return nil, false, errors.New("la detracción no aplica para esta venta")
+	}
+	if eval.DetractionAmountPEN <= 0 {
+		return nil, false, errors.New("el monto de detracción debe ser mayor a cero")
+	}
+	direct := make([]PaymentInput, 0, len(payments))
+	for _, p := range payments {
+		if taxpayment.IsDetractionCode(p.Method) || paymentcondition.IsCreditCode(p.Method) {
+			continue
+		}
+		if p.Amount <= 0 || p.Method == "" {
+			continue
+		}
+		direct = append(direct, p)
+	}
+	var sumDirect float64
+	for _, p := range direct {
+		sumDirect += p.Amount
+	}
+	return direct, !money.PaidCoversTotal(sumDirect, saleTotal), nil
+}
+
 // PrepareDetractionSalePaymentsAllowCredit igual que PrepareDetractionSalePayments pero permite saldo a crédito (P3).
 func PrepareDetractionSalePaymentsAllowCredit(
 	payments []PaymentInput,

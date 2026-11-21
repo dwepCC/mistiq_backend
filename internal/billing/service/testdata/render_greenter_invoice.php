@@ -44,16 +44,22 @@ $company->setRazonSocial((string) $p['company']['razonSocial']);
 $company->setNombreComercial((string) ($p['company']['nombreComercial'] ?? $p['company']['razonSocial']));
 $company->setAddress($companyAddr);
 
-$clientAddr = new Address();
-$clientAddr->setUbigueo((string) ($p['client']['address']['ubigueo'] ?? ''));
-$clientAddr->setCodigoPais((string) ($p['client']['address']['codigoPais'] ?? 'PE'));
-$clientAddr->setDireccion((string) ($p['client']['address']['direccion'] ?? ''));
-
 $client = new Client();
 $client->setTipoDoc((string) $p['client']['tipoDoc']);
 $client->setNumDoc((string) $p['client']['numDoc']);
 $client->setRznSocial((string) $p['client']['rznSocial']);
-$client->setAddress($clientAddr);
+// Clave "address" ausente (Client.Address es *InvoiceAddress con omitempty en Go — ver
+// pkg/facturador/client.go): dejar Client::$address en null, igual que hace JMS Deserializer
+// en el camino real (FiscalEmitProcessor::deserializeSnapshot) — nunca fabricar un Address vacío,
+// que el template UBL 2.1 de Greenter SÍ distingue de "sin address" (imprime el nodo igual,
+// con campos en blanco, en vez de omitirlo).
+if (isset($p['client']['address']) && is_array($p['client']['address'])) {
+    $clientAddr = new Address();
+    $clientAddr->setUbigueo((string) ($p['client']['address']['ubigueo'] ?? ''));
+    $clientAddr->setCodigoPais((string) ($p['client']['address']['codigoPais'] ?? 'PE'));
+    $clientAddr->setDireccion((string) ($p['client']['address']['direccion'] ?? ''));
+    $client->setAddress($clientAddr);
+}
 
 $details = [];
 foreach ($p['details'] as $row) {

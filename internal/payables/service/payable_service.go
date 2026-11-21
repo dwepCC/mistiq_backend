@@ -11,6 +11,7 @@ import (
 	cashbanksvc "tukifac/internal/cashbank/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
+	"tukifac/pkg/salecurrency"
 
 	"gorm.io/gorm"
 )
@@ -56,11 +57,17 @@ type PayableRow struct {
 	Due              float64    `json:"due"`
 	Status           string     `json:"status"`
 	IsOverdue        bool       `json:"is_overdue"`
+	// Currency/ExchangeRate: moneda del documento (los montos de la fila van en ella) y su TC si es USD.
+	Currency     string   `json:"currency"`
+	ExchangeRate *float64 `json:"exchange_rate,omitempty"`
 }
 
 // Summary totales para el listado de CxP de una sucursal.
 type Summary struct {
-	TotalDue     float64 `json:"total_due"`
+	// TotalDue: saldo pendiente consolidado en SOLES (los USD convertidos con el TC de cada compra).
+	TotalDue float64 `json:"total_due"`
+	// TotalDueUSD: parte del saldo que está en dólares, en dólares (ya incluida en TotalDue, en soles).
+	TotalDueUSD float64 `json:"total_due_usd"`
 	CountOpen    int64   `json:"count_open"`
 	CountOverdue int64   `json:"count_overdue"`
 }
@@ -71,6 +78,13 @@ type ListFilter struct {
 	Status    string // open | overdue | all
 	Page      int
 	PageSize  int
+}
+
+func normalizedCurrency(c string) string {
+	if c == salecurrency.CurrencyUSD {
+		return c
+	}
+	return salecurrency.CurrencyPEN
 }
 
 // PayableBalance saldo corriente de una cuenta por pagar — sin cronograma de cuotas (a
@@ -132,6 +146,8 @@ func (s *PayableService) List(f ListFilter) ([]PayableRow, int64, error) {
 		OriginalAmount   float64
 		PaidAmount       float64
 		Status           string
+		Currency         string
+		ExchangeRate     *float64
 	}
 	var rows []row
 	// series/number se traen por separado y se concatenan en Go (no con `||`, que en MySQL es el
@@ -140,9 +156,9 @@ func (s *PayableService) List(f ListFilter) ([]PayableRow, int64, error) {
 	err := s.listQuery(f).
 		Select(`p.id AS purchase_id, p.series AS purchase_series, p.number AS purchase_number, p.doc_type,
 			p.issue_date, p.due_date, p.contact_id,
-			COALESCE(c.trade_name, c.business_name, '') AS contact_name,
+			COALESCE(NULLIF(TRIM(c.business_name), ''), NULLIF(TRIM(c.trade_name), ''), '') AS contact_name,
 			COALESCE(c.doc_number, '') AS contact_doc_number,
-			pay.original_amount, pay.paid_amount, pay.status`).
+			pay.original_amount, pay.paid_amount, pay.status, p.currency, p.exchange_rate`).
 		Joins("LEFT JOIN tenant_contacts AS c ON c.id = p.contact_id").
 		Order("p.due_date ASC, p.issue_date ASC").
 		Offset((f.Page - 1) * f.PageSize).Limit(f.PageSize).
@@ -165,6 +181,7 @@ func (s *PayableService) List(f ListFilter) ([]PayableRow, int64, error) {
 			OriginalAmount: r.OriginalAmount, PaidAmount: r.PaidAmount, Due: due,
 			Status:    r.Status,
 			IsOverdue: due > 0 && r.DueDate != nil && r.DueDate.Before(now),
+			Currency:  normalizedCurrency(r.Currency), ExchangeRate: r.ExchangeRate,
 		})
 	}
 	return out, total, nil
@@ -179,7 +196,10 @@ func (s *PayableService) Summary(branchID uint) (*Summary, error) {
 	out := &Summary{}
 	now := time.Now()
 	for _, r := range rows {
-		out.TotalDue += r.Due
+		out.TotalDue += salecurrency.TotalInPEN(r.Currency, r.Due, r.ExchangeRate)
+		if r.Currency == salecurrency.CurrencyUSD {
+			out.TotalDueUSD += r.Due
+		}
 		if r.Due > 0 {
 			out.CountOpen++
 			if r.DueDate != nil && r.DueDate.Before(now) {
@@ -220,7 +240,11 @@ func (s *PayableService) Pay(purchaseID uint, in PayInput) error {
 		return errors.New("esta compra no tiene saldo pendiente")
 	}
 	if money.RoundDisplay(in.Amount) > due+money.PaymentTolerance {
-		return fmt.Errorf("el pago (S/ %.2f) supera el saldo pendiente (S/ %.2f)", money.RoundDisplay(in.Amount), due)
+		sym := "S/"
+		if purchase.Currency == salecurrency.CurrencyUSD {
+			sym = "US$"
+		}
+		return fmt.Errorf("el pago (%s %.2f) supera el saldo pendiente (%s %.2f)", sym, money.RoundDisplay(in.Amount), sym, due)
 	}
 
 	cbSvc := cashbanksvc.NewCashBankService(s.db)

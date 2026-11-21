@@ -319,6 +319,7 @@ id|nombre|info_busqueda|provincia_id|region_id
 030609|Rocchacc|Rocchacc / Chincheros / Apurímac|030600|030000
 030610|El Porvenir|El Porvenir / Chincheros / Apurímac|030600|030000
 030611|Los Chankas|Los Chankas / Chincheros / Apurímac|030600|030000
+030612|Ahuayro|Ahuayro / Chincheros  / Apurímac|030600|030000
 030701|Chuquibambilla|Chuquibambilla / Grau / Apurímac|030700|030000
 030702|Curpahuasi|Curpahuasi / Grau / Apurímac|030700|030000
 030703|Gamarra|Gamarra / Grau / Apurímac|030700|030000
@@ -480,6 +481,7 @@ id|nombre|info_busqueda|provincia_id|region_id
 050410|Uchuraccay|Uchuraccay / Huanta / Ayacucho|050400|050000
 050411|Pucacolpa|Pucacolpa / Huanta / Ayacucho|050400|050000
 050412|Chaca|Chaca / Huanta / Ayacucho|050400|050000
+050413|Putis|Putis / Huanta  / Ayacucho|050400|050000
 050501|San Miguel|San Miguel / La Mar / Ayacucho|050500|050000
 050502|Anco|Anco / La Mar / Ayacucho|050500|050000
 050503|Ayna|Ayna / La Mar / Ayacucho|050500|050000
@@ -491,6 +493,10 @@ id|nombre|info_busqueda|provincia_id|region_id
 050509|Samugari|Samugari / La Mar / Ayacucho|050500|050000
 050510|Anchihuay|Anchihuay / La Mar / Ayacucho|050500|050000
 050511|Oronccoy|Oronccoy / La Mar / Ayacucho|050500|050000
+050512|Unión Progreso|Unión Progreso / La Mar  / Ayacucho|050500|050000
+050513|Río Magdalena|Río Magdalena / La Mar  / Ayacucho|050500|050000
+050514|Ninabamba|Ninabamba / La Mar  / Ayacucho|050500|050000
+050515|Patibamba|Patibamba / La Mar  / Ayacucho|050500|050000
 050601|Puquio|Puquio / Lucanas / Ayacucho|050600|050000
 050602|Aucara|Aucara / Lucanas / Ayacucho|050600|050000
 050603|Cabana|Cabana / Lucanas / Ayacucho|050600|050000
@@ -773,6 +779,10 @@ id|nombre|info_busqueda|provincia_id|region_id
 080912|Villa Virgen|Villa Virgen / La Convención / Cusco|080900|080000
 080913|Villa Kintiarina|Villa Kintiarina / La Convención / Cusco|080900|080000
 080914|Megantoni|Megantoni / La Convención / Cusco|080900|080000
+080915|Kumpirushiato|Kumpirushiato / La Convención  / Cusco|080900|080000
+080916|Cielo Punco|Cielo Punco / La Convención  / Cusco|080900|080000
+080917|Manitea|Manitea / La Convención  / Cusco|080900|080000
+080918|Unión Ashaninka|Unión Ashaninka / La Convención  / Cusco|080900|080000
 081001|Paruro|Paruro / Paruro / Cusco|081000|080000
 081002|Accha|Accha / Paruro / Cusco|081000|080000
 081003|Ccapi|Ccapi / Paruro / Cusco|081000|080000
@@ -907,6 +917,8 @@ id|nombre|info_busqueda|provincia_id|region_id
 090721|Roble|Roble / Tayacaja / Huancavelica|090700|090000
 090722|Pichos|Pichos / Tayacaja / Huancavelica|090700|090000
 090723|Santiago de Tucuma|Santiago de Tucuma / Tayacaja / Huancavelica|090700|090000
+090724|Lambras|Lambras / Tayacaja  / Huancavelica|090700|090000
+090725|Cochabamba|Cochabamba / Tayacaja  / Huancavelica|090700|090000
 100101|Huanuco|Huanuco / Huánuco / Huánuco|100100|100000
 100102|Amarilis|Amarilis / Huánuco / Huánuco|100100|100000
 100103|Chinchao|Chinchao / Huánuco / Huánuco|100100|100000
@@ -1169,6 +1181,7 @@ id|nombre|info_busqueda|provincia_id|region_id
 130109|Salaverry|Salaverry / Trujillo  / La Libertad|130100|130000
 130110|Simbal|Simbal / Trujillo  / La Libertad|130100|130000
 130111|Victor Larco Herrera|Victor Larco Herrera / Trujillo  / La Libertad|130100|130000
+130112|Alto Trujillo|Alto Trujillo / Trujillo  / La Libertad|130100|130000
 130201|Ascope|Ascope / Ascope  / La Libertad|130200|130000
 130202|Chicama|Chicama / Ascope  / La Libertad|130200|130000
 130203|Chocope|Chocope / Ascope  / La Libertad|130200|130000
@@ -1520,6 +1533,7 @@ id|nombre|info_busqueda|provincia_id|region_id
 180104|Samegua|Samegua / Mariscal Nieto  / Moquegua|180100|180000
 180105|San Cristóbal|San Cristóbal / Mariscal Nieto  / Moquegua|180100|180000
 180106|Torata|Torata / Mariscal Nieto  / Moquegua|180100|180000
+180107|San Antonio|San Antonio / Mariscal Nieto  / Moquegua|180100|180000
 180201|Omate|Omate / General Sánchez Cerro  / Moquegua|180200|180000
 180202|Chojata|Chojata / General Sánchez Cerro  / Moquegua|180200|180000
 180203|Coalaque|Coalaque / General Sánchez Cerro  / Moquegua|180200|180000
@@ -1815,6 +1829,7 @@ id|nombre|info_busqueda|provincia_id|region_id
 221003|Polvora|Polvora / Tocache  / San Martín|221000|220000
 221004|Shunte|Shunte / Tocache  / San Martín|221000|220000
 221005|Uchiza|Uchiza / Tocache  / San Martín|221000|220000
+221006|Santa Lucia|Santa Lucia / Tocache  / San Martín|221000|220000
 230101|Tacna|Tacna / Tacna  / Tacna|230100|230000
 230102|Alto de la Alianza|Alto de la Alianza / Tacna  / Tacna|230100|230000
 230103|Calana|Calana / Tacna  / Tacna|230100|230000
@@ -1872,4 +1887,6 @@ id|nombre|info_busqueda|provincia_id|region_id
 250303|Curimana|Curimana / Padre Abad  / Ucayali|250300|250000
 250304|Neshuya|Neshuya / Padre Abad  / Ucayali|250300|250000
 250305|Alexander Von Humboldt|Alexander Von Humboldt / Padre Abad  / Ucayali|250300|250000
+250306|Huipoca|Huipoca / Padre Abad  / Ucayali|250300|250000
+250307|Boquerón|Boquerón / Padre Abad  / Ucayali|250300|250000
 250401|Purús|Purús / Purús / Ucayali|250400|250000

@@ -7,9 +7,12 @@ import (
 	"time"
 
 	detraccionsvc "tukifac/internal/detraccion"
+	"tukifac/internal/exportacion"
 	"tukifac/internal/fiscal/salecontext"
 	prepaymentsvc "tukifac/internal/prepayment"
+	"tukifac/pkg/branchlogo"
 	"tukifac/pkg/database"
+	"tukifac/pkg/receiptdesign"
 	"tukifac/pkg/datespe"
 	"tukifac/pkg/facturador"
 	"tukifac/pkg/money"
@@ -58,6 +61,9 @@ type PrintData struct {
 	Total                float64 `json:"total"`
 	GlobalDiscountAmount float64 `json:"global_discount_amount,omitempty"`
 	LineDiscountTotal    float64 `json:"line_discount_total,omitempty"`
+	// Recargo al consumo (cat. 53, código 46): ya está incluido en Total, pero no en Subtotal ni en el IGV. El impreso lo muestra aparte.
+	ServiceChargeAmount float64 `json:"service_charge_amount,omitempty"`
+	ServiceChargeRate   float64 `json:"service_charge_rate,omitempty"`
 
 	// Leyenda en letras (mismo texto que se envía a Lycet/SUNAT en legends code 1000)
 	LegendText string `json:"legend_text,omitempty"`
@@ -67,6 +73,9 @@ type PrintData struct {
 
 	// Pagos
 	Payments []PrintPayment `json:"payments"`
+	// Cotización: métodos de pago de REFERENCIA (cómo piensa pagar el cliente). No son pagos
+	// realizados, por eso van aparte de Payments.
+	ReferencePayments []PrintPayment `json:"reference_payments,omitempty"`
 
 	// Nota de crédito/débito (07/08): documento afectado según SUNAT (misma info que Lycet).
 	AffectedDocSunatCode string `json:"affected_doc_sunat_code,omitempty"` // 01 factura, 03 boleta
@@ -160,11 +169,14 @@ type PrintFiscalContext struct {
 	DetraccionPaymentMethodCode  string         `json:"detraccion_payment_method_code,omitempty"`
 	DetraccionPaymentMethodLabel string         `json:"detraccion_payment_method_label,omitempty"`
 	DetraccionNetPayable         float64        `json:"detraccion_net_payable,omitempty"`
+	// N° de constancia de pago (opcional, 1001 y 1004) — solo referencia impresa, no viaja a SUNAT.
+	// Ver database.TenantSaleDetraccion.PayConstancyNumber.
+	DetraccionPayConstancyNumber string `json:"detraccion_pay_constancy_number,omitempty"`
 	// DetraccionLegendText es la leyenda SUNAT (catálogo 2006) que debe figurar en todo
 	// comprobante sujeto a detracción — mismo texto que se envía en el XML vía
 	// pkg/facturador/legend.go, pero el PDF local no lo mostraba (bug reportado: la
 	// factura no muestra la misma "Información Adicional" que el PDF del facturador).
-	DetraccionLegendText       string                     `json:"detraccion_legend_text,omitempty"`
+	DetraccionLegendText string `json:"detraccion_legend_text,omitempty"`
 	// Campos exclusivos de 1004 (transporte de carga), vacíos en 1001.
 	DetraccionValorReferencial float64 `json:"detraccion_valor_referencial,omitempty"`
 	DetraccionMtcRegistro      string  `json:"detraccion_mtc_registro,omitempty"`
@@ -173,6 +185,9 @@ type PrintFiscalContext struct {
 	DetraccionPuntoDestino     string  `json:"detraccion_punto_destino,omitempty"`
 	DetraccionCargaEfectivaTm  float64 `json:"detraccion_carga_efectiva_tm,omitempty"`
 	DetraccionCargaUtilTm      float64 `json:"detraccion_carga_util_tm,omitempty"`
+	// Detalle del viaje (obligatorio en 1004) — solo referencia impresa, no viaja a SUNAT. Ver
+	// database.TenantSaleDetraccion.TripDetail.
+	DetraccionTripDetail       string                     `json:"detraccion_trip_detail,omitempty"`
 	HasPrepaymentEmit          bool                       `json:"has_prepayment_emit,omitempty"`
 	PrepaymentLabel            string                     `json:"prepayment_label,omitempty"`
 	PrepaymentAffectationGroup string                     `json:"prepayment_affectation_group,omitempty"`
@@ -211,6 +226,7 @@ type PrintClient struct {
 	BusinessName string `json:"business_name"`
 	Address      string `json:"address,omitempty"`
 	Email        string `json:"email,omitempty"`
+	Phone        string `json:"phone,omitempty"`
 }
 
 type PrintCompany struct {
@@ -225,13 +241,24 @@ type PrintCompany struct {
 	AdditionalNotes string `json:"additional_notes,omitempty"`
 	// Discriminar IGV/valor de venta en el impreso. Nuevo RUS = false (solo total).
 	ShowIgvBreakdown bool `json:"show_igv_breakdown"`
+	// Solo aplica a nota de venta (SUNAT 00): mostrar razón social del emisor en el impreso.
+	ShowBusinessNameOnSaleNote bool `json:"show_business_name_on_sale_note"`
+	// Solo aplica a nota de venta (SUNAT 00): discriminar Op. gravadas / IGV en el impreso.
+	ShowIgvBreakdownOnSaleNote bool `json:"show_igv_breakdown_on_sale_note"`
+	// Tamaño de logo por formato (todos los comprobantes): pequeno | mediano | grande.
+	LogoSizeTicket string `json:"logo_size_ticket"`
+	LogoSizeA4     string `json:"logo_size_a4"`
+	// Diseño del PDF A4 (slug elegido por el tenant). Solo presentación; lo resuelve el frontend.
+	PdfA4Design string `json:"pdf_a4_design,omitempty"`
 }
 
 type PrintBankAccount struct {
 	Name          string `json:"name,omitempty"`
 	BankName      string `json:"bank_name"`
 	AccountNumber string `json:"account_number"`
-	Currency      string `json:"currency"`
+	// CCI: Código de Cuenta Interbancario (opcional).
+	CCI      string `json:"cci,omitempty"`
+	Currency string `json:"currency"`
 }
 
 type PrintBranch struct {
@@ -254,6 +281,14 @@ type PrintItem struct {
 	IgvAffectationType     string  `json:"igv_affectation_type,omitempty"`
 	ModifiersJSON          string  `json:"modifiers_json,omitempty"`
 	ItemNote               string  `json:"item_note,omitempty"`
+	// PackLabel: contenido de la unidad de venta ("12 UND"), congelado al emitir; el comprobante lo imprime entre paréntesis.
+	PackLabel string `json:"pack_label,omitempty"`
+	// ProductID + SaleUnitID: referencia para que el frontend resuelva y muestre el NOMBRE
+	// comercial de la SaleUnit usada en esta línea (ej. "Caja"), vía productsService.getSaleUnit.
+	// `Unit` arriba sigue siendo el código fiscal SUNAT (ej. "BX") — ambos conceptos no se mezclan.
+	// nil = línea manual sin producto de catálogo, o vendida en la unidad base (Fase 7F).
+	ProductID  *uint `json:"product_id,omitempty"`
+	SaleUnitID *uint `json:"sale_unit_id,omitempty"`
 }
 
 type PrintAffectTotal struct {
@@ -293,6 +328,8 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		TaxAmount:            sale.TaxAmount,
 		Total:                sale.Total,
 		GlobalDiscountAmount: sale.GlobalDiscountAmount,
+		ServiceChargeAmount:  sale.ServiceChargeAmount,
+		ServiceChargeRate:    sale.ServiceChargeRate,
 		SunatHash:            sunatHash,
 	}
 
@@ -321,12 +358,21 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 
 	var creditRows []database.TenantSaleCreditInstallment
 	if db.Where("sale_id = ?", sale.ID).Order("installment_no ASC").Find(&creditRows).Error == nil && len(creditRows) > 0 {
+		// Autodetracción: el comprobante impreso muestra las cuotas FISCALES (netas), las mismas que viajan a
+		// SUNAT, aunque internamente se cobren por el total. Sin autodetracción no cambia nada.
+		printAmounts := make([]float64, len(creditRows))
+		for i, row := range creditRows {
+			printAmounts[i] = row.Amount
+		}
+		if selfDet := detraccionsvc.NewService(db).SelfDetractionAmount(sale.ID); selfDet > 0 {
+			printAmounts = detraccionsvc.NetInstallmentAmounts(printAmounts, selfDet)
+		}
 		pd.CreditInstallments = make([]PrintCreditInstallment, len(creditRows))
 		for i, row := range creditRows {
 			pd.CreditInstallments[i] = PrintCreditInstallment{
 				InstallmentNo: row.InstallmentNo,
 				DueDate:       row.DueDate.Format("02/01/2006"),
-				Amount:        row.Amount,
+				Amount:        printAmounts[i],
 				Currency:      row.Currency,
 				Status:        row.Status,
 			}
@@ -339,10 +385,18 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		pd.SunatCode = series.SunatCode
 	}
 
+	// Notas/observaciones que el usuario escribió al registrar la venta (p. ej. el campo «Notas» de la
+	// nota de venta). Antes no viajaban a la representación impresa. Las notas de crédito/débito usan este
+	// campo como motivo (se imprime aparte) y las guías no llevan observaciones comerciales.
+	if printsSaleNotes(pd.SunatCode, sale.DocType) {
+		pd.Notes = printableSaleNotes(sale.Notes)
+	}
+
 	// Cliente
 	if sale.ContactID != nil && *sale.ContactID > 0 {
 		var contact database.TenantContact
-		if db.First(&contact, *sale.ContactID).Error == nil {
+		// Unscoped: un contacto eliminado después de emitir sigue siendo el cliente de ese comprobante.
+		if db.Unscoped().First(&contact, *sale.ContactID).Error == nil {
 			addr, _ := database.NormalizeTenantContactAddressUbigeo(contact.Address, contact.Ubigeo)
 			pd.Client = &PrintClient{
 				DocType:      contact.DocType,
@@ -360,10 +414,7 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 	// Empresa
 	var company database.TenantCompanyConfig
 	companyOK := db.First(&company).Error == nil
-	var receiptBankIDs []uint
-	var receiptBanksConfigured bool
 	if companyOK {
-		receiptBankIDs, receiptBanksConfigured = decodeReceiptBankAccountIDs(company.ReceiptBankAccountIDs)
 		pd.Company = PrintCompany{
 			RUC:             company.RUC,
 			BusinessName:    company.BusinessName,
@@ -375,49 +426,14 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 			LogoURL:         company.LogoURL,
 			AdditionalNotes: strings.TrimSpace(company.AdditionalNotes),
 			// Nuevo RUS: la boleta no discrimina IGV en el impreso (Reglamento CP Art. 8).
-			ShowIgvBreakdown: taxregime.For(company.TaxpayerRegime).ShowIgvBreakdown,
+			ShowIgvBreakdown:           taxregime.For(company.TaxpayerRegime).ShowIgvBreakdown,
+			ShowBusinessNameOnSaleNote: company.ShowBusinessNameOnSaleNote,
+			ShowIgvBreakdownOnSaleNote: company.ShowIgvBreakdownOnSaleNote,
+			LogoSizeTicket:             normalizePrintLogoSize(company.LogoSizeTicket),
+			LogoSizeA4:                 normalizePrintLogoSize(company.LogoSizeA4),
+			PdfA4Design:                receiptdesign.NormalizeA4(company.PdfA4Design),
 		}
-		provider := strings.TrimSpace(strings.ToLower(company.WalletProvider))
-		phone := strings.TrimSpace(company.WalletPhone)
-		qrURL := strings.TrimSpace(company.WalletQrURL)
-		if provider != "" && phone != "" && qrURL != "" {
-			pd.PaymentWallet = &PrintPaymentWallet{
-				Provider:     provider,
-				Phone:        phone,
-				QrURL:        qrURL,
-				ShowOnA4:     company.WalletShowOnA4,
-				ShowOnTicket: company.WalletShowOnTicket,
-			}
-		}
-	}
-
-	var bankAccounts []database.TenantBankAccount
-	if db.Where("active = ?", true).Order("id ASC").Find(&bankAccounts).Error == nil {
-		for _, ba := range bankAccounts {
-			// Cuentas tipo caja no van en el comprobante.
-			if strings.EqualFold(strings.TrimSpace(ba.Type), "cash") {
-				continue
-			}
-			name := strings.TrimSpace(ba.Name)
-			bankName := strings.TrimSpace(ba.BankName)
-			acct := strings.TrimSpace(ba.AccountNumber)
-			// Muchas cuentas seed solo tienen Name (sin bank_name ni número); igual deben imprimirse.
-			if name == "" && bankName == "" && acct == "" {
-				continue
-			}
-			if receiptBanksConfigured && !receiptBankAccountAllowed(ba.ID, receiptBankIDs) {
-				continue
-			}
-			if bankName == "" {
-				bankName = name
-			}
-			pd.BankAccounts = append(pd.BankAccounts, PrintBankAccount{
-				Name:          name,
-				BankName:      bankName,
-				AccountNumber: acct,
-				Currency:      ba.Currency,
-			})
-		}
+		pd.PaymentWallet, pd.BankAccounts = PopulateCompanyPaymentInfo(db, company)
 	}
 
 	if sale.UserID > 0 {
@@ -428,6 +444,11 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 	}
 
 	enrichFiscalPrintData(db, sale.ID, sale.Total, pd)
+
+	// Exportación de servicios: leyenda y datos de la operación (huésped / país de uso) en las notas del comprobante.
+	if exp, err := exportacion.LoadBySaleID(db, sale.ID); err == nil && exp != nil {
+		pd.Company.AdditionalNotes = exportacion.AppendToNotes(pd.Company.AdditionalNotes, exp)
+	}
 
 	// Términos: preferencia global de empresa (toggle en registro). Asegura impresión aunque
 	// el perfil fiscal de la venta no se haya persistido (p. ej. binding JSON incompleto).
@@ -441,15 +462,28 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		}
 	}
 
-	// Sucursal (nombre/dirección propios). La dirección del emisor en el PDF es la de la empresa
-	// (editable en registro de ventas); no se pisa con la de la sucursal.
+	// Sucursal (nombre/dirección propios). Igual que el logo: si la sucursal tiene dirección, esa es la
+	// del emisor en el comprobante; si no, queda la de la empresa (ajustes) como respaldo.
 	var branch database.TenantBranch
 	if db.First(&branch, sale.BranchID).Error == nil {
 		pd.Branch = PrintBranch{Name: branch.Name, Address: branch.Address}
-		if strings.TrimSpace(pd.Company.Address) == "" {
-			if addr := strings.TrimSpace(branch.Address); addr != "" {
-				pd.Company.Address = addr
-			}
+		if addr := strings.TrimSpace(branch.Address); addr != "" {
+			pd.Company.Address = addr
+		}
+		// Teléfono: el de la sucursal si tiene uno propio (igual que dirección y logo); si no, el de la empresa.
+		if ph := strings.TrimSpace(branch.Phone); ph != "" {
+			pd.Company.Phone = ph
+		}
+		pd.Company.LogoURL = branchlogo.ResolveURL(branch.LogoURL, pd.Company.LogoURL)
+		// Embebido como data: URL — sin esto el frontend necesita un fetch en vivo a /uploads/*
+		// al generar el PDF (CORS/alcanzabilidad, puede fallar en producción); embebido de una,
+		// el logo de sucursal es tan confiable como el global (ver
+		// pkg/branchlogo.ResolveDataURL, mismo mecanismo que attachLogoDataURL usa para
+		// /api/company/config).
+		branchDataURL := branchlogo.ResolveBranchDataURL(company.RUC, branch.ID, branch.LogoURL)
+		companyDataURL := branchlogo.ResolveCompanyDataURL(company.RUC, company.LogoURL)
+		if dataURL := branchlogo.ResolvePrintLogo(branch.LogoURL, branchDataURL, company.LogoURL, companyDataURL); dataURL != "" {
+			pd.Company.LogoURL = dataURL
 		}
 	}
 
@@ -473,6 +507,9 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 			IgvAffectationType:     it.IgvAffectationType,
 			ModifiersJSON:          it.ModifiersJSON,
 			ItemNote:               it.ItemNote,
+			PackLabel:              it.PackLabel,
+			ProductID:              it.ProductID,
+			SaleUnitID:             it.SaleUnitID,
 		}
 	}
 	pd.LineDiscountTotal = money.RoundSunat(lineDiscSum)
@@ -525,6 +562,10 @@ func BuildPrintData(db *gorm.DB, sale *database.TenantSale, items []database.Ten
 		pd.ChangeAmount = money.CalcPaymentChange(directPaidSum, payable)
 	}
 
+	// Foto del documento: congela (o aplica) cliente, empresa, sucursal, vendedor, cuentas y logo ANTES del QR, que lleva el RUC
+	// y el documento del cliente. Así editar esos datos después no altera el PDF de un comprobante ya emitido.
+	FreezePrintData(db, database.SnapshotKindSale, sale.ID, pd)
+
 	pd.QRData = pd.buildQRData()
 	enrichCreditNotePrintData(db, sale, pd)
 	enrichDespatchPrintData(db, sale, pd)
@@ -559,7 +600,7 @@ func enrichDespatchPrintData(db *gorm.DB, sale *database.TenantSale, pd *PrintDa
 			DocType:   payload.Destinatario.TipoDoc,
 			DocNumber: payload.Destinatario.NumDoc,
 			Name:      payload.Destinatario.RznSocial,
-			Address:   payload.Destinatario.Address.Direccion,
+			Address:   despatchPartyAddress(payload.Destinatario.Address),
 		},
 		MotivoTraslado: strings.TrimSpace(payload.Envio.DesTraslado),
 		Modalidad:      despatchModalidadLabel(payload.Envio.ModTraslado),
@@ -600,7 +641,7 @@ func enrichDespatchPrintData(db *gorm.DB, sale *database.TenantSale, pd *PrintDa
 			DocType:   payload.Tercero.TipoDoc,
 			DocNumber: payload.Tercero.NumDoc,
 			Name:      payload.Tercero.RznSocial,
-			Address:   payload.Tercero.Address.Direccion,
+			Address:   despatchPartyAddress(payload.Tercero.Address),
 		}
 	}
 	if len(payload.AddDocs) > 0 {
@@ -610,6 +651,16 @@ func enrichDespatchPrintData(db *gorm.DB, sale *database.TenantSale, pd *PrintDa
 	}
 
 	pd.Despatch = out
+}
+
+// despatchPartyAddress devuelve la dirección de una parte de la guía. El payload guardado puede no traer
+// dirección (p. ej. un tercero que solo lleva RUC y razón social): InvoiceClient.Address es un puntero y
+// leerlo sin comprobar tumbaba GET /api/sales/:id con 500 (guía T001-5 de 20615174638, 20/11/2026).
+func despatchPartyAddress(a *facturador.InvoiceAddress) string {
+	if a == nil {
+		return ""
+	}
+	return a.Direccion
 }
 
 // despatchDateOnly extrae dd/mm/yyyy de un datetime ISO fiscal (misma capa de formato que
@@ -713,6 +764,21 @@ func (p *PrintData) buildQRData() string {
 		p.TaxAmount, p.Total, p.IssueDate, clienteTipo, clienteNumero, hash)
 }
 
+// normalizePrintLogoSize: cualquier valor fuera de las 3 opciones soportadas cae a "mediano"
+// (el tamaño base de los renderers de ticket/A4/ESC-POS).
+// NormalizePrintLogoSize es normalizePrintLogoSize para los otros constructores de PrintCompany
+// (cotizaciones, pedidos web).
+func NormalizePrintLogoSize(raw string) string { return normalizePrintLogoSize(raw) }
+
+func normalizePrintLogoSize(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case "pequeno", "grande":
+		return strings.TrimSpace(raw)
+	default:
+		return "mediano"
+	}
+}
+
 func decodeReceiptBankAccountIDs(raw string) (ids []uint, configured bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -732,6 +798,82 @@ func receiptBankAccountAllowed(id uint, selected []uint) bool {
 		}
 	}
 	return false
+}
+
+// PopulateCompanyPaymentInfo resuelve el wallet Yape/Plin y las cuentas bancarias a incluir en un
+// comprobante impreso (venta, cotización, etc.) a partir de la config de empresa ya cargada — único
+// punto que lee esto, para que ningún builder de PrintData se quede sin esta sección por
+// duplicar la lógica a mano (pasó con cotizaciones: BuildPrintDataForQuotation nunca la tenía).
+func PopulateCompanyPaymentInfo(db *gorm.DB, company database.TenantCompanyConfig) (*PrintPaymentWallet, []PrintBankAccount) {
+	var wallet *PrintPaymentWallet
+	provider := strings.TrimSpace(strings.ToLower(company.WalletProvider))
+	phone := strings.TrimSpace(company.WalletPhone)
+	qrURL := strings.TrimSpace(company.WalletQrURL)
+	if provider != "" && phone != "" && qrURL != "" {
+		wallet = &PrintPaymentWallet{
+			Provider:     provider,
+			Phone:        phone,
+			QrURL:        qrURL,
+			ShowOnA4:     company.WalletShowOnA4,
+			ShowOnTicket: company.WalletShowOnTicket,
+		}
+	}
+
+	receiptBankIDs, receiptBanksConfigured := decodeReceiptBankAccountIDs(company.ReceiptBankAccountIDs)
+	var accounts []PrintBankAccount
+	var bankAccounts []database.TenantBankAccount
+	if db.Where("active = ?", true).Order("id ASC").Find(&bankAccounts).Error == nil {
+		for _, ba := range bankAccounts {
+			// Cuentas tipo caja no van en el comprobante.
+			if strings.EqualFold(strings.TrimSpace(ba.Type), "cash") {
+				continue
+			}
+			name := strings.TrimSpace(ba.Name)
+			bankName := strings.TrimSpace(ba.BankName)
+			acct := strings.TrimSpace(ba.AccountNumber)
+			cci := strings.TrimSpace(ba.CCI)
+			// Muchas cuentas seed solo tienen Name (sin bank_name ni número); igual deben imprimirse.
+			if name == "" && bankName == "" && acct == "" && cci == "" {
+				continue
+			}
+			if receiptBanksConfigured && !receiptBankAccountAllowed(ba.ID, receiptBankIDs) {
+				continue
+			}
+			if bankName == "" {
+				bankName = name
+			}
+			accounts = append(accounts, PrintBankAccount{
+				Name:          name,
+				BankName:      bankName,
+				AccountNumber: acct,
+				CCI:           cci,
+				Currency:      ba.Currency,
+			})
+		}
+	}
+	return wallet, accounts
+}
+
+// printsSaleNotes true si el comprobante imprime las notas de la venta (nota de venta, factura, boleta).
+func printsSaleNotes(sunatCode, docType string) bool {
+	if isCreditOrDebitNotePrint(sunatCode, docType) {
+		return false
+	}
+	switch strings.TrimSpace(sunatCode) {
+	case "09", "31", "QT":
+		return false
+	}
+	return true
+}
+
+// printableSaleNotes deja solo lo que escribió el usuario: la anulación agrega al final
+// " | ANULADA: motivo" (o "ANULADA: motivo" si no había notas), que es un registro interno.
+func printableSaleNotes(raw string) string {
+	n := strings.TrimSpace(raw)
+	if i := strings.Index(n, "ANULADA:"); i >= 0 {
+		n = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(n[:i]), "|"))
+	}
+	return n
 }
 
 func isCreditOrDebitNotePrint(sunatCode, docType string) bool {
@@ -832,6 +974,7 @@ func enrichFiscalPrintData(db *gorm.DB, saleID uint, saleTotal float64, pd *Prin
 		fc.DetraccionPaymentMethodLabel = paymentMethodLabel
 		fc.DetraccionPaymentMethodCode = det.PaymentMethodCode
 		fc.DetraccionNetPayable = money.RoundSunat(det.NetPayablePen)
+		fc.DetraccionPayConstancyNumber = det.PayConstancyNumber
 		if strings.TrimSpace(det.OperationTypeCode) == detraccionpkg.OpDetraccionTransporte {
 			fc.DetraccionLegendText = detraccionpkg.Legend2006TextTransporte
 			if det.ValorReferencialPen != nil {
@@ -847,6 +990,7 @@ func enrichFiscalPrintData(db *gorm.DB, saleID uint, saleTotal float64, pd *Prin
 			if det.CargaUtilTm != nil {
 				fc.DetraccionCargaUtilTm = *det.CargaUtilTm
 			}
+			fc.DetraccionTripDetail = det.TripDetail
 		} else {
 			fc.DetraccionLegendText = detraccionpkg.Legend2006Text
 		}

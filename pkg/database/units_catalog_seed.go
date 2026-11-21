@@ -17,7 +17,8 @@ type unitCatalogDefault struct {
 	Active bool
 }
 
-// defaultUnitsCatalog las 8 marcadas Active=true son las que el ERP mostraba seleccionables por
+// defaultUnitsCatalog las marcadas Active=true (las 8 del ERP legacy más GRM y MLT, para vender a granel
+// por gramo/mililitro) son las que el ERP mostraba seleccionables por
 // defecto en el sistema legacy (list-units); el resto queda en el catálogo (inactivo) para que el
 // tenant las active desde Tukifac sin tener que recordar/tipear el código SUNAT de memoria.
 var defaultUnitsCatalog = []unitCatalogDefault{
@@ -45,7 +46,7 @@ var defaultUnitsCatalog = []unitCatalogDefault{
 	{Code: "FTQ", Name: "Pies cúbicos", Symbol: "PIE3"},
 	{Code: "GLI", Name: "Galón inglés", Symbol: "GL"},
 	{Code: "GLL", Name: "Galones", Symbol: "GL"},
-	{Code: "GRM", Name: "Gramos", Symbol: "GR"},
+	{Code: "GRM", Name: "Gramos", Symbol: "GR", Active: true},
 	{Code: "HD", Name: "Media docena", Symbol: "1/2 DOC"},
 	{Code: "HT", Name: "Media hora", Symbol: "1/2 H"},
 	{Code: "HUR", Name: "Hora", Symbol: "HR"},
@@ -61,7 +62,7 @@ var defaultUnitsCatalog = []unitCatalogDefault{
 	{Code: "LTR", Name: "Litros", Symbol: "LT", Active: true},
 	{Code: "MGM", Name: "Miligramos", Symbol: "MG"},
 	{Code: "MIL", Name: "Millar", Symbol: "MIL"},
-	{Code: "MLT", Name: "Mililitro", Symbol: "ML"},
+	{Code: "MLT", Name: "Mililitro", Symbol: "ML", Active: true},
 	{Code: "MMK", Name: "Milímetro cuadrado", Symbol: "MM2"},
 	{Code: "MMQ", Name: "Milímetro cúbico", Symbol: "MM3"},
 	{Code: "MMT", Name: "Milímetro", Symbol: "MM"},

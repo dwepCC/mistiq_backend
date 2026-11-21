@@ -2,6 +2,7 @@ package worker
 
 import (
 	"log/slog"
+	"tukifac/pkg/branchscope"
 
 	billingsvc "tukifac/internal/billing/service"
 	"tukifac/pkg/billingqueue"
@@ -19,6 +20,7 @@ func ProcessJob(job billingqueue.Job) error {
 		return err
 	}
 	defer database.ReleaseTenantDB(job.TenantDB)
+	db = branchscope.System(db, "billing worker: procesamiento de job")
 
 	updateJobStatus(db, job.SaleID, billingqueue.StatusProcessing, billingstate.PROCESSING)
 

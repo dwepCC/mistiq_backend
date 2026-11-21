@@ -5,10 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"tukifac/pkg/branchscope"
 
 	"tukifac/config"
-	fiscalsvc "tukifac/internal/fiscal/service"
 	billingsvc "tukifac/internal/billing/service"
+	fiscalsvc "tukifac/internal/fiscal/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/fiscaldedup"
 	"tukifac/pkg/tenantcache"
@@ -91,6 +92,8 @@ func (h *StatusHandler) PostStatus(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "tenant db"})
 	}
 
+	// Webhook del facturador (sin usuario ni sucursal): acceso interno identificado.
+	db = branchscope.System(db, "fiscal: webhook de estado del facturador")
 	if err := h.sync.ApplyStatus(db, &payload); err != nil {
 		fiscaldedup.Release(eventID)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})

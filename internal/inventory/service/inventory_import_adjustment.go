@@ -318,6 +318,14 @@ func (s *InventoryDocumentService) resolveImportAdjustment(
 			summary.ErrorRows++
 			continue
 		}
+		if product.HasVariants {
+			// El stock de estos productos vive por presentación; esta importación compara contra el
+			// stock agregado (siempre 0) y escribiría en una fila que ningún total lee.
+			pr.Status = importStatusError
+			pr.Error = "producto con presentaciones: ajústelo por presentación desde Inventario"
+			summary.ErrorRows++
+			continue
+		}
 
 		current := stockByProduct[product.ID]
 		pr.CurrentStock = current

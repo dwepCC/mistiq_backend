@@ -3,9 +3,11 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
+	"tukifac/pkg/salecurrency"
 
 	"tukifac/internal/sales/nvdisplay"
 	"tukifac/pkg/database"
@@ -28,7 +30,14 @@ type SessionReport struct {
 	Electronic           SessionElectronic       `json:"electronic"`
 	Detraction           SessionDetraction       `json:"detraction"`
 	CreditGenerated      SessionCreditGenerated  `json:"credit_generated"`
+	ServiceCharge        SessionServiceCharge    `json:"service_charge"`
+	// Accounts: lo que entró y salió en cada cuenta bancaria/billetera durante la sesión (por la cuenta real que recibió o pagó, no por el método).
+	Accounts []SessionAccountTotals `json:"accounts"`
 	PayableGenerated     SessionPayableGenerated `json:"payable_generated"`
+	// Currency: cuando la sesión tuvo documentos en dólares, el saldo y los totales EN SOLES (cada USD al TC de su documento)
+	// y los montos por moneda. Vacío (has_foreign=false) si todo fue en soles. Los demás campos del reporte conservan los
+	// importes tal como se registraron (en la moneda de cada documento).
+	Currency SessionCurrencySummary `json:"currency"`
 }
 
 // SessionPayableGenerated compras a crédito (CxP — Fase 2) REGISTRADAS en esta sesión, con su
@@ -39,6 +48,25 @@ type SessionReport struct {
 type SessionPayableGenerated struct {
 	Total     float64            `json:"total"`
 	Purchases []ExpenseDetailRow `json:"purchases"`
+}
+
+// SessionAccountTotals movimientos de la sesión en una cuenta bancaria o billetera (en la moneda de la cuenta) y su saldo actual. El reporte «por método»
+// agrupa por el método que declaró el cajero (p. ej. Transferencia); este bloque dice dónde quedó realmente el dinero (p. ej. Billetera Yape).
+type SessionAccountTotals struct {
+	AccountID uint    `json:"account_id"`
+	Name      string  `json:"name"`
+	Currency  string  `json:"currency"`
+	Income    float64 `json:"income"`
+	Expense   float64 `json:"expense"`
+	Net       float64 `json:"net"`
+	Balance   float64 `json:"balance"` // saldo actual de la cuenta (no solo de la sesión)
+}
+
+// SessionServiceCharge recargo al consumo cobrado en las ventas de la sesión (en soles). Informativo, sin impacto en arqueo: el dinero ya está
+// dentro de lo cobrado por cada método de pago. No es ingreso del negocio sino de los trabajadores: este renglón es lo que hay que repartirles.
+type SessionServiceCharge struct {
+	Total float64 `json:"total"`
+	Sales int     `json:"sales"`
 }
 
 // SessionCreditGenerated ventas registradas a crédito (condición "credito"/"credit") sin cobrar
@@ -92,12 +120,18 @@ type SessionReportHeader struct {
 }
 
 type IncomeDetailRow struct {
-	Date          time.Time `json:"date"`
-	Type          string    `json:"type"`
-	DocNumber     string    `json:"doc_number"`
-	Reference     string    `json:"reference"`
-	Amount        float64   `json:"amount"`
-	PaymentMethod string    `json:"payment_method"`
+	Date      time.Time `json:"date"`
+	Type      string    `json:"type"`
+	DocNumber string    `json:"doc_number"`
+	Reference string    `json:"reference"`
+	// Amount: SIEMPRE en soles (un documento en USD se convierte con su TC). Currency/OriginalAmount: moneda y importe originales
+	// cuando el documento no es en soles.
+	Amount         float64 `json:"amount"`
+	Currency       string  `json:"currency,omitempty"`
+	OriginalAmount float64 `json:"original_amount,omitempty"`
+	PaymentMethod  string  `json:"payment_method"`
+	// Category: motivo/categoría del movimiento manual (ej. "Ingreso manual", "Gasto"); vacío en ventas.
+	Category string `json:"category,omitempty"`
 	// SaleCashSessionID: Caja donde se REGISTRÓ la venta — presente únicamente en filas
 	// Type="cobro_cxc" (un cobro que ocurrió en esta sesión de una venta registrada en OTRA),
 	// para trazabilidad hacia el documento original. nil en "venta" (contado, misma Caja).
@@ -105,12 +139,15 @@ type IncomeDetailRow struct {
 }
 
 type ExpenseDetailRow struct {
-	Date          time.Time `json:"date"`
-	Type          string    `json:"type"`
-	DocNumber     string    `json:"doc_number"`
-	Reference     string    `json:"reference"`
-	Amount        float64   `json:"amount"`
-	PaymentMethod string    `json:"payment_method"`
+	Date           time.Time `json:"date"`
+	Type           string    `json:"type"`
+	DocNumber      string    `json:"doc_number"`
+	Reference      string    `json:"reference"`
+	Amount         float64   `json:"amount"` // en soles
+	Currency       string    `json:"currency,omitempty"`
+	OriginalAmount float64   `json:"original_amount,omitempty"`
+	PaymentMethod  string    `json:"payment_method"`
+	Category       string    `json:"category,omitempty"`
 }
 
 // CancelledSaleRow venta anulada vinculada a la sesión (reversión en caja).
@@ -164,6 +201,16 @@ type MovementReportRow struct {
 	// ventas) en vez del recibo interno genérico de caja. nil cuando el movimiento es manual.
 	SaleID     *uint `json:"sale_id,omitempty"`
 	PurchaseID *uint `json:"purchase_id,omitempty"`
+	// Currency: moneda del documento de origen (Amount está en ella; manuales = PEN). ExchangeRate: TC del documento
+	// (nil en soles). AmountPEN: equivalente en soles (Amount × TC). RateEstimated: el documento no guardó TC y se usó el
+	// del día de emisión. RateMissing: USD sin ningún TC (no entra en los totales en soles).
+	Currency      string   `json:"currency"`
+	ExchangeRate  *float64 `json:"exchange_rate,omitempty"`
+	AmountPEN     float64  `json:"amount_pen"`
+	RateEstimated bool     `json:"rate_estimated,omitempty"`
+	RateMissing   bool     `json:"rate_missing,omitempty"`
+	// AccountName: cuenta bancaria/billetera a la que entró (o de la que salió) el dinero de un movimiento no efectivo. Vacío en efectivo.
+	AccountName string `json:"account_name,omitempty"`
 }
 
 // MovementChannelSummary totales de un canal (efectivo o electrónico).
@@ -175,6 +222,19 @@ type MovementChannelSummary struct {
 	OpeningBalance  *float64      `json:"opening_balance,omitempty"`
 	PhysicalBalance *float64      `json:"physical_balance,omitempty"`
 	SalesByMethod   []MethodTotal `json:"sales_by_method,omitempty"`
+	// ByCurrency: ingresos/egresos/neto separados por moneda (cada uno en la suya) con su equivalente en soles.
+	// SumIncomePEN/SumExpensePEN/NetMovementPEN: todo convertido a soles (cada USD al TC de su documento).
+	// El saldo físico se calcula con NetMovementPEN. RateEstimatedCount/RateMissingCount: filas en USD sin TC guardado.
+	ByCurrency         []MovementCurrencyTotal `json:"by_currency,omitempty"`
+	SumIncomePEN       float64                 `json:"sum_income_pen"`
+	SumExpensePEN      float64                 `json:"sum_expense_pen"`
+	NetMovementPEN     float64                 `json:"net_movement_pen"`
+	RateEstimatedCount int64                   `json:"rate_estimated_count"`
+	RateMissingCount   int64                   `json:"rate_missing_count"`
+	// TransfersInPEN/TransfersOutPEN: transferencias internas (caja ↔ cuentas) y sus anulaciones. NO son ingresos ni egresos del
+	// negocio, así que no entran en SumIncome/SumExpense; sí en NetMovementPEN y el saldo físico (el efectivo realmente se mueve).
+	TransfersInPEN  float64 `json:"transfers_in_pen"`
+	TransfersOutPEN float64 `json:"transfers_out_pen"`
 }
 
 // MovementChannelBlock filas paginadas y resumen de un canal.
@@ -277,6 +337,33 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 	manualExpenseByMethod := make(map[string]float64)
 	seenPurchaseIDs := make(map[uint]struct{})
 
+	// Ventas ANULADAS cuyo efectivo ya fue devuelto en ESTA misma sesión (egreso "Anulación venta"
+	// ligado a la venta). Una venta anulada no es una venta: no debe sumar a "Ventas", a los totales
+	// por método ni al detalle de ingresos. Como el front calcula "Efectivo en caja" como
+	// ingresos-por-venta menos egresos (y el egreso de anulación existe justamente para compensar
+	// ese ingreso), la venta y su reversión se retiran JUNTAS: el saldo físico no cambia. Cuando la
+	// devolución cayó en OTRA sesión ("Devolución por anulación") o aún está pendiente, el efectivo
+	// original sigue contado aquí, tal como estaba al cerrar el arqueo.
+	voidedSaleIDs := make(map[uint]struct{})
+	for _, m := range movements {
+		if m.Type == "expense" && m.Category == "Anulación venta" && m.SaleID != nil {
+			voidedSaleIDs[*m.SaleID] = struct{}{}
+		}
+	}
+	// skipCancelledPayment decide si un pago de venta anulada se excluye de las ventas del reporte:
+	// los no-efectivo siempre (su reversión vive en el movimiento bancario, no en caja) y el efectivo
+	// solo si su devolución está en esta sesión (ver comentario de voidedSaleIDs).
+	skipCancelledPayment := func(sale database.TenantSale, known bool, method string) bool {
+		if !known || !strings.EqualFold(sale.Status, "cancelled") {
+			return false
+		}
+		if !IsCashPaymentMethod(method) {
+			return true
+		}
+		_, voided := voidedSaleIDs[sale.ID]
+		return voided
+	}
+
 	var sessionSales []database.TenantSale
 	if err := s.db.Where("cash_session_id = ? AND status NOT IN ?", sessionID, []string{"cancelled", "draft"}).
 		Order("created_at ASC").Find(&sessionSales).Error; err != nil {
@@ -298,6 +385,12 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 	for _, sale := range sessionSales {
 		salesMap[sale.ID] = sale
 		saleIDs = append(saleIDs, sale.ID)
+	}
+	for _, sale := range sessionSales {
+		if sale.ServiceChargeAmount > 0 {
+			report.ServiceCharge.Total = money.RoundDisplay(report.ServiceCharge.Total + sale.ServiceChargeAmount*docPENFactor(sale.Currency, sale.ExchangeRate, sale.IssueDate))
+			report.ServiceCharge.Sales++
+		}
 	}
 	displayDocNumbers := nvdisplay.LoadDisplayNumbersBySaleID(s.db, saleIDs)
 	// (1) SOLO para "crédito generado" y detracción SPOT: TODOS los pagos de las ventas
@@ -360,14 +453,20 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 			if pending <= money.PaymentTolerance {
 				continue
 			}
-			report.CreditGenerated.Total += pending
-			report.CreditGenerated.Sales = append(report.CreditGenerated.Sales, IncomeDetailRow{
+			fx := docPENFactor(sale.Currency, sale.ExchangeRate, sale.IssueDate)
+			pendingPEN := money.RoundDisplay(pending * fx)
+			report.CreditGenerated.Total += pendingPEN
+			creditRow := IncomeDetailRow{
 				Date:          sale.CreatedAt,
 				Type:          "credito_generado",
 				DocNumber:     displayDocNumbers[sale.ID],
-				Amount:        pending,
+				Amount:        pendingPEN,
 				PaymentMethod: "credito",
-			})
+			}
+			if fx != 1 {
+				creditRow.Currency, creditRow.OriginalAmount = "USD", pending
+			}
+			report.CreditGenerated.Sales = append(report.CreditGenerated.Sales, creditRow)
 		}
 
 		// Ventas legacy SIN ninguna fila en tenant_sale_payments (no hay ningún pago del cual
@@ -385,17 +484,23 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 				if IsDetractionPaymentMethod(meth) {
 					continue
 				}
-				salesByMethod[meth] += sale.Total
-				report.Totals.TotalSales += sale.Total
-				report.Totals.TotalSalesDirect += sale.Total
-				report.Totals.TotalSalesCommercial += sale.Total
-				report.IncomeDetail = append(report.IncomeDetail, IncomeDetailRow{
+				fx := docPENFactor(sale.Currency, sale.ExchangeRate, sale.IssueDate)
+				totalPEN := money.RoundDisplay(sale.Total * fx)
+				salesByMethod[meth] += totalPEN
+				report.Totals.TotalSales += totalPEN
+				report.Totals.TotalSalesDirect += totalPEN
+				report.Totals.TotalSalesCommercial += totalPEN
+				legacyRow := IncomeDetailRow{
 					Date:          sale.CreatedAt,
 					Type:          "venta",
 					DocNumber:     displayDocNumbers[sale.ID],
-					Amount:        sale.Total,
+					Amount:        totalPEN,
 					PaymentMethod: meth,
-				})
+				}
+				if fx != 1 {
+					legacyRow.Currency, legacyRow.OriginalAmount = "USD", sale.Total
+				}
+				report.IncomeDetail = append(report.IncomeDetail, legacyRow)
 			}
 		}
 	}
@@ -445,7 +550,15 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 				continue // el marcador "credito" no debería tener Caja propia, pero por si acaso
 			}
 			sale, saleKnown := salesMap[p.SaleID]
-			reportAmt := paymentReportAmount(p.Amount, p.ID, receivedReportAmounts)
+			if skipCancelledPayment(sale, saleKnown, meth) {
+				continue // venta anulada: no es ingreso de "Ventas" (aparece en cancelled_sales_detail)
+			}
+			reportAmtDoc := paymentReportAmount(p.Amount, p.ID, receivedReportAmounts)
+			payFx := 1.0
+			if saleKnown {
+				payFx = docPENFactor(sale.Currency, sale.ExchangeRate, sale.IssueDate)
+			}
+			reportAmt := money.RoundDisplay(reportAmtDoc * payFx)
 			salesByMethod[meth] += reportAmt
 			report.Totals.TotalSales += reportAmt
 			report.Totals.TotalSalesDirect += reportAmt
@@ -457,6 +570,9 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 				Reference:     p.Reference,
 				Amount:        reportAmt,
 				PaymentMethod: meth,
+			}
+			if payFx != 1 {
+				row.Currency, row.OriginalAmount = "USD", reportAmtDoc
 			}
 			if saleKnown && sale.CashSessionID != nil && *sale.CashSessionID != sessionID {
 				// Cobro posterior de CxC: la venta se registró en OTRA Caja. Se distingue del
@@ -473,6 +589,15 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 	for _, m := range movements {
 		paymentMethod := normalizeReportMethod(m.PaymentMethod)
 
+		// Venta anulada con devolución en esta sesión: se omite el ingreso original y su egreso de
+		// reversión (se compensan; la anulación sigue visible en cancelled_sales_detail).
+		if m.SaleID != nil {
+			if _, voided := voidedSaleIDs[*m.SaleID]; voided &&
+				(m.Type == "income" || (m.Type == "expense" && m.Category == "Anulación venta")) {
+				continue
+			}
+		}
+
 		if m.Type == "income" {
 			// TotalIncome/TotalExpense/FinalBalance alimentan CashPhysical.PhysicalBalance más
 			// abajo, que se muestra como "saldo físico esperado en efectivo" (Excel, PDF, resumen
@@ -483,29 +608,34 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 			// cierre/arqueo): IsCashPaymentMethod. El detalle (IncomeDetail/ExpenseDetail,
 			// manualIncomeByMethod/manualExpenseByMethod, TotalsByMethod.Movements) no cambia — los
 			// medios no-efectivo se siguen listando igual, solo se excluyen de este total físico.
+			mPEN := cashMovementPEN(m)
 			if IsCashPaymentMethod(paymentMethod) {
-				report.Totals.TotalIncome += m.Amount
+				report.Totals.TotalIncome += mPEN
 			}
 			if m.SaleID != nil {
 				continue
 			}
-			row := IncomeDetailRow{Date: m.CreatedAt, Amount: m.Amount, PaymentMethod: paymentMethod}
+			row := IncomeDetailRow{Date: m.CreatedAt, Amount: mPEN, PaymentMethod: paymentMethod, Category: m.Category}
 			if m.Category == "ingreso_manual" || m.Category == "Ingreso manual" {
 				row.Type = "ingreso_manual"
 			} else {
 				row.Type = "otro"
 			}
 			row.Reference = m.Reference
-			manualIncomeByMethod[paymentMethod] += m.Amount
+			manualIncomeByMethod[paymentMethod] += mPEN
 			report.IncomeDetail = append(report.IncomeDetail, row)
 		} else {
+			mPEN := cashMovementPEN(m)
 			if IsCashPaymentMethod(paymentMethod) {
-				report.Totals.TotalExpense += m.Amount
+				report.Totals.TotalExpense += mPEN
 			}
-			row := ExpenseDetailRow{Date: m.CreatedAt, Amount: m.Amount, PaymentMethod: paymentMethod}
+			row := ExpenseDetailRow{Date: m.CreatedAt, Amount: mPEN, PaymentMethod: paymentMethod, Category: m.Category}
+			if m.Currency == "USD" && mPEN != m.Amount {
+				row.Currency, row.OriginalAmount = "USD", m.Amount
+			}
 			if m.PurchaseID != nil {
-				report.Totals.TotalPurchases += m.Amount
-				purchasesByMethod[paymentMethod] += m.Amount
+				report.Totals.TotalPurchases += mPEN
+				purchasesByMethod[paymentMethod] += mPEN
 				seenPurchaseIDs[*m.PurchaseID] = struct{}{}
 				// compra (pago inmediato al registrar) vs pago_proveedor (CxP — Fase 2): Decisión A
 				// prohíbe la compra mixta (purchase_service.Create: o paga todo de una vez o crea
@@ -528,7 +658,7 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 					row.Type = "egreso_manual"
 				}
 				row.Reference = m.Reference
-				manualExpenseByMethod[paymentMethod] += m.Amount
+				manualExpenseByMethod[paymentMethod] += mPEN
 				report.ExpenseDetail = append(report.ExpenseDetail, row)
 			}
 		}
@@ -556,22 +686,24 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 			}
 			method := normalizeReportMethod(code)
 			if m.Type == "credit" {
-				row := IncomeDetailRow{Date: m.CreatedAt, Amount: m.Amount, PaymentMethod: method, Reference: m.Reference}
+				penAmt := movementPEN(m)
+				row := IncomeDetailRow{Date: m.CreatedAt, Amount: penAmt, PaymentMethod: method, Reference: m.Reference, Category: m.Category}
 				if m.Category == "ingreso_manual" || m.Category == "Ingreso manual" {
 					row.Type = "ingreso_manual"
 				} else {
 					row.Type = "otro"
 				}
-				manualIncomeByMethod[method] += m.Amount
+				manualIncomeByMethod[method] += penAmt
 				report.IncomeDetail = append(report.IncomeDetail, row)
 			} else {
-				row := ExpenseDetailRow{Date: m.CreatedAt, Amount: m.Amount, PaymentMethod: method, Reference: m.Reference}
+				penAmt := movementPEN(m)
+				row := ExpenseDetailRow{Date: m.CreatedAt, Amount: penAmt, PaymentMethod: method, Reference: m.Reference, Category: m.Category}
 				if m.Category == "gasto" || m.Category == "Gasto" {
 					row.Type = "gasto"
 				} else {
 					row.Type = "egreso_manual"
 				}
-				manualExpenseByMethod[method] += m.Amount
+				manualExpenseByMethod[method] += penAmt
 				report.ExpenseDetail = append(report.ExpenseDetail, row)
 			}
 		}
@@ -592,15 +724,21 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 			continue
 		}
 		method := normalizeReportMethod(p.PaymentMethod)
-		report.Totals.TotalPurchases += p.Total
-		purchasesByMethod[method] += p.Total
-		report.ExpenseDetail = append(report.ExpenseDetail, ExpenseDetailRow{
+		pfx := docPENFactor(p.Currency, p.ExchangeRate, p.IssueDate)
+		totalPEN := money.RoundDisplay(p.Total * pfx)
+		report.Totals.TotalPurchases += totalPEN
+		purchasesByMethod[method] += totalPEN
+		purRow := ExpenseDetailRow{
 			Date:          p.CreatedAt,
 			Type:          "compra",
 			DocNumber:     p.Series + "-" + p.Number,
-			Amount:        p.Total,
+			Amount:        totalPEN,
 			PaymentMethod: method,
-		})
+		}
+		if pfx != 1 {
+			purRow.Currency, purRow.OriginalAmount = "USD", p.Total
+		}
+		report.ExpenseDetail = append(report.ExpenseDetail, purRow)
 	}
 
 	// CxP (Fase 2) — dos fuentes, análogas a CreditGenerated/pagos posteriores de CxC:
@@ -613,27 +751,38 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 	//     necesitan este paso: ya generan su propio TenantCashMovement, capturado arriba.
 	creditPurchases, _ := s.listCreditPurchasesRegisteredInSession(&session)
 	for _, p := range creditPurchases {
-		report.PayableGenerated.Total += p.Total
-		report.PayableGenerated.Purchases = append(report.PayableGenerated.Purchases, ExpenseDetailRow{
+		cfx := docPENFactor(p.Currency, p.ExchangeRate, p.IssueDate)
+		totalPEN := money.RoundDisplay(p.Total * cfx)
+		report.PayableGenerated.Total += totalPEN
+		cxpRow := ExpenseDetailRow{
 			Date:      p.CreatedAt,
 			Type:      "cxp_generada",
 			DocNumber: p.Series + "-" + p.Number,
-			Amount:    p.Total,
-		})
+			Amount:    totalPEN,
+		}
+		if cfx != 1 {
+			cxpRow.Currency, cxpRow.OriginalAmount = "USD", p.Total
+		}
+		report.PayableGenerated.Purchases = append(report.PayableGenerated.Purchases, cxpRow)
 	}
 
 	payablePayments, _ := s.listNonCashPayablePaymentsForSession(sessionID)
 	for _, pp := range payablePayments {
 		method := normalizeReportMethod(pp.Method)
-		report.Totals.TotalPurchases += pp.Amount
-		purchasesByMethod[method] += pp.Amount
-		report.ExpenseDetail = append(report.ExpenseDetail, ExpenseDetailRow{
+		ppPEN := money.RoundDisplay(pp.Amount * pp.Factor)
+		report.Totals.TotalPurchases += ppPEN
+		purchasesByMethod[method] += ppPEN
+		ppRow := ExpenseDetailRow{
 			Date:          pp.CreatedAt,
 			Type:          "pago_proveedor",
 			DocNumber:     pp.PurchaseDocNumber,
-			Amount:        pp.Amount,
+			Amount:        ppPEN,
 			PaymentMethod: method,
-		})
+		}
+		if pp.Factor != 1 {
+			ppRow.Currency, ppRow.OriginalAmount = "USD", pp.Amount
+		}
+		report.ExpenseDetail = append(report.ExpenseDetail, ppRow)
 	}
 
 	report.Totals.FinalBalance = report.Session.OpeningBalance + report.Totals.TotalIncome - report.Totals.TotalExpense
@@ -653,7 +802,7 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 	for _, m := range voidMovements {
 		row := CancelledSaleRow{
 			Date:          m.CreatedAt,
-			Amount:        m.Amount,
+			Amount:        cashMovementPEN(m),
 			PaymentMethod: normalizeReportMethod(m.PaymentMethod),
 			Reason:        strings.TrimSpace(m.Notes),
 		}
@@ -678,6 +827,8 @@ func (s *CashBankService) GetSessionReport(sessionID uint) (*SessionReport, erro
 
 	populateSessionReportSections(report)
 	ensureSessionReportLists(report)
+	report.Currency = s.sessionCurrencySummary(&session)
+	report.Accounts = s.sessionAccountTotals(sessionID)
 	return report, nil
 }
 
@@ -814,6 +965,8 @@ func (s *CashBankService) ListMovementsReport(f MovementReportFilters) (Movement
 	all = append(all, purchaseRows...)
 	all = append(all, manualBankRows...)
 	sortMovementRowsDesc(all)
+	s.enrichMovementRowsCurrency(all)
+	s.enrichMovementRowsAccountNames(all)
 
 	var cashChannel, electronicChannel, detractionChannel []MovementReportRow
 	for _, row := range all {
@@ -848,8 +1001,16 @@ func (s *CashBankService) ListMovementsReport(f MovementReportFilters) (Movement
 
 func buildMovementChannelBlock(rows []MovementReportRow, limit, offset int, opening *float64) MovementChannelBlock {
 	salesByMethod := make(map[string]float64)
-	var sumIn, sumEx float64
+	var sumIn, sumEx, trIn, trOut float64
 	for _, r := range rows {
+		if isTransferRow(r) {
+			if r.Amount >= 0 {
+				trIn += r.Amount
+			} else {
+				trOut += -r.Amount
+			}
+			continue
+		}
 		if r.Amount >= 0 {
 			sumIn += r.Amount
 			if r.Type == "venta" {
@@ -859,7 +1020,7 @@ func buildMovementChannelBlock(rows []MovementReportRow, limit, offset int, open
 			sumEx += -r.Amount
 		}
 	}
-	net := sumIn - sumEx
+	net := sumIn - sumEx + trIn - trOut
 	summary := MovementChannelSummary{
 		TotalRows:     int64(len(rows)),
 		SumIncome:     sumIn,
@@ -867,9 +1028,11 @@ func buildMovementChannelBlock(rows []MovementReportRow, limit, offset int, open
 		NetMovement:   net,
 		SalesByMethod: mapToMethodTotals(salesByMethod),
 	}
+	// Equivalentes en soles: cada fila en USD al TC de su documento; el saldo físico y el cierre van en soles.
+	ApplyCurrencySummary(&summary, rows)
 	if opening != nil {
 		summary.OpeningBalance = opening
-		pb := *opening + net
+		pb := *opening + summary.NetMovementPEN
 		summary.PhysicalBalance = &pb
 	}
 
@@ -895,9 +1058,115 @@ func buildMovementChannelBlock(rows []MovementReportRow, limit, offset int, open
 }
 
 func sortMovementRowsDesc(rows []MovementReportRow) {
-	sort.Slice(rows, func(i, j int) bool {
+	sort.SliceStable(rows, func(i, j int) bool {
 		return rows[i].Date.After(rows[j].Date)
 	})
+}
+
+// SortMovementRowsDesc ordena por fecha, la más reciente primero. La lista combinada de ingresos/egresos (efectivo + electrónico) se ordena así
+// de punta a punta: antes se concatenaba el bloque de efectivo y luego el electrónico, y lo último cobrado por Yape o transferencia quedaba
+// en las últimas páginas.
+func SortMovementRowsDesc(rows []MovementReportRow) { sortMovementRowsDesc(rows) }
+
+// enrichMovementRowsAccountNames completa AccountName de las filas de ventas y compras no efectivo, leyendo la cuenta del movimiento bancario
+// que dejó ese documento (la que eligió el cajero o la del método). Si un documento tuvo varios pagos a cuentas distintas se empareja por monto.
+func (s *CashBankService) enrichMovementRowsAccountNames(rows []MovementReportRow) {
+	saleIDs := map[uint]struct{}{}
+	purchaseIDs := map[uint]struct{}{}
+	for _, r := range rows {
+		if r.AccountName != "" || IsCashPaymentMethod(r.PaymentMethod) {
+			continue
+		}
+		if r.SaleID != nil {
+			saleIDs[*r.SaleID] = struct{}{}
+		}
+		if r.PurchaseID != nil {
+			purchaseIDs[*r.PurchaseID] = struct{}{}
+		}
+	}
+	if len(saleIDs) == 0 && len(purchaseIDs) == 0 {
+		return
+	}
+	q := s.db.Model(&database.TenantBankMovement{})
+	switch {
+	case len(saleIDs) > 0 && len(purchaseIDs) > 0:
+		q = q.Where("sale_id IN ? OR purchase_id IN ?", keysUint(saleIDs), keysUint(purchaseIDs))
+	case len(saleIDs) > 0:
+		q = q.Where("sale_id IN ?", keysUint(saleIDs))
+	default:
+		q = q.Where("purchase_id IN ?", keysUint(purchaseIDs))
+	}
+	var bms []database.TenantBankMovement
+	if err := q.Find(&bms).Error; err != nil || len(bms) == 0 {
+		return
+	}
+	accIDs := map[uint]struct{}{}
+	for _, m := range bms {
+		accIDs[m.BankAccountID] = struct{}{}
+	}
+	var accs []database.TenantBankAccount
+	s.db.Where("id IN ?", keysUint(accIDs)).Find(&accs)
+	names := make(map[uint]string, len(accs))
+	for _, a := range accs {
+		names[a.ID] = bankAccountDisplayName(a)
+	}
+	bySale := map[uint][]database.TenantBankMovement{}
+	byPurchase := map[uint][]database.TenantBankMovement{}
+	for _, m := range bms {
+		if m.SaleID != nil {
+			bySale[*m.SaleID] = append(bySale[*m.SaleID], m)
+		}
+		if m.PurchaseID != nil {
+			byPurchase[*m.PurchaseID] = append(byPurchase[*m.PurchaseID], m)
+		}
+	}
+	for i := range rows {
+		r := &rows[i]
+		if r.AccountName != "" || IsCashPaymentMethod(r.PaymentMethod) {
+			continue
+		}
+		var cand []database.TenantBankMovement
+		if r.SaleID != nil {
+			cand = bySale[*r.SaleID]
+		} else if r.PurchaseID != nil {
+			cand = byPurchase[*r.PurchaseID]
+		}
+		if len(cand) == 0 {
+			continue
+		}
+		pick := cand[0]
+		same := true
+		for _, m := range cand {
+			if m.BankAccountID != cand[0].BankAccountID {
+				same = false
+			}
+		}
+		if !same {
+			best := -1.0
+			for _, m := range cand {
+				d := math.Min(math.Abs(math.Abs(m.Amount)-math.Abs(r.Amount)), math.Abs(math.Abs(m.Amount)-math.Abs(r.AmountPEN)))
+				if best < 0 || d < best {
+					best, pick = d, m
+				}
+			}
+		}
+		r.AccountName = names[pick.BankAccountID]
+	}
+}
+
+// bankAccountDisplayName nombre corto para mostrar una cuenta en listas y reportes: «Banco · Nombre» o solo el nombre.
+func bankAccountDisplayName(a database.TenantBankAccount) string {
+	n := strings.TrimSpace(a.Name)
+	b := strings.TrimSpace(a.BankName)
+	switch {
+	case n != "" && b != "" && !strings.EqualFold(n, b):
+		return b + " · " + n
+	case n != "":
+		return n
+	case b != "":
+		return b
+	}
+	return fmt.Sprintf("Cuenta %d", a.ID)
 }
 
 type salePayRow struct {
@@ -1037,6 +1306,8 @@ type payablePaymentRow struct {
 	Method            string
 	CreatedAt         time.Time
 	PurchaseDocNumber string
+	// Factor: multiplicador a soles de la compra (1 si es en soles).
+	Factor float64
 }
 
 // listNonCashPayablePaymentsForSession pagos a proveedor NO-EFECTIVO (CxP — Fase 2) que
@@ -1059,12 +1330,14 @@ func (s *CashBankService) listNonCashPayablePaymentsForSession(sessionID uint) (
 			continue
 		}
 		docNumber := ""
+		factor := 1.0
 		var pur database.TenantPurchase
 		if s.db.First(&pur, p.PurchaseID).Error == nil {
 			docNumber = pur.Series + "-" + pur.Number
+			factor = docPENFactor(pur.Currency, pur.ExchangeRate, pur.IssueDate)
 		}
 		out = append(out, payablePaymentRow{
-			Amount: p.Amount, Method: p.Method, CreatedAt: p.CreatedAt, PurchaseDocNumber: docNumber,
+			Amount: p.Amount, Method: p.Method, CreatedAt: p.CreatedAt, PurchaseDocNumber: docNumber, Factor: factor,
 		})
 	}
 	return out, nil
@@ -1313,7 +1586,7 @@ func (s *CashBankService) buildSalePaymentMovementRows(f MovementReportFilters) 
 		contactName := ""
 		if sale.ContactID != nil {
 			var c database.TenantContact
-			if s.db.First(&c, *sale.ContactID).Error == nil {
+			if s.db.Unscoped().First(&c, *sale.ContactID).Error == nil {
 				contactName = contactDisplayName(c)
 			}
 		}
@@ -1404,7 +1677,7 @@ func (s *CashBankService) buildCashMovementReportRows(f MovementReportFilters) (
 	for pid, pur := range purchases {
 		if pur.ContactID != nil {
 			var c database.TenantContact
-			if s.db.First(&c, *pur.ContactID).Error == nil {
+			if s.db.Unscoped().First(&c, *pur.ContactID).Error == nil {
 				contactsByPurchase[pid] = contactDisplayName(c)
 			}
 		}
@@ -1555,6 +1828,7 @@ func (s *CashBankService) buildManualBankMovementRows(f MovementReportFilters) (
 	}
 	contactNames := loadContactNamesMap(s.db, contactIDs)
 
+	accountNames := s.bankAccountNamesFor(movements)
 	rows := make([]MovementReportRow, 0, len(movements))
 	for _, m := range movements {
 		code := methodByAccount[m.BankAccountID]
@@ -1565,7 +1839,7 @@ func (s *CashBankService) buildManualBankMovementRows(f MovementReportFilters) (
 		if wantMethod != "" && method != wantMethod {
 			continue
 		}
-		amount := m.Amount
+		amount := movementPEN(m)
 		typ := "ingreso"
 		if m.Type == "debit" {
 			amount = -amount
@@ -1595,6 +1869,7 @@ func (s *CashBankService) buildManualBankMovementRows(f MovementReportFilters) (
 			UserName:      users[m.UserID],
 			BranchName:    branchName,
 			PaymentMethod: method,
+			AccountName:   accountNames[m.BankAccountID],
 			Amount:        amount,
 			MovementID:    manualBankMovementID(m.ID),
 			CashSessionID: sessionID,
@@ -1675,7 +1950,7 @@ func (s *CashBankService) buildPurchasePaymentMovementRows(f MovementReportFilte
 		contactName := ""
 		if p.ContactID != nil {
 			var c database.TenantContact
-			if s.db.First(&c, *p.ContactID).Error == nil {
+			if s.db.Unscoped().First(&c, *p.ContactID).Error == nil {
 				contactName = contactDisplayName(c)
 			}
 		}
@@ -1751,7 +2026,7 @@ func (s *CashBankService) buildPurchasePaymentMovementRows(f MovementReportFilte
 			docNumber = pur.Series + "-" + pur.Number
 			if pur.ContactID != nil {
 				var c database.TenantContact
-				if s.db.First(&c, *pur.ContactID).Error == nil {
+				if s.db.Unscoped().First(&c, *pur.ContactID).Error == nil {
 					contactName = contactDisplayName(c)
 				}
 			}
@@ -1794,7 +2069,7 @@ func loadUserNamesMap(db *gorm.DB, ids map[uint]struct{}) map[uint]string {
 		return out
 	}
 	var list []database.TenantUser
-	db.Where("id IN ?", keysUint(ids)).Find(&list)
+	db.Unscoped().Where("id IN ?", keysUint(ids)).Find(&list)
 	for _, u := range list {
 		out[u.ID] = u.Name
 	}
@@ -1832,11 +2107,16 @@ type SessionProductSoldRow struct {
 	ProductID   *uint   `json:"product_id"`
 	Code        string  `json:"code"`
 	Description string  `json:"description"`
+	Unit        string  `json:"unit"`
 	Quantity    float64 `json:"quantity"`
 	Total       float64 `json:"total"`
 }
 
-// GetSessionProductsReport agrega ítems vendidos vinculados a una sesión de caja.
+// GetSessionProductsReport agrega los ítems vendidos en una sesión de caja, sin importar el método de
+// pago (efectivo, tarjeta, transferencia, billeteras o crédito): toda venta queda vinculada a la sesión
+// de quien la registró. Excluye ventas anuladas/borrador, notas de crédito/débito y el comprobante emitido
+// desde una nota de venta (la nota ya cuenta los mismos ítems). Se agrupa por producto y unidad para no
+// sumar cantidades de unidades distintas (p. ej. UND y CAJA).
 func (s *CashBankService) GetSessionProductsReport(sessionID uint) ([]SessionProductSoldRow, error) {
 	var session database.TenantCashSession
 	if err := s.db.First(&session, sessionID).Error; err != nil {
@@ -1847,12 +2127,12 @@ func (s *CashBankService) GetSessionProductsReport(sessionID uint) ([]SessionPro
 	}
 	var rows []SessionProductSoldRow
 	err := s.db.Table("tenant_sale_items").
-		Select(`tenant_sale_items.product_id, tenant_sale_items.code, tenant_sale_items.description,
-			SUM(tenant_sale_items.quantity) AS quantity, SUM(tenant_sale_items.total) AS total`).
+		Select(`tenant_sale_items.product_id, tenant_sale_items.code, tenant_sale_items.description, tenant_sale_items.unit,
+			SUM(tenant_sale_items.quantity) AS quantity, SUM(`+salecurrency.TotalPENSQL("tenant_sales", "tenant_sale_items.total")+`) AS total`).
 		Joins("JOIN tenant_sales ON tenant_sales.id = tenant_sale_items.sale_id").
-		Scopes(salescope.ScopeCommercial("tenant_sales")).
+		Scopes(salescope.ScopeCommercialNoNotes("tenant_sales")).
 		Where("tenant_sales.cash_session_id = ? AND tenant_sales.status NOT IN ?", sessionID, []string{"cancelled", "draft"}).
-		Group("tenant_sale_items.product_id, tenant_sale_items.code, tenant_sale_items.description").
+		Group("tenant_sale_items.product_id, tenant_sale_items.code, tenant_sale_items.description, tenant_sale_items.unit").
 		Order("tenant_sale_items.description ASC").
 		Scan(&rows).Error
 	return rows, err
@@ -1886,7 +2166,7 @@ func buildSalePaymentReportAmountsFromPayments(
 			if paymentcondition.IsCreditCode(p.Method) {
 				continue
 			}
-			lines = append(lines, money.SalePaymentLine{ID: p.ID, Amount: p.Amount})
+			lines = append(lines, money.SalePaymentLine{ID: p.ID, Amount: p.Amount, IsCash: money.IsCashMethod(p.Method)})
 		}
 		for id, amt := range money.AllocateSalePaymentReportAmounts(sale.Total, lines) {
 			out[id] = amt
@@ -1948,4 +2228,69 @@ func contactDisplayName(c database.TenantContact) string {
 		return c.TradeName
 	}
 	return c.BusinessName
+}
+
+// bankAccountNamesFor nombres para mostrar de las cuentas de un conjunto de movimientos bancarios.
+func (s *CashBankService) bankAccountNamesFor(movements []database.TenantBankMovement) map[uint]string {
+	ids := map[uint]struct{}{}
+	for _, m := range movements {
+		ids[m.BankAccountID] = struct{}{}
+	}
+	out := map[uint]string{}
+	if len(ids) == 0 {
+		return out
+	}
+	var accs []database.TenantBankAccount
+	s.db.Where("id IN ?", keysUint(ids)).Find(&accs)
+	for _, a := range accs {
+		out[a.ID] = bankAccountDisplayName(a)
+	}
+	return out
+}
+
+// sessionAccountTotals suma por cuenta los movimientos bancarios de la sesión: créditos = ingresos, débitos = egresos.
+func (s *CashBankService) sessionAccountTotals(sessionID uint) []SessionAccountTotals {
+	type row struct {
+		BankAccountID uint
+		Type          string
+		Total         float64
+	}
+	var rows []row
+	if err := s.db.Model(&database.TenantBankMovement{}).
+		Select("bank_account_id, type, COALESCE(SUM(COALESCE(account_amount, amount)), 0) AS total").
+		Where("cash_session_id = ?", sessionID).
+		Group("bank_account_id, type").Scan(&rows).Error; err != nil || len(rows) == 0 {
+		return []SessionAccountTotals{}
+	}
+	byAcc := map[uint]*SessionAccountTotals{}
+	order := []uint{}
+	for _, r := range rows {
+		t, ok := byAcc[r.BankAccountID]
+		if !ok {
+			t = &SessionAccountTotals{AccountID: r.BankAccountID}
+			byAcc[r.BankAccountID] = t
+			order = append(order, r.BankAccountID)
+		}
+		if r.Type == "credit" {
+			t.Income += r.Total
+		} else {
+			t.Expense += r.Total
+		}
+	}
+	var accs []database.TenantBankAccount
+	s.db.Where("id IN ?", order).Find(&accs)
+	for _, a := range accs {
+		if t := byAcc[a.ID]; t != nil {
+			t.Name, t.Currency, t.Balance = bankAccountDisplayName(a), strings.ToUpper(strings.TrimSpace(a.Currency)), money.RoundDisplay(a.Balance)
+		}
+	}
+	out := make([]SessionAccountTotals, 0, len(order))
+	for _, id := range order {
+		t := byAcc[id]
+		t.Income, t.Expense = money.RoundDisplay(t.Income), money.RoundDisplay(t.Expense)
+		t.Net = money.RoundDisplay(t.Income - t.Expense)
+		out = append(out, *t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }

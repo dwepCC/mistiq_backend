@@ -46,7 +46,7 @@ func TestSeedPermissions_FreshEmptyTable_SeedsFullCatalog(t *testing.T) {
 	// contenga los permisos "base" que el bug de producción dejaba sin sembrar.
 	for _, want := range [][2]string{
 		{"dashboard", "view"}, {"users", "view"}, {"roles", "view"}, {"company", "view"},
-		{"contacts", "view"}, {"products", "view"}, {"sales", "view"}, {"purchases", "view"},
+		{"customers", "view"}, {"products", "view"}, {"sales", "view"}, {"purchases", "view"},
 		{"cashbank", "view"}, {"billing", "send"}, {"memberships", "view"},
 	} {
 		var count int64
@@ -92,7 +92,7 @@ func TestSeedPermissions_PartiallyPrePopulated_StillCompletesFullCatalog(t *test
 	// Los permisos "base" que el bug dejaba sin sembrar deben existir ahora.
 	for _, want := range [][2]string{
 		{"dashboard", "view"}, {"users", "view"}, {"roles", "view"}, {"company", "view"},
-		{"contacts", "view"}, {"products", "view"}, {"sales", "view"}, {"purchases", "view"},
+		{"customers", "view"}, {"products", "view"}, {"sales", "view"}, {"purchases", "view"},
 		{"cashbank", "view"}, {"billing", "send"}, {"memberships", "view"},
 	} {
 		var count int64

@@ -28,9 +28,17 @@ func TestNormalizeOperationType(t *testing.T) {
 	if err != nil || code3 != OpVentasNoDomiciliados {
 		t.Fatalf("expected 0401, got %q err=%v", code3, err)
 	}
-	// 0201/2001 vecinos que siguen fuera de alcance (no forman parte de este esfuerzo).
-	if _, err := NormalizeOperationType("0201"); err == nil {
-		t.Fatal("export de servicios (0201) debe seguir rechazado")
+	// Exportación de servicios: 0201, 0202 y 0208 se aceptan (el interruptor por empresa lo valida la venta); el resto de exportaciones no.
+	for _, op := range []string{"0201", "0202", "0208"} {
+		if c, err := NormalizeOperationType(op); err != nil || c != op || !IsExportService(c) {
+			t.Fatalf("%s debe aceptarse como exportación de servicios: %q err=%v", op, c, err)
+		}
+	}
+	if _, err := NormalizeOperationType("0203"); err == nil {
+		t.Fatal("0203 (transporte de navieras) sigue fuera de alcance")
+	}
+	if IsExportService("0101") || IsExportService("0200") {
+		t.Fatal("0101 y 0200 no son exportación de servicios")
 	}
 	if _, err := NormalizeOperationType("2001"); err == nil {
 		t.Fatal("percepción (2001) debe seguir rechazada")
@@ -58,5 +66,16 @@ func TestRequireExchangeRateForUSD(t *testing.T) {
 	rate := 3.75
 	if err := RequireExchangeRateForUSD(CurrencyUSD, &rate); err != nil {
 		t.Fatalf("expected ok with TC: %v", err)
+	}
+}
+
+func TestTotalPENSQL(t *testing.T) {
+	got := TotalPENSQL("p", "pay.amount")
+	want := "CASE WHEN p.currency = 'USD' AND p.exchange_rate > 0 THEN pay.amount * p.exchange_rate ELSE pay.amount END"
+	if got != want {
+		t.Errorf("got %q", got)
+	}
+	if TotalPENSQL("", "total") != "CASE WHEN currency = 'USD' AND exchange_rate > 0 THEN total * exchange_rate ELSE total END" {
+		t.Error("sin alias")
 	}
 }

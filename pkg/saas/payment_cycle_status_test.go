@@ -251,7 +251,7 @@ func TestApprovePayment_backfillsBillingCycleIDForRenewalRequestWithoutCycle(t *
 		t.Fatalf("precondición: el pago no debía tener billing_cycle_id todavía")
 	}
 
-	if err := ApprovePayment(payment.ID, plan.ID, 1, "ok", 1); err != nil {
+	if err := ApprovePayment(payment.ID, plan.ID, 1, "ok", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment: %v", err)
 	}
 

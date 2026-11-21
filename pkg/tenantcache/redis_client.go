@@ -132,3 +132,11 @@ func redisOK() {
 func redisFail() {
 	metrics.RedisOpsFail.Add(1)
 }
+
+// SetClientForTests instala rdb como cliente global y devuelve la función que restaura el anterior. Solo para pruebas
+// (p. ej. con miniredis); producción usa InitRedis.
+func SetClientForTests(rdb *redis.Client) (restore func()) {
+	prev := globalRDB
+	globalRDB = rdb
+	return func() { globalRDB = prev }
+}

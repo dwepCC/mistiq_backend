@@ -42,6 +42,8 @@ func TestRequiredPermissionForFiscalAction_IndividualMapping(t *testing.T) {
 		{"email", "fiscal.retry", true},
 		{"poll", "fiscal.retry", true},
 		{"cancel", "fiscal.cancel", true},
+		{"attend", "fiscal.attend", true},
+		{"unattend", "fiscal.attend", true},
 		{"force", "", false}, // pendiente, decisión confirmada con el usuario
 	}
 	for _, tc := range cases {
@@ -67,6 +69,8 @@ func TestRequiredPermissionForFiscalAction_BulkMapping(t *testing.T) {
 		{"poll", "fiscal.bulk", true},
 		{"force", "", false}, // pendiente también en bulk
 		{"cancel", "", false}, // cancel no existe en bulk (no está en el whitelist del handler)
+		{"attend", "", false}, // atendido tampoco existe en bulk (decisión de a un documento)
+		{"unattend", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.action, func(t *testing.T) {
@@ -229,11 +233,84 @@ func TestFiscalDocumentAction_ViewCannotExecuteAnyWriteAction(t *testing.T) {
 	app := newFiscalTestApp()
 	token := mintFiscalToken(t, db, "admin", []string{"fiscal.view"})
 
-	for _, action := range []string{"retry", "send", "email", "poll", "cancel"} {
+	for _, action := range []string{"retry", "send", "email", "poll", "cancel", "attend", "unattend"} {
 		t.Run(action, func(t *testing.T) {
 			status := statusForFiscalAction(t, app, "POST", "/api/superadmin/fiscal/documents/abc-123/"+action, token)
 			if status != fiber.StatusForbidden {
 				t.Fatalf("status = %d, want 403 (fiscal.view no debe permitir %s)", status, action)
+			}
+		})
+	}
+}
+
+// "Atendido" (2026-09-22): fiscal.attend permite attend/unattend; ningún otro permiso fiscal
+// (ni siquiera fiscal.cancel, la otra acción "administrativa") debe alcanzar para ellas.
+func TestFiscalDocumentAction_AttendUnattend_RequireFiscalAttendSpecifically(t *testing.T) {
+	db := setupFiscalHandlerGrupo6DB(t)
+	app := newFiscalTestApp()
+
+	for _, action := range []string{"attend", "unattend"} {
+		t.Run(action+"_con_fiscal_attend", func(t *testing.T) {
+			token := mintFiscalToken(t, db, "admin", []string{"fiscal.attend"})
+			status := statusForFiscalAction(t, app, "POST", "/api/superadmin/fiscal/documents/abc-123/"+action, token)
+			if status == fiber.StatusUnauthorized || status == fiber.StatusForbidden {
+				t.Fatalf("status = %d, no debería ser 401/403 (fiscal.attend sí cubre %s)", status, action)
+			}
+		})
+		t.Run(action+"_con_fiscal_cancel_insuficiente", func(t *testing.T) {
+			token := mintFiscalToken(t, db, "admin", []string{"fiscal.cancel"})
+			status := statusForFiscalAction(t, app, "POST", "/api/superadmin/fiscal/documents/abc-123/"+action, token)
+			if status != fiber.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (fiscal.cancel no debe permitir %s)", status, action)
+			}
+		})
+		t.Run(action+"_con_fiscal_retry_insuficiente", func(t *testing.T) {
+			token := mintFiscalToken(t, db, "admin", []string{"fiscal.retry"})
+			status := statusForFiscalAction(t, app, "POST", "/api/superadmin/fiscal/documents/abc-123/"+action, token)
+			if status != fiber.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (fiscal.retry no debe permitir %s)", status, action)
+			}
+		})
+	}
+}
+
+// fiscal.attend, a su vez, no debe alcanzar para retry/cancel — capacidades separadas en ambos
+// sentidos, no solo "attend requiere fiscal.attend".
+func TestFiscalDocumentAction_FiscalAttendCannotRetryOrCancel(t *testing.T) {
+	db := setupFiscalHandlerGrupo6DB(t)
+	app := newFiscalTestApp()
+	token := mintFiscalToken(t, db, "admin", []string{"fiscal.attend"})
+
+	for _, action := range []string{"retry", "cancel"} {
+		t.Run(action, func(t *testing.T) {
+			status := statusForFiscalAction(t, app, "POST", "/api/superadmin/fiscal/documents/abc-123/"+action, token)
+			if status != fiber.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (fiscal.attend no debe permitir %s)", status, action)
+			}
+		})
+	}
+}
+
+// attend/unattend no existen como acción bulk — deben rechazarse con 400 igual que cualquier
+// otra acción bulk desconocida, incluso para quien tiene fiscal.attend Y fiscal.bulk.
+func TestFiscalBulkAction_AttendUnattendNotSupportedInBulk(t *testing.T) {
+	db := setupFiscalHandlerGrupo6DB(t)
+	app := newFiscalTestApp()
+	token := mintFiscalToken(t, db, "admin", []string{"fiscal.attend", "fiscal.bulk"})
+
+	for _, action := range []string{"attend", "unattend"} {
+		t.Run(action, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/superadmin/fiscal/documents/bulk/"+action,
+				strings.NewReader(`{"document_uuids":["abc-123"]}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != fiber.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (%s no existe en bulk)", resp.StatusCode, action)
 			}
 		})
 	}

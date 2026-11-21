@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"tukifac/pkg/database"
@@ -52,25 +53,44 @@ func RestorePartialSaleBankRefundTx(tx *gorm.DB, noteSale *database.TenantSale, 
 		return err
 	}
 
+	// Solo se devuelve lo cobrado: sobre una venta a crédito sin pagar la nota baja la deuda y no mueve la cuenta.
+	amount, err := NoteRefundableAmount(tx, noteSale)
+	if err != nil {
+		return err
+	}
+	if amount <= 0 {
+		return nil
+	}
+
 	uid := userID
 	if uid == 0 {
 		uid = noteSale.UserID
 	}
 	now := time.Now()
-	if err := tx.Create(&database.TenantBankMovement{
+	refund := database.TenantBankMovement{
 		BankAccountID: origCredit.BankAccountID,
 		Type:          "debit",
-		Amount:        noteSale.Total,
+		Amount:        amount,
 		Description:   "Devolución por nota de crédito " + noteSale.Number,
 		Reference:     ref,
 		Date:          now,
 		UserID:        uid,
 		SaleID:        &origSaleID,
 		CreatedAt:     now,
-	}).Error; err != nil {
+	}
+	if err := tx.Create(&refund).Error; err != nil {
 		return err
+	}
+	// El saldo de la cuenta va en soles: una devolución de una venta en USD resta su equivalente (monto × TC de la venta).
+	delta, _ := refund.BalanceDelta(-amount)
+	if refund.AccountAmount == nil {
+		var accCur string
+		tx.Table("tenant_bank_accounts").Select("currency").Where("id = ?", origCredit.BankAccountID).Scan(&accCur)
+		if strings.EqualFold(strings.TrimSpace(accCur), "USD") {
+			return errors.New("no se puede devolver a una cuenta en dólares sin tipo de cambio: registre el TC del día")
+		}
 	}
 	return tx.Model(&database.TenantBankAccount{}).
 		Where("id = ?", origCredit.BankAccountID).
-		Update("balance", gorm.Expr("balance - ?", noteSale.Total)).Error
+		Update("balance", gorm.Expr("balance + ?", delta)).Error
 }

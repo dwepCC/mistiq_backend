@@ -130,7 +130,15 @@ func ResolveRequestedRetention(input *FiscalContextInput, sunatDocCode string, c
 	}
 	manualOverride = input.IgvRetentionManualOverride
 	if input.HasIgvRetention != nil {
-		return *input.HasIgvRetention, manualOverride
+		requested = *input.HasIgvRetention
+		// Un check apagado explícito siempre se respeta: es una decisión manual aunque el cliente no envíe la marca
+		// (el frontend la omite si cree que coincide con su sugerencia, y con detracción fuerza
+		// has_igv_retention=false). Sin esto EvaluateIGVRetention vuelve a aplicar la sugerencia automática.
+		// Un check encendido sin marca sigue dependiendo de la regla automática (cliente agente de retención).
+		if !requested && AutoSuggestIGVRetention(sunatDocCode, contact, saleTotal, currency, exchangeRate) {
+			manualOverride = true
+		}
+		return requested, manualOverride
 	}
 	return AutoSuggestIGVRetention(sunatDocCode, contact, saleTotal, currency, exchangeRate), false
 }

@@ -35,8 +35,17 @@ var v035LinkedContactTables = []string{
 // Solo actúa sobre grupos con EXACTAMENTE 1 contacto activo: si un grupo tiene 0 o 2+ activos no
 // hay un destino inequívoco al cual fusionar, y se salta a propósito (no falla el backfill).
 //
-// Nunca toca el walk-in por defecto (is_default_walkin=1): ese contacto nunca se desactivó en la
+// Nunca toca el walk-in por defecto (is_default_walk_in=1): ese contacto nunca se desactivó en la
 // limpieza original y no participa de ningún duplicado real.
+//
+// INCIDENTE (activo 2026-09-06 a 2026-09-15): la consulta usaba "d.is_default_walkin" (sin guion
+// bajo entre "walk" e "in"), pero la columna real en las 397 bases de tenants — creada por GORM
+// vía AutoMigrate a partir del campo Go IsDefaultWalkIn, sin override de nombre — es
+// "is_default_walk_in". El typo hacía fallar este backfill en TODOS los tenants, en cada corrida
+// del cron de flota (cada 5 min), sin frenarlo ni quedar registrado en tenant_schema_versions —
+// solo visible revisando a mano /opt/tukifac/logs/migrate-fleet.log. El test de este archivo no lo
+// detectó porque su tabla sqlite en memoria replicaba el mismo nombre erróneo vía un override
+// explícito de columna, en vez de dejar que GORM la derive como en producción.
 //
 // Idempotente: una vez fusionados y borrados los duplicados, no quedan filas con active=0 en un
 // grupo con un activo — correrlo de nuevo no encuentra nada que hacer.
@@ -75,7 +84,7 @@ func (b V035MergeDuplicateContacts) Run(db *gorm.DB) error {
 		 AND a.deleted_at IS NULL
 		WHERE d.active = 0
 		  AND d.deleted_at IS NULL
-		  AND d.is_default_walkin = 0
+		  AND d.is_default_walk_in = 0
 		  AND d.id != a.id
 		  AND (
 		    SELECT COUNT(*) FROM tenant_contacts a2

@@ -33,6 +33,12 @@ func RequestLogger() fiber.Handler {
 			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
 			slog.String("ip", c.IP()),
 		}
+		// IP real del cliente (CF-Connecting-IP solo si el par es Cloudflare): es la que usa el rate limit. "ip" sigue siendo
+		// la del último salto (el edge de Cloudflare) para no cambiar los registros existentes. NO se registra en la
+		// telemetría de rendimiento (/api/public/rum): esa petición no debe dejar la IP del usuario en ningún log.
+		if c.Path() != "/api/public/rum" {
+			attrs = append(attrs, slog.String("client_ip", ClientIP(c)))
+		}
 
 		if slug, ok := c.Locals("tenant_slug").(string); ok && slug != "" {
 			attrs = append(attrs, slog.String("tenant", slug))

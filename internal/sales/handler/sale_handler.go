@@ -12,16 +12,28 @@ import (
 	salecontext "tukifac/internal/fiscal/salecontext"
 	prepaymentsvc "tukifac/internal/prepayment"
 	quotationsvc "tukifac/internal/quotations/service"
+	"tukifac/internal/exportacion"
+	"tukifac/internal/sales/branchguard"
 	"tukifac/internal/sales/nvdisplay"
 	"tukifac/internal/sales/service"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	emailpkg "tukifac/pkg/email"
+	"tukifac/pkg/middleware"
+	"tukifac/pkg/reportgate"
 	"tukifac/pkg/saas/docusage"
 	"tukifac/pkg/tax"
+	"tukifac/pkg/tenantctx"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
+)
+
+// saleListGate limita los listados/reportes de ventas simultáneos por tenant. Con el pool de 3
+// conexiones de producción, 2 deja siempre una libre para login y el middleware de sesión.
+var (
+	saleListGate     = reportgate.New(2)
+	saleListGateWait = 8 * time.Second
 )
 
 type SaleHandler struct{}
@@ -32,6 +44,12 @@ func db(c fiber.Ctx) *gorm.DB {
 	v, _ := c.Locals("tenantDB").(*gorm.DB)
 	return v
 }
+
+// saleNotFound 404 uniforme de las guardas de sucursal: no revela si el ID existe en otra sucursal.
+func saleNotFound(c fiber.Ctx) error {
+	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "No encontrado"})
+}
+
 func email(c fiber.Ctx) string {
 	v, _ := c.Locals("user_email").(string)
 	return v
@@ -39,6 +57,13 @@ func email(c fiber.Ctx) string {
 func userID(c fiber.Ctx) uint {
 	v, _ := c.Locals("user_id").(uint)
 	return v
+}
+
+// userCanOverridePrice resuelve sales.override_price contra el JWT del usuario autenticado
+// (nunca contra el body de la request) — ver CreateSaleInput.UserCanOverridePrice.
+func userCanOverridePrice(c fiber.Ctx) bool {
+	claims, _ := c.Locals("tenant_claims").(*middleware.TenantClaims)
+	return middleware.HasPermission(claims, "sales.override_price")
 }
 
 func (h *SaleHandler) ListPage(c fiber.Ctx) error {
@@ -127,11 +152,15 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 		Notes                string                           `json:"notes"`
 		Items                []service.SaleItemInput          `json:"items"`
 		GlobalDiscountMode   string                           `json:"global_discount_mode"`
+		ApplyServiceCharge   bool                             `json:"apply_service_charge"`
 		GlobalDiscountValue  float64                          `json:"global_discount_value"`
 		FiscalContext        *salecontext.FiscalContextInput  `json:"fiscal_context"`
 		Detraccion           *detraccionsvc.SaleInput         `json:"detraccion"`
+		Export               *exportacion.SaleInput           `json:"export"`
 		Prepayment           *prepaymentsvc.SaleInput         `json:"prepayment"`
 		FromQuotationID      *uint                            `json:"from_quotation_id"`
+		// IdempotencyKey: UUID por intento de cobro; el reintento con la misma clave devuelve la venta ya creada.
+		IdempotencyKey string `json:"idempotency_key"`
 	}
 
 	if err := c.Bind().Body(&body); err != nil {
@@ -174,6 +203,11 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 	}
 	var issuedFromQuotationID *uint
 	if body.FromQuotationID != nil && *body.FromQuotationID > 0 {
+		// La cotización origen debe ser de la sucursal en la que se crea la venta (antes se podía
+		// convertir —y consumir— la cotización de otra sucursal).
+		if err := branchguard.QuotationBranchMatches(c, dbc, *body.FromQuotationID, branchID); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "cotización no encontrada"})
+		}
 		qSvc := quotationsvc.NewQuotationService(db(c))
 		if _, err := qSvc.EnsureCanLinkToSale(*body.FromQuotationID); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
@@ -181,7 +215,7 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 		qid := *body.FromQuotationID
 		issuedFromQuotationID = &qid
 	}
-	sale, err := svc.Create(service.CreateSaleInput{
+	createInput := service.CreateSaleInput{
 		BranchID:              branchID,
 		ContactID:             body.ContactID,
 		UserID:                userID(c),
@@ -200,30 +234,45 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 		Notes:                 body.Notes,
 		Items:                 body.Items,
 		GlobalDiscountMode:    body.GlobalDiscountMode,
+		ApplyServiceCharge:    body.ApplyServiceCharge,
 		GlobalDiscountValue:   body.GlobalDiscountValue,
 		TaxConfig:             taxCfg,
 		CentralTenantID:       centralTenantID,
 		FiscalContext:         body.FiscalContext,
 		Detraccion:            body.Detraccion,
+		Export:                body.Export,
 		Prepayment:            body.Prepayment,
 		IssuedFromQuotationID: issuedFromQuotationID,
-	})
-	if err != nil {
+		UserCanOverridePrice:  userCanOverridePrice(c),
+		IdempotencyKey:        body.IdempotencyKey,
+	}
+	// Cotización de origen: marcarla convertida DENTRO de la transacción de la venta (UPDATE
+	// condicional). Antes se marcaba después y con el error ignorado: dos conversiones simultáneas
+	// creaban dos ventas y una cotización "borrador" con venta emitida si el marcado fallaba.
+	if issuedFromQuotationID != nil {
+		qid := *issuedFromQuotationID
+		createInput.OnCreatedTx = func(tx *gorm.DB, created *database.TenantSale) error {
+			target := "nota_venta"
+			var ser database.TenantDocumentSeries
+			if tx.First(&ser, created.SeriesID).Error == nil {
+				if code := strings.TrimSpace(ser.SunatCode); code == "01" || code == "03" {
+					target = code
+				}
+			}
+			return quotationsvc.ClaimForConversionTx(tx, qid, created.ID, target)
+		}
+	}
+	sale, err := svc.Create(createInput)
+	// Reintento de un cobro ya guardado: se responde con la venta original y NO se repiten los
+	// efectos secundarios (conversión de cotización, encolado a SUNAT) que ya ocurrieron.
+	replayed := errors.Is(err, service.ErrIdempotentReplay)
+	if err != nil && !replayed {
 		return saleCreateErrorResponse(c, err)
 	}
-	if body.FromQuotationID != nil && *body.FromQuotationID > 0 {
-		target := "nota_venta"
-		var ser database.TenantDocumentSeries
-		if dbc.First(&ser, sale.SeriesID).Error == nil {
-			code := strings.TrimSpace(ser.SunatCode)
-			if code == "01" || code == "03" {
-				target = code
-			}
-		}
-		_ = quotationsvc.NewQuotationService(dbc).MarkConverted(*body.FromQuotationID, sale.ID, target)
-	}
 
-	triggerAutoFiscalEnqueue(c, sale)
+	if !replayed {
+		triggerAutoFiscalEnqueue(c, sale)
+	}
 
 	// Construir print_data para impresión inmediata
 	items, _ := svc.GetItems(sale.ID)
@@ -245,6 +294,9 @@ func (h *SaleHandler) CreateAPI(c fiber.Ctx) error {
 		"success":    true,
 		"sale":       sale,
 		"print_data": printData,
+	}
+	if replayed {
+		resp["idempotent_replay"] = true
 	}
 	if body.FiscalContext != nil {
 		if fiscalCtx, err := svc.GetFiscalContext(sale.ID); err == nil && fiscalCtx != nil {
@@ -325,17 +377,97 @@ func (h *SaleHandler) CancelAPI(c fiber.Ctx) error {
 	if err := c.Bind().Body(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
 	}
+	if err := branchguard.SaleWritable(c, db(c), uint(id)); err != nil {
+		return saleNotFound(c)
+	}
 	if err := service.NewSaleService(db(c)).CancelNotaVenta(uint(id), userID(c), strings.TrimSpace(body.Reason)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Venta anulada correctamente"})
 }
 
+// resolveSalesReportBranch sucursal de un listado/reporte de ventas. branch_id=all pide "todas las
+// sucursales" de forma explícita (el selector de los reportes, que antes con el valor vacío caía en
+// la sucursal activa); un número filtra esa sucursal; sin valor, la sucursal activa como siempre.
+// Quien no puede cambiar de sucursal queda siempre en la suya (ver branch.ResolveReportBranchFilter).
+func resolveSalesReportBranch(c fiber.Ctx) uint {
+	raw := strings.TrimSpace(c.Query("branch_id"))
+	if strings.EqualFold(raw, "all") {
+		return branch.ResolveReportBranchFilter(c, 0, true)
+	}
+	req, _ := strconv.ParseUint(raw, 10, 32)
+	return branch.ResolveReadBranchFilter(c, uint(req))
+}
+
+// VoidRejectedAPI POST /api/sales/:id/void-rejected — anula localmente una factura o boleta que SUNAT
+// rechazó: revierte caja, bancos, stock, seriales y anticipos (ver BillingService.VoidRejectedSale).
+func (h *SaleHandler) VoidRejectedAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.Bind().Body(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
+	}
+	if err := branchguard.SaleWritable(c, db(c), uint(id)); err != nil {
+		return saleNotFound(c)
+	}
+	svc := billingSvc.NewBillingService(db(c))
+	if t, ok := c.Locals("tenant").(*database.Tenant); ok && t != nil {
+		svc.SetCentralTenantID(t.ID)
+		svc.SetTenantSlug(t.Slug)
+	}
+	if err := svc.VoidRejectedSale(billingSvc.VoidRejectedInput{
+		SaleID:     uint(id),
+		Reason:     body.Reason,
+		ActorID:    userID(c),
+		ActorEmail: email(c),
+		ClientIP:   c.IP(),
+	}); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "Venta rechazada anulada correctamente"})
+}
+
+// GET /api/sales/filter-users — usuarios para los filtros "Registrado por" y "Vendedor" de la lista y el
+// reporte de ventas. Solo id y nombre, bajo el acceso de ver ventas (no exige users.view: son filtros, no
+// administración). Incluye usuarios eliminados porque sus ventas siguen existiendo.
+func (h *SaleHandler) FilterUsersAPI(c fiber.Ctx) error {
+	var rows []struct {
+		ID      uint   `json:"id"`
+		Name    string `json:"name"`
+		Deleted bool   `json:"deleted"`
+	}
+	if err := db(c).Unscoped().Table("tenant_users").
+		Select("id, name, (deleted_at IS NOT NULL) AS deleted").
+		Order("deleted_at IS NOT NULL, name ASC").Scan(&rows).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": rows})
+}
+
 // GET /api/sales?q=&from=&to=&doc_type=&billing_status=&sunat_code=00|01,03&contact_id=
 func (h *SaleHandler) ListAPI(c fiber.Ctx) error {
+	// Un tenant no puede tener más de 2 listados/reportes simultáneos: su pool tiene pocas
+	// conexiones y el login/middleware comparten la misma (ver pkg/reportgate).
+	gateKey := "?"
+	if t, ok := tenantctx.Tenant(c); ok && t != nil {
+		gateKey = t.Slug
+	}
+	release, ok := saleListGate.Acquire(gateKey, saleListGateWait)
+	if !ok {
+		c.Set("Retry-After", "5")
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"error": "Hay otros reportes de ventas en curso. Espera unos segundos e intenta de nuevo.",
+		})
+	}
+	defer release()
+
 	svc := service.NewSaleService(db(c))
-	reqBranch, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
-	branchID := branch.ResolveReadBranchFilter(c, uint(reqBranch))
+	branchID := resolveSalesReportBranch(c)
 	contactID, _ := strconv.ParseUint(c.Query("contact_id"), 10, 32)
 	var dateFrom, dateTo *time.Time
 	if from := c.Query("from"); from != "" {
@@ -358,6 +490,8 @@ func (h *SaleHandler) ListAPI(c fiber.Ctx) error {
 			}
 		}
 	}
+	userIDFilter, _ := strconv.ParseUint(c.Query("user_id"), 10, 32)
+	sellerIDFilter, _ := strconv.ParseUint(c.Query("seller_user_id"), 10, 32)
 	params := service.SaleListParams{
 		BranchID:      uint(branchID),
 		ContactID:     uint(contactID),
@@ -366,10 +500,15 @@ func (h *SaleHandler) ListAPI(c fiber.Ctx) error {
 		BillingStatus: c.Query("billing_status"),
 		PaymentMethod: c.Query("payment_method"),
 		PaymentMode:   c.Query("payment_mode"),
+		UserID:        uint(userIDFilter),
+		SellerUserID:  uint(sellerIDFilter),
 		Query:         c.Query("q"),
 		DateFrom:      dateFrom,
 		DateTo:        dateTo,
 		SunatCodes:    sunatCodes,
+		// scope=commercial: el reporte de ventas cuenta lo mismo que el dashboard (ver
+		// SaleListParams.CommercialReport). Sin él, el listado conserva todas las filas.
+		CommercialReport: c.Query("scope") == "commercial",
 	}
 	switch strings.TrimSpace(c.Query("sale_status")) {
 	case "active":
@@ -391,8 +530,13 @@ func (h *SaleHandler) ListAPI(c fiber.Ctx) error {
 		params.Limit = perPage
 		params.Offset = (page - 1) * perPage
 	}
+	// summary=0: la pantalla solo muestra filas y no necesita los totales (evita ~8 sentencias).
+	params.SkipSummary = c.Query("summary") == "0"
 	sales, total, summary, err := svc.List(params)
 	if err != nil {
+		if errors.Is(err, service.ErrSaleListTimeout) {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": err.Error()})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	saleIDs := make([]uint, 0, len(sales))
@@ -426,8 +570,7 @@ func (h *SaleHandler) ListAPI(c fiber.Ctx) error {
 // GET /api/sales/by-product?from=&to=&branch_id=&category_id=
 func (h *SaleHandler) ListByProductAPI(c fiber.Ctx) error {
 	svc := service.NewSaleService(db(c))
-	reqBranch, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
-	branchID := branch.ResolveReadBranchFilter(c, uint(reqBranch))
+	branchID := resolveSalesReportBranch(c)
 	catID, _ := strconv.ParseUint(c.Query("category_id"), 10, 32)
 	var dateFrom, dateTo *time.Time
 	if from := c.Query("from"); from != "" {
@@ -457,6 +600,38 @@ func (h *SaleHandler) ListByProductAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": rows, "summary": summary})
 }
 
+// GET /api/sales/profit-detail?from=&to=&branch_id=&category_id=&q=
+func (h *SaleHandler) ListProfitDetailAPI(c fiber.Ctx) error {
+	svc := service.NewSaleService(db(c))
+	branchID := resolveSalesReportBranch(c)
+	catID, _ := strconv.ParseUint(c.Query("category_id"), 10, 32)
+	var dateFrom, dateTo *time.Time
+	if from := c.Query("from"); from != "" {
+		if t, err := time.ParseInLocation("2006-01-02", from, time.Local); err == nil {
+			start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+			dateFrom = &start
+		}
+	}
+	if to := c.Query("to"); to != "" {
+		if t, err := time.ParseInLocation("2006-01-02", to, time.Local); err == nil {
+			end := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.Local)
+			dateTo = &end
+		}
+	}
+	params := service.ProfitDetailParams{
+		DateFrom:   dateFrom,
+		DateTo:     dateTo,
+		BranchID:   uint(branchID),
+		CategoryID: uint(catID),
+		Q:          c.Query("q"),
+	}
+	rows, summary, err := svc.ProfitDetail(params)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"data": rows, "summary": summary})
+}
+
 func (h *SaleHandler) GetAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
@@ -464,7 +639,7 @@ func (h *SaleHandler) GetAPI(c fiber.Ctx) error {
 	}
 	svc := service.NewSaleService(db(c))
 	sale, err := svc.GetByID(uint(id))
-	if err != nil {
+	if err != nil || !branch.RecordReadable(c, sale.BranchID) {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "No encontrado"})
 	}
 	enriched := []database.TenantSale{*sale}
@@ -529,6 +704,9 @@ func (h *SaleHandler) EmailReceiptAPI(c fiber.Ctx) error {
 	if err := c.Bind().Body(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
 	}
+	if err := branchguard.SaleReadable(c, db(c), uint(id)); err != nil {
+		return saleNotFound(c)
+	}
 	svc := service.NewSaleService(db(c))
 	if err := svc.EmailReceipt(uint(id), service.EmailReceiptInput{
 		Email:     body.Email,
@@ -561,6 +739,9 @@ func (h *SaleHandler) IssueElectronicFromNotaAPI(c fiber.Ctx) error {
 	}
 	if body.SeriesID == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "series_id es obligatorio"})
+	}
+	if err := branchguard.SaleWritable(c, db(c), uint(id)); err != nil {
+		return saleNotFound(c)
 	}
 	svc := service.NewSaleService(db(c))
 	var centralTenantID uint
@@ -651,16 +832,17 @@ func (h *SaleHandler) CreateForm(c fiber.Ctx) error {
 
 	svc := service.NewSaleService(db(c))
 	sale, err := svc.Create(service.CreateSaleInput{
-		BranchID:      uint(branchID),
-		ContactID:     contactID,
-		UserID:        userID(c),
-		SeriesID:      uint(seriesID),
-		DocType:       c.FormValue("doc_type"),
-		IssueDate:     issueDate,
-		Currency:      c.FormValue("currency"),
-		PaymentMethod: c.FormValue("payment_method"),
-		Notes:         c.FormValue("notes"),
-		Items:         items,
+		BranchID:             uint(branchID),
+		ContactID:            contactID,
+		UserID:               userID(c),
+		SeriesID:             uint(seriesID),
+		DocType:              c.FormValue("doc_type"),
+		IssueDate:            issueDate,
+		Currency:             c.FormValue("currency"),
+		PaymentMethod:        c.FormValue("payment_method"),
+		Notes:                c.FormValue("notes"),
+		Items:                items,
+		UserCanOverridePrice: userCanOverridePrice(c),
 	})
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
@@ -697,6 +879,14 @@ func (h *SaleHandler) ApplyPendingRefundAPI(c fiber.Ctx) error {
 	if body.CashMovementID == 0 || body.CashSessionID == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "movimiento y caja son requeridos"})
 	}
+	// El movimiento original (y por tanto la venta anulada) y la caja destino deben ser de la
+	// sucursal activa: antes cualquier usuario podía sacar dinero de una caja de otra sucursal.
+	if err := branchguard.CashMovementWritable(c, db(c), body.CashMovementID); err != nil {
+		return saleNotFound(c)
+	}
+	if err := branchguard.SessionWritable(c, db(c), body.CashSessionID); err != nil {
+		return saleNotFound(c)
+	}
 	err := service.NewSaleService(db(c)).ApplyPendingRefund(
 		body.CashMovementID, body.CashSessionID, userID(c), strings.TrimSpace(body.Reason),
 	)
@@ -720,6 +910,12 @@ func (h *SaleHandler) ApplyPendingNoteRefundAPI(c fiber.Ctx) error {
 	}
 	if body.NoteSaleID == 0 || body.CashSessionID == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "nota y caja son requeridas"})
+	}
+	if err := branchguard.SaleWritable(c, db(c), body.NoteSaleID); err != nil {
+		return saleNotFound(c)
+	}
+	if err := branchguard.SessionWritable(c, db(c), body.CashSessionID); err != nil {
+		return saleNotFound(c)
 	}
 	err := service.NewSaleService(db(c)).ApplyPendingNoteRefund(
 		body.NoteSaleID, body.CashSessionID, userID(c), strings.TrimSpace(body.Reason),

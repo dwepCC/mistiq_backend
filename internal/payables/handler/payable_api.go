@@ -5,6 +5,7 @@ import (
 
 	"tukifac/internal/payables/service"
 	"tukifac/pkg/branch"
+	"tukifac/pkg/database"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
@@ -68,6 +69,18 @@ func (h *PayableHandler) PayAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
 	body.UserID = uid(c)
+	// El pago mueve caja/banco de la sucursal de la compra: otra sucursal no visible -> 404; visible
+	// (admin viendo todas) pero no activa -> 403.
+	var purchase database.TenantPurchase
+	if err := tenantDB(c).Select("id", "branch_id").First(&purchase, uint(purchaseID)).Error; err != nil ||
+		!branch.RecordReadable(c, purchase.BranchID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "compra no encontrada"})
+	}
+	if !branch.RecordWritable(c, purchase.BranchID) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "Solo puede pagar cuentas de su sucursal activa; cambie de sucursal", "code": branch.CodeBranchForbidden,
+		})
+	}
 	if err := service.NewPayableService(tenantDB(c)).Pay(uint(purchaseID), body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}

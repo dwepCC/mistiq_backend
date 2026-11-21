@@ -33,13 +33,19 @@ type DeductionPlan struct {
 	AdjustedTotal    float64
 }
 
-// ListOpenVouchers anticipos abiertos por afectación (legacy GET /documents/prepayments/{type}, sin filtro de cliente).
-func (s *Service) ListOpenVouchers(_ uint, affectationGroup string, taxRatePercent float64) ([]OpenVoucherOption, error) {
+// ListOpenVouchers anticipos abiertos y deducibles del cliente indicado, por afectación. Sin cliente
+// (contactID 0) devuelve lista vacía: un anticipo solo se puede deducir en comprobantes del mismo
+// cliente (PlanDeductions lo exige), así que no se ofrecen anticipos de terceros. Se excluyen los
+// anticipos cuya venta está anulada.
+func (s *Service) ListOpenVouchers(contactID uint, affectationGroup string, taxRatePercent float64) ([]OpenVoucherOption, error) {
 	group := strings.TrimSpace(affectationGroup)
 	if !sunatpre.IsValidAffectationGroup(group) {
 		return nil, errors.New("indique afectación gravado, exonerado o inafecto")
 	}
-	_ = s.ReconcileAllPendingVouchers()
+	if contactID == 0 {
+		return []OpenVoucherOption{}, nil
+	}
+	_ = s.ReconcileVouchersForContact(contactID)
 
 	var rows []database.TenantSalePrepaymentVoucher
 	err := s.db.
@@ -47,6 +53,8 @@ func (s *Service) ListOpenVouchers(_ uint, affectationGroup string, taxRatePerce
 		Where("tenant_sale_prepayment_vouchers.affectation_group = ?", group).
 		Where("tenant_sale_prepayment_vouchers.status = ?", sunatpre.StatusOpen).
 		Where("tenant_sale_prepayment_vouchers.balance_amount > ?", 0.009).
+		Where("tenant_sales.status <> ?", "cancelled").
+		Where("(tenant_sale_prepayment_vouchers.contact_id = ? OR (tenant_sale_prepayment_vouchers.contact_id IS NULL AND tenant_sales.contact_id = ?))", contactID, contactID).
 		Order("tenant_sale_prepayment_vouchers.available_at ASC, tenant_sale_prepayment_vouchers.sale_id ASC").
 		Find(&rows).Error
 	if err != nil {
@@ -133,6 +141,9 @@ func (s *Service) PlanDeductions(
 		var voucher database.TenantSalePrepaymentVoucher
 		if err := s.db.First(&voucher, "sale_id = ?", d.SourceSaleID).Error; err != nil {
 			return DeductionPlan{}, fmt.Errorf("anticipo no encontrado (venta %d)", d.SourceSaleID)
+		}
+		if voucher.Status == sunatpre.StatusVoided || sourceSaleCancelled(s.db, voucher.SaleID) {
+			return DeductionPlan{}, fmt.Errorf("el anticipo %s está anulado y no se puede deducir", voucher.DocumentNumber)
 		}
 		if voucher.Status != sunatpre.StatusOpen {
 			if !s.isSaleFiscallyAccepted(voucher.SaleID) {

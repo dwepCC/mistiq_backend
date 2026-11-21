@@ -18,6 +18,9 @@ var criticalSchemaChecks = []criticalSchemaCheck{
 	{31, "tenant_branches", "tabla tenant_branches"},
 	{35, "tenant_restaurant_staff", "tabla tenant_restaurant_staff"},
 	{59, "tenant_user_branches", "tabla tenant_user_branches"},
+	{180, "tenant_purchase_orders", "tabla tenant_purchase_orders"},
+	{183, "tenant_account_transfers", "tabla tenant_account_transfers"},
+	{184, "tenant_banks", "tabla tenant_banks"},
 }
 
 // detectPhysicalDriftMinVersion primera versión con historial success pero objeto faltante.

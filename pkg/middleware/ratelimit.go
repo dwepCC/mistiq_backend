@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -8,17 +9,55 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const rateLimitWindow = time.Minute
 
-// RateLimitKey usa IP real (TrustProxy + X-Forwarded-For) y tenant cuando existe.
+// RateLimitKey = IP REAL del cliente (ClientIP: CF-Connecting-IP solo si la conexión viene de Cloudflare) y,
+// cuando la petición trae un JWT de tenant VÁLIDO, el id de ese tenant.
+//
+// Antes la clave era c.IP() = la IP del edge de Cloudflare: todos los usuarios de todos los tenants que
+// entraban por el mismo edge compartían el mismo cupo (300/min global, 60/min facturación). Ahora cada
+// cliente tiene su cupo, y dos tenants detrás de la misma IP (oficina compartida, CGNAT móvil) no se pisan.
+//
+// El tenant sale SOLO de un JWT con firma verificada, nunca de X-Tenant-Slug/Host: son datos que el cliente
+// controla y rotarlos daría cupos infinitos. Este limitador corre antes de resolver el tenant a propósito
+// (frena el abuso antes de gastar consultas), por eso no se usa tenant_slug de Locals.
 func RateLimitKey(c fiber.Ctx) string {
-	ip := c.IP()
-	if slug, ok := c.Locals("tenant_slug").(string); ok && slug != "" {
-		return ip + "|" + slug
+	ip := ClientIP(c)
+	if id := verifiedTenantID(c); id > 0 {
+		return ip + "|t" + strconv.FormatUint(uint64(id), 10)
 	}
 	return ip
+}
+
+// verifiedTenantID devuelve el tenant_id del JWT de la petición solo si la firma y el tipo son válidos; 0 si no
+// hay token o no es válido (ese caso se limita solo por IP).
+func verifiedTenantID(c fiber.Ctx) uint {
+	tokenStr := ""
+	if h := c.Get("Authorization"); h != "" {
+		if parts := strings.Split(h, " "); len(parts) == 2 && parts[0] == "Bearer" && parts[1] != "null" {
+			tokenStr = parts[1]
+		}
+	}
+	if tokenStr == "" {
+		tokenStr = c.Cookies("token")
+	}
+	if tokenStr == "" {
+		tokenStr = queryAccessToken(c, false) // EventSource (SSE): solo /api/billing/events
+	}
+	if tokenStr == "" {
+		return 0
+	}
+	claims := &TenantClaims{}
+	t, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+		return []byte(config.AppConfig.JWTSecret), nil
+	}, jwt.WithValidMethods([]string{"HS256"}))
+	if err != nil || !t.Valid || claims.Type != "tenant" {
+		return 0
+	}
+	return claims.TenantID
 }
 
 func rateLimitResponse(c fiber.Ctx) error {
@@ -83,7 +122,7 @@ func RateLimitGlobal() fiber.Handler {
 // isAuthSensitivePath rutas reales de autenticación y contraseña (no hay refresh/forgot en el código).
 func isAuthSensitivePath(path string) bool {
 	switch path {
-	case "/api/login", "/api/superadmin/login":
+	case "/api/login", "/api/superadmin/login", "/api/auth/master-exchange":
 		return true
 	}
 	return strings.HasSuffix(path, "/password")
@@ -112,7 +151,7 @@ func RateLimitAuth() fiber.Handler {
 	cfg := config.AppConfig
 	return conditionalLimiter(func(c fiber.Ctx) bool {
 		return isAuthSensitivePath(c.Path())
-	}, cfg.RateLimitAuth, func(c fiber.Ctx) string { return c.IP() })
+	}, cfg.RateLimitAuth, ClientIP)
 }
 
 // RateLimitPublicConsult consulta DNI/RUC pública (20 req/min por IP).
@@ -120,7 +159,7 @@ func RateLimitPublicConsult() fiber.Handler {
 	cfg := config.AppConfig
 	return conditionalLimiter(func(c fiber.Ctx) bool {
 		return isPublicConsultPath(c.Path())
-	}, cfg.RateLimitPublicConsult, func(c fiber.Ctx) string { return c.IP() })
+	}, cfg.RateLimitPublicConsult, ClientIP)
 }
 
 // RateLimitBilling emisión SUNAT y documentos (60 req/min por IP|tenant).

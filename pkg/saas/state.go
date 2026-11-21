@@ -33,6 +33,9 @@ type TenantSubscriptionView struct {
 	ShowRenewalBanner       bool    `json:"show_renewal_banner"`
 	ShowSuspendedBanner     bool    `json:"show_suspended_banner"`
 	CanOperate              bool    `json:"can_operate"`
+	// CanViewReports: puede consultar el módulo de Reportes (solo lectura). Es true con acceso operativo
+	// y también con la cuenta suspendida/vencida por falta de pago; false si está bloqueada o desactivada.
+	CanViewReports bool `json:"can_view_reports"`
 	PortalURL               string  `json:"portal_url"` // override opcional; vacío = usar /subscription
 	NextBillingDate         string  `json:"next_billing_date,omitempty"`
 	PendingInvoiceID        uint    `json:"pending_invoice_id,omitempty"`
@@ -43,6 +46,9 @@ type TenantSubscriptionView struct {
 	// viene del plan, así que un plan mensual contratado por 3 meses seguía diciendo
 	// «Mensual»; este campo permite mostrar el período que de verdad se pagó.
 	ContractedMonths int `json:"contracted_months"`
+	// BonusMonths meses de cortesía incluidos en la vigencia y NO cobrados (ya descontados de
+	// ContractedMonths, que es lo que define el próximo pago).
+	BonusMonths int `json:"bonus_months"`
 }
 
 // ContractedMonths meses completos entre inicio y fin de la suscripción.
@@ -109,7 +115,8 @@ func computeTenantView(tenantID uint) (TenantSubscriptionView, error) {
 		Where("status NOT IN ?", []string{database.SaasSubCancelled}).
 		Order("created_at desc").First(&sub).Error
 	if err != nil {
-		v.CanOperate = !v.IsBlocked && tenant.Status != database.TenantStatusSuspended
+		v.CanOperate = !v.IsBlocked && tenant.Status != database.TenantStatusSuspended && tenant.Status != database.TenantStatusInactive
+		v.CanViewReports = CanViewReports(v.IsBlocked, &tenant)
 		return v, nil
 	}
 
@@ -120,6 +127,10 @@ func computeTenantView(tenantID uint) (TenantSubscriptionView, error) {
 	v.StartDate = sub.StartDate.In(lima()).Format(timeRFC3339Lima)
 	v.EndDate = sub.EndDate.In(lima()).Format(timeRFC3339Lima)
 	v.ContractedMonths = ContractedMonths(sub.StartDate, sub.EndDate)
+	if sub.BonusMonths > 0 && v.ContractedMonths-sub.BonusMonths >= 1 {
+		v.ContractedMonths -= sub.BonusMonths
+		v.BonusMonths = sub.BonusMonths
+	}
 
 	now := NowLima()
 	if sub.ProvisionalUntil != nil {
@@ -168,7 +179,19 @@ func computeTenantView(tenantID uint) (TenantSubscriptionView, error) {
 		(!v.CanOperate && !v.IsBlocked)
 
 	v.CanOperate = CanOperate(effective, &tenant, sub.ProvisionalUntil, now)
+	v.CanViewReports = CanViewReports(v.IsBlocked, &tenant)
 	return v, nil
+}
+
+// CanViewReports indica si el tenant puede consultar el módulo de Reportes (solo lectura): con acceso
+// operativo normal, o con la cuenta restringida por falta de pago (suspendida o vencida fuera de gracia)
+// para que pueda seguir viendo su información mientras regulariza. Nunca si está bloqueada (strikes o
+// pagos inválidos) ni si el administrador la desactivó.
+func CanViewReports(isBlocked bool, tenant *database.Tenant) bool {
+	if tenant == nil || isBlocked || tenant.Status == database.TenantStatusInactive {
+		return false
+	}
+	return true
 }
 
 const timeRFC3339Lima = "2006-01-02T15:04:05-07:00"
@@ -181,6 +204,10 @@ func CanOperate(subStatus string, tenant *database.Tenant, provisionalUntil *tim
 	cfgStrike, _ := LoadSettings()
 	maxStrike := EffectiveStrikeMax(cfgStrike)
 	if tenant.Status == database.TenantStatusBlocked || tenant.PaymentBlocked || tenant.StrikeCount >= maxStrike {
+		return false
+	}
+	// Una empresa desactivada por el administrador no opera aunque su suscripción siga vigente.
+	if tenant.Status == database.TenantStatusInactive {
 		return false
 	}
 	if provisionalUntil != nil && provisionalUntil.In(lima()).After(now) {

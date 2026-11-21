@@ -8,6 +8,7 @@ import (
 
 	"tukifac/config"
 	agentmod "tukifac/internal/agent"
+	"tukifac/internal/accounting"
 	"tukifac/internal/auth"
 	authHandler "tukifac/internal/auth/handler"
 	"tukifac/internal/billing"
@@ -29,10 +30,12 @@ import (
 	"tukifac/internal/plans"
 	"tukifac/internal/prepayment"
 	"tukifac/internal/products"
+	"tukifac/internal/purchaseorders"
 	"tukifac/internal/purchases"
 	"tukifac/internal/quotations"
 	"tukifac/internal/receivables"
 	"tukifac/internal/restaurant"
+	"tukifac/internal/rum"
 	"tukifac/internal/sales"
 	superadmin "tukifac/internal/superadmin"
 	"tukifac/internal/tenantportal"
@@ -50,6 +53,10 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 )
+
+// CORSAllowHeaders cabeceras que los clientes (web, Tauri, Android) pueden enviar cross-origin. X-Branch-Mode es el modo
+// "Todas las sucursales" (solo lectura): sin ella el preflight falla y las lecturas de ese modo se rompen fuera del proxy de desarrollo.
+var CORSAllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Tenant-Slug", "X-Security-Pin", "X-Branch-Mode"}
 
 func Setup(app *fiber.App) {
 	cfg := config.AppConfig
@@ -81,7 +88,7 @@ func Setup(app *fiber.App) {
 	app.Use(cors.New(cors.Config{
 		AllowOriginsFunc: corsMatcher.Allow,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Tenant-Slug"},
+		AllowHeaders:     CORSAllowHeaders,
 		AllowCredentials: true,
 		MaxAge:           3600,
 	}))
@@ -180,6 +187,7 @@ func Setup(app *fiber.App) {
 
 	// Catálogo Digital: tienda pública (sin JWT, con tenant + módulo + suscripción activa)
 	ecommerce.RegisterPublicRoutes(app.Group("/api"))
+	rum.RegisterPublicRoutes(app.Group("/api")) // telemetría de rendimiento del navegador (sin datos personales)
 
 	// Planes comerciales: catálogo de planes activos para landing/marketing (sin JWT, sin tenant)
 	plans.RegisterPublicRoutes(app.Group("/api"))
@@ -218,7 +226,7 @@ func Setup(app *fiber.App) {
 	// Se usa un prefijo /api/t/ internamente pero los módulos solo ven su ruta relativa.
 	// El middleware TenantAuthAPI se aplica SOLO a las rutas registradas en este grupo,
 	// no a las rutas públicas (/api/superadmin/login, /api/login) ya registradas arriba.
-	tenantAPI := app.Group("/api", middleware.TenantAuthAPI(), middleware.ValidateTenantBinding(), middleware.SubscriptionGate(), middleware.BranchContextMiddleware())
+	tenantAPI := app.Group("/api", middleware.TenantAuthAPI(), middleware.ValidateTenantBinding(), middleware.SubscriptionGate(), middleware.BranchContextMiddleware(), middleware.StripProductCost())
 
 	sessionH := authHandler.NewSessionHandler()
 	tenantAPI.Get("/session/context", sessionH.GetContext)
@@ -230,6 +238,8 @@ func Setup(app *fiber.App) {
 	tenantAPI.Get("/ubigeo/regiones", ubigeoTenant.RegionesAPI)
 	tenantAPI.Get("/ubigeo/provincias", ubigeoTenant.ProvinciasAPI)
 	tenantAPI.Get("/ubigeo/distritos", ubigeoTenant.DistritosAPI)
+	// Agregar un distrito que el catálogo aún no tiene (distritos creados por ley recientemente).
+	tenantAPI.Post("/ubigeo/distritos", middleware.RequirePermission("company.edit"), ubigeoTenant.CreateDistritoAPI)
 
 	tenantAPI.Get("/consulta/tipo-cambio", consultaH.TipoCambioAPI)
 	catalogs.RegisterRoutes(tenantAPI)
@@ -250,7 +260,9 @@ func Setup(app *fiber.App) {
 	billing.RegisterRoutes(tenantAPI)
 	fleet.RegisterRoutes(tenantAPI)
 	purchases.RegisterRoutes(tenantAPI)
+	purchaseorders.RegisterRoutes(tenantAPI)
 	cashbank.RegisterRoutes(tenantAPI)
+	accounting.RegisterRoutes(tenantAPI)
 	paymentcatalog.RegisterRoutes(tenantAPI)
 	receivables.RegisterRoutes(tenantAPI)
 	payables.RegisterRoutes(tenantAPI)

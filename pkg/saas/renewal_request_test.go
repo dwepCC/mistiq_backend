@@ -188,7 +188,7 @@ func TestSubmitRenewalRequest_advancePayment_appliesRequestedMonths(t *testing.T
 
 	// El admin aprueba sin pasar periodMonths (planID=0, periodMonths=0) — igual que hoy el
 	// frontend central: paymentsService.approve(id, planId, notes), sin meses.
-	if err := ApprovePayment(payment.ID, 0, 0, "ok", 1); err != nil {
+	if err := ApprovePayment(payment.ID, 0, 0, "ok", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestApprovePayment_propagatesPlanCycleDiscountToNewSubscription(t *testing.
 		t.Fatalf("Amount = %v, want 50", payment.Amount)
 	}
 
-	if err := ApprovePayment(payment.ID, 0, 0, "ok", 1); err != nil {
+	if err := ApprovePayment(payment.ID, 0, 0, "ok", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment: %v", err)
 	}
 
@@ -273,7 +273,7 @@ func TestApprovePayment_defaultsToRequestedPlan(t *testing.T) {
 
 	// El admin aprueba sin tocar el dropdown de reasignación de plan (planID=0): debe respetar
 	// lo que el tenant pidió, no el plan de la suscripción vieja.
-	if err := ApprovePayment(payment.ID, 0, 1, "ok", 1); err != nil {
+	if err := ApprovePayment(payment.ID, 0, 1, "ok", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment: %v", err)
 	}
 

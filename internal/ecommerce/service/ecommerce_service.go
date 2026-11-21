@@ -58,6 +58,24 @@ func (s *EcommerceService) ResolveWhatsAppNumber(settings *database.TenantEcomme
 	return strings.TrimSpace(cfg.Phone)
 }
 
+// PublicContact son los únicos datos de la empresa que la tienda pública expone en el pie.
+type PublicContact struct {
+	Address string `json:"address"`
+	Phone   string `json:"phone"`
+	Email   string `json:"email"`
+}
+
+// ResolvePublicContact toma dirección, teléfono y correo de la configuración de empresa.
+// El teléfono respeta el WhatsApp propio de la tienda si lo tiene (mismo criterio que el botón).
+func (s *EcommerceService) ResolvePublicContact(settings *database.TenantEcommerceSettings) PublicContact {
+	out := PublicContact{Phone: s.ResolveWhatsAppNumber(settings)}
+	if cfg, err := companyservice.NewCompanyService(s.db).GetConfig(); err == nil && cfg != nil {
+		out.Address = strings.TrimSpace(cfg.Address)
+		out.Email = strings.TrimSpace(cfg.Email)
+	}
+	return out
+}
+
 // UpdateSettingsInput campos nil = no tocar (update parcial). WhatsAppNumber: puntero a puntero
 // para distinguir "no enviado" (nil) de "enviado vacío = volver a heredar el teléfono general".
 type UpdateSettingsInput struct {
@@ -77,6 +95,8 @@ type UpdateSettingsInput struct {
 	RequirePaymentValidation *bool
 	EmitSaleOnDispatch       *bool
 	EmitSaleTarget           *string // nota_venta | 03 | 01
+	HeroStyle      *string
+	PaymentMethods *[]PaymentMethod
 }
 
 func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.TenantEcommerceSettings, error) {
@@ -136,6 +156,24 @@ func (s *EcommerceService) UpdateSettings(input UpdateSettingsInput) (*database.
 			return nil, fmt.Errorf("comprobante por defecto inválido: use nota_venta, 03 o 01")
 		}
 		upd["emit_sale_target"] = t
+	}
+	if input.HeroStyle != nil {
+		v := strings.TrimSpace(*input.HeroStyle)
+		if v != "split" && v != "image" {
+			return nil, fmt.Errorf("hero_style inválido: %q", v)
+		}
+		upd["hero_style"] = v
+	}
+	if input.PaymentMethods != nil {
+		ms, err := NormalizePaymentMethods(*input.PaymentMethods)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(ms)
+		if err != nil {
+			return nil, err
+		}
+		upd["payment_methods_json"] = string(raw)
 	}
 	if len(upd) > 0 {
 		if err := s.db.Model(&database.TenantEcommerceSettings{}).Where("id = ?", 1).Updates(upd).Error; err != nil {
@@ -242,8 +280,9 @@ func (s *EcommerceService) ReorderSliders(orderedIDs []uint) error {
 // ── Catálogo público ─────────────────────────────────────────────────
 
 type PublicCategory struct {
-	ID   uint   `json:"id"`
-	Name string `json:"name"`
+	ID       uint   `json:"id"`
+	Name     string `json:"name"`
+	ImageURL string `json:"image_url"`
 }
 
 // PriceBounds min/max de precio entre los productos publicados en el Catálogo Digital. Se
@@ -261,17 +300,81 @@ func (s *EcommerceService) PriceBounds() (float64, float64, error) {
 	return row.Min, row.Max, err
 }
 
-// PublicCategories categorías con al menos un producto activo publicado en el catálogo.
+// PublicCategories categorías con al menos un producto activo publicado en el catálogo. La tienda es de todo el negocio, sin
+// mirar sucursal: muestra las categorías de todas las sucursales y UNIFICA por nombre las repetidas (la «Bebidas» de cada
+// local sale una sola vez, con el id de la primera; ver PublicCategoryIDsLike para filtrar por ella).
 func (s *EcommerceService) PublicCategories() ([]PublicCategory, error) {
-	var rows []PublicCategory
+	var rows []struct {
+		ID        uint
+		Name      string
+		ImageURL  string
+		SortOrder int
+	}
 	err := s.db.Table("tenant_categories c").
-		Select("DISTINCT c.id, c.name").
+		Select("DISTINCT c.id, c.name, c.image_url, c.sort_order").
 		Joins("JOIN tenant_products p ON p.category_id = c.id").
 		Where("p.show_in_digital_catalog = ? AND p.active = ? AND p.deleted_at IS NULL", true, true).
 		Where("c.deleted_at IS NULL").
-		Order("c.name ASC").
+		Order("c.sort_order ASC, c.name ASC, c.id ASC").
 		Scan(&rows).Error
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PublicCategory, 0, len(rows))
+	seen := map[string]int{} // nombre en minúsculas → posición en out
+	for _, r := range rows {
+		key := strings.ToLower(strings.TrimSpace(r.Name))
+		if i, ok := seen[key]; ok {
+			if out[i].ImageURL == "" {
+				out[i].ImageURL = r.ImageURL // la primera con imagen la aporta
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, PublicCategory{ID: r.ID, Name: r.Name, ImageURL: r.ImageURL})
+	}
+	return out, nil
+}
+
+// PublicCategoryIDsLike ids de todas las categorías que se llaman igual que la dada (la unificación de PublicCategories).
+// Una sola, la propia, si no se repite.
+func (s *EcommerceService) PublicCategoryIDsLike(categoryID uint) []uint {
+	var cat database.TenantCategory
+	if err := s.db.Select("id", "name").First(&cat, categoryID).Error; err != nil {
+		return []uint{categoryID}
+	}
+	var ids []uint
+	if err := s.db.Model(&database.TenantCategory{}).
+		Where("LOWER(name) = ?", strings.ToLower(strings.TrimSpace(cat.Name))).Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+		return []uint{categoryID}
+	}
+	return ids
+}
+
+// PublicProductGallery imágenes de un producto publicado en el Catálogo Digital: la principal primero y
+// después las de la galería, en orden. Un producto no publicado o inactivo no existe para el público.
+func (s *EcommerceService) PublicProductGallery(productID uint) ([]string, error) {
+	var p database.TenantProduct
+	if err := s.db.Select("id", "image_url").
+		Where("id = ? AND show_in_digital_catalog = ? AND active = ?", productID, true, true).
+		First(&p).Error; err != nil {
+		return nil, errors.New("producto no encontrado")
+	}
+	urls := make([]string, 0, 1+database.MaxProductGalleryImages)
+	if u := strings.TrimSpace(p.ImageURL); u != "" {
+		urls = append(urls, u)
+	}
+	var extra []string
+	if err := s.db.Model(&database.TenantProductImage{}).Where("product_id = ?", productID).
+		Order("sort_order ASC, id ASC").Pluck("url", &extra).Error; err != nil {
+		return nil, err
+	}
+	for _, u := range extra {
+		if u = strings.TrimSpace(u); u != "" {
+			urls = append(urls, u)
+		}
+	}
+	return urls, nil
 }
 
 // PublicProducts reusa ProductService.ListReport (ya trae stock_total/stock_by_branch) filtrando
@@ -282,11 +385,15 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 	psvc := productservice.NewProductService(s.db)
 	params := productservice.ProductListParams{
 		Query:                    query,
-		CategoryID:               categoryID,
 		ActiveOnly:               true,
 		ShowInDigitalCatalogOnly: true,
 		MinPrice:                 minPrice,
 		MaxPrice:                 maxPrice,
+		SortBy:                   "catalog", // agrupado por categoría, no por orden de registro
+	}
+	if categoryID > 0 {
+		// Las categorías repetidas por nombre (una por sucursal) se ven como una sola en la tienda.
+		params.CategoryIDs = s.PublicCategoryIDsLike(categoryID)
 	}
 	if perPage > 0 {
 		if page < 1 {
@@ -311,6 +418,18 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 			reservedByProduct, _ = stockreserve.ReservedByProduct(s.db, 0, ids)
 		}
 	}
+	ids := make([]uint, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.ID)
+	}
+	withUnits := map[uint]bool{}
+	if len(ids) > 0 {
+		var unitProducts []uint
+		s.db.Model(&database.TenantProductSaleUnit{}).Where("product_id IN ? AND active = ?", ids, true).Distinct().Pluck("product_id", &unitProducts)
+		for _, id := range unitProducts {
+			withUnits[id] = true
+		}
+	}
 	for i := range items {
 		if showStock && reservedByProduct[items[i].ID] > 0 {
 			items[i].StockTotal -= reservedByProduct[items[i].ID]
@@ -318,10 +437,18 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 				items[i].StockTotal = 0
 			}
 		}
+		items[i].HasSaleUnits = withUnits[items[i].ID]
 		// PurchasePrice (costo/precio de compra) es dato interno del tenant: nunca debe viajar en
 		// esta respuesta pública sin autenticación, sin importar la config de "Mostrar stock".
 		items[i].PurchasePrice = 0
-		if !showStock {
+		// Esta respuesta no requiere autenticación: NUNCA expone el stock por sucursal, el nombre de las sucursales ni los
+		// números de serie (datos internos del tenant), sin importar "Mostrar stock". La tienda solo usa stock_total.
+		items[i].StockByBranch = nil
+		items[i].Serials = nil
+		items[i].SerialCount = 0
+		if showStock {
+			items[i].StockByPresentation = aggregatePresentationStock(items[i].StockByPresentation)
+		} else {
 			items[i].StockTotal = 0
 			items[i].StockByBranch = nil
 			items[i].Serials = nil
@@ -332,9 +459,34 @@ func (s *EcommerceService) PublicProducts(query string, categoryID uint, minPric
 			for j := range items[i].Presentations {
 				items[i].Presentations[j].Stock = 0
 			}
+			items[i].StockByPresentation = nil
 		}
 	}
 	return s.attachPublicCombos(items, showStock), total, nil
+}
+
+// aggregatePresentationStock suma el stock de cada presentación entre sucursales y descarta la identidad de la sucursal
+// (branch_id=0, sin nombre): se conserva la disponibilidad por presentación sin revelar cómo se reparte el inventario.
+func aggregatePresentationStock(rows []productservice.PresentationStockRow) []productservice.PresentationStockRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	order := make([]uint, 0, len(rows))
+	byID := map[uint]*productservice.PresentationStockRow{}
+	for _, r := range rows {
+		agg, ok := byID[r.PresentationID]
+		if !ok {
+			agg = &productservice.PresentationStockRow{PresentationID: r.PresentationID, PresentationName: r.PresentationName}
+			byID[r.PresentationID] = agg
+			order = append(order, r.PresentationID)
+		}
+		agg.Quantity += r.Quantity
+	}
+	out := make([]productservice.PresentationStockRow, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out
 }
 
 // ── Pedidos ──────────────────────────────────────────────────────────
@@ -347,6 +499,13 @@ type OrderItemInput struct {
 	Name      string  `json:"name"`
 	Quantity  float64 `json:"quantity"`
 	UnitPrice float64 `json:"unit_price"`
+	// Elección del cliente (solo IDs: el servidor resuelve nombre y precio, ver order_options.go).
+	PresentationID    *uint  `json:"presentation_id,omitempty"`
+	SaleUnitID        *uint  `json:"sale_unit_id,omitempty"`
+	ModifierOptionIDs []uint `json:"modifier_option_ids,omitempty"`
+	// ModifiersJSON/Detail los arma el servidor al guardar el pedido; se copian a la venta al convertir.
+	ModifiersJSON string `json:"modifiers_json,omitempty"`
+	Detail        string `json:"detail,omitempty"`
 	// ComboJSON: elección del cliente en un combo (mismo formato que la venta); vacío si no es combo.
 	ComboJSON string `json:"combo_json,omitempty"`
 }

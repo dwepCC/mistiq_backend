@@ -115,7 +115,10 @@ func seedDefaultWalkInContact(tx *gorm.DB, in TenantSeedInput) (uint, error) {
 	err := tx.Where("doc_type = ? AND doc_number = ?", "0", "99999999").First(&c).Error
 	if err == nil {
 		if !c.IsDefaultWalkIn {
-			_ = tx.Model(&c).Update("is_default_walkin", true).Error
+			// Nombre real de columna: "is_default_walk_in" (naming por defecto de GORM a partir
+			// del campo Go IsDefaultWalkIn) — no "is_default_walkin" (ver incidente en
+			// v035_merge_duplicate_contacts.go).
+			_ = tx.Model(&c).Update("is_default_walk_in", true).Error
 		}
 		return c.ID, nil
 	}
@@ -131,8 +134,9 @@ func seedDefaultWalkInContact(tx *gorm.DB, in TenantSeedInput) (uint, error) {
 		TradeName:       "Público en general",
 		Address:         addr,
 		Ubigeo:          ubi,
-		Phone:           strings.TrimSpace(in.Phone),
-		Email:           strings.TrimSpace(in.Email),
+		// Sin teléfono ni correo: "Clientes Varios" es el público en general, no la empresa. Antes se copiaban
+		// los de la empresa y, al enviar un comprobante a ese cliente, el correo se sugería (y se enviaba) a la
+		// propia empresa en lugar de al cliente real.
 		IsDefaultWalkIn: true,
 		Active:          true,
 	}
@@ -197,6 +201,7 @@ func seedDocumentSeries(tx *gorm.DB, branchID uint) error {
 		// V073 la siembra para tenants existentes; aquí, porque esa migración corre antes
 		// de que exista la sucursal y no alcanza a crearla en un tenant nuevo.
 		{BranchID: branchID, DocType: "Cotización", SunatCode: "QT", Category: "cotizacion", Series: "COT01", Correlative: 1, Active: true},
+		{BranchID: branchID, DocType: "Orden de compra", SunatCode: "OC", Category: "orden_compra", Series: "OC01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_CREDITO", SunatCode: "07", Category: "nota_credito", Series: "FC01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_CREDITO", SunatCode: "07", Category: "nota_credito", Series: "BC01", Correlative: 1, Active: true},
 		{BranchID: branchID, DocType: "NOTA_DEBITO", SunatCode: "08", Category: "nota_debito", Series: "FD01", Correlative: 1, Active: true},

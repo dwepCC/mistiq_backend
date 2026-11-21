@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	"tukifac/pkg/branchscope"
 
 	billingsvc "tukifac/internal/billing/service"
 	"tukifac/pkg/billinglock"
@@ -22,6 +23,7 @@ func ProcessJob(job fiscalqueue.Job) error {
 		return err
 	}
 	defer database.ReleaseTenantDB(job.TenantDB)
+	db = branchscope.System(db, "fiscal worker: procesamiento de job")
 
 	svc := billingsvc.NewBillingService(db)
 	tenantID := job.TenantID

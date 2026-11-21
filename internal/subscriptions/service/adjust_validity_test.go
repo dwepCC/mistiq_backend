@@ -235,20 +235,26 @@ func TestListMarcaUnaSolaSuscripcionVigente(t *testing.T) {
 
 	// Tres renovaciones: las dos primeras quedaron expiradas al renovar, pero con end_date
 	// todavía futura (renovación anticipada). La tercera es la vigente.
+	// Las fechas son relativas a hoy: con fechas fijas la «vigente» vencía con el paso del tiempo y la prueba
+	// fallaba sola (pasó el 1-nov-2026).
+	today := time.Now().In(saas.LimaLocation())
+	day := func(offset int) time.Time {
+		return lima(today.Year(), today.Month(), today.Day()).AddDate(0, 0, offset)
+	}
 	seed := []struct {
 		status  string
 		end     time.Time
 		created time.Time
 	}{
-		{database.SaasSubExpired, lima(2026, 8, 30), time.Date(2026, 7, 20, 16, 0, 0, 0, time.UTC)},
-		{database.SaasSubExpired, lima(2026, 10, 30), time.Date(2026, 8, 4, 12, 21, 0, 0, time.UTC)},
-		{database.SaasSubActive, lima(2026, 11, 1), time.Date(2026, 8, 4, 12, 23, 0, 0, time.UTC)},
+		{database.SaasSubExpired, day(10), today.AddDate(0, 0, -60)},
+		{database.SaasSubExpired, day(20), today.AddDate(0, 0, -30)},
+		{database.SaasSubActive, day(30), today.AddDate(0, 0, -30).Add(2 * time.Minute)},
 	}
 	var vigenteID uint
 	for _, s := range seed {
 		sub := database.SaasSubscription{
 			TenantID: tenant.ID, PlanID: plan.ID, BillingCycle: "monthly",
-			StartDate: time.Date(2026, 7, 20, 0, 0, 0, 0, saas.LimaLocation()),
+			StartDate: today.AddDate(0, 0, -60),
 			EndDate:   s.end, Status: s.status, CreatedAt: s.created,
 		}
 		if err := db.Create(&sub).Error; err != nil {

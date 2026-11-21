@@ -47,6 +47,11 @@ type retentionPaymentInput struct {
 	Fecha   string  `json:"fecha"`
 }
 
+// exchangeRateLookup consulta el tipo de cambio por día (AAAA-MM-DD); variable para poder inyectarlo en tests.
+var exchangeRateLookup = func(day string) (*exchangerate.QueryResult, error) {
+	return exchangerate.DefaultService().GetExchangeRate(day)
+}
+
 type retentionExchangeInput struct {
 	MonedaRef string  `json:"moneda_ref"`
 	MonedaObj string  `json:"moneda_obj"`
@@ -168,18 +173,32 @@ func normalizeFiscalMoneda(m string) string {
 	return m
 }
 
-func fiscalDateOnly(iso string) string {
-	iso = strings.TrimSpace(iso)
-	if iso == "" {
-		return time.Now().Format("2006-01-02")
+// fiscalDateTime lleva una fecha de entrada (solo día, con o sin hora, RFC3339) al formato que
+// exige el facturador para TODA fecha de retención/percepción: Y-m-d\TH:i:sP (RFC3339 con
+// offset de Lima). Un valor vacío equivale a "hoy" en Lima, como antes. Ver
+// facturador.FiscalDateTimeFromInput para las reglas de zona horaria.
+func fiscalDateTime(value, label string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return facturador.FormatFiscalDateTime(time.Now()), nil
 	}
-	if t, err := time.Parse(time.RFC3339, iso); err == nil {
-		return t.Format("2006-01-02")
+	out, err := facturador.FiscalDateTimeFromInput(value)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", label, err)
 	}
-	if len(iso) >= 10 {
-		return iso[:10]
+	return out, nil
+}
+
+// fiscalCalendarDay devuelve el día (AAAA-MM-DD, Lima) de una fecha de entrada; vacío = hoy en Lima.
+// Se usa donde se necesita un día y no un instante (consulta de tipo de cambio).
+func fiscalCalendarDay(value, label string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return facturador.FiscalCalendarDay(facturador.FormatFiscalDateTime(time.Now()))
 	}
-	return iso
+	out, err := facturador.FiscalCalendarDay(value)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", label, err)
+	}
+	return out, nil
 }
 
 func (s *BillingService) resolveDetailExchange(moneda string, fechaEmision string, manual *retentionExchangeInput) (*facturador.RetentionExchange, error) {
@@ -196,9 +215,14 @@ func (s *BillingService) resolveDetailExchange(moneda string, fechaEmision strin
 		if ref == "" {
 			ref = moneda
 		}
-		fecha := fiscalDateOnly(manual.Fecha)
-		if fecha == "" {
-			fecha = fiscalDateOnly(fechaEmision)
+		// Fecha del tipo de cambio: la indicada o, si falta, la del comprobante relacionado.
+		fuente := manual.Fecha
+		if strings.TrimSpace(fuente) == "" {
+			fuente = fechaEmision
+		}
+		fecha, err := fiscalDateTime(fuente, "fecha del tipo de cambio")
+		if err != nil {
+			return nil, err
 		}
 		return &facturador.RetentionExchange{
 			MonedaRef: ref,
@@ -207,8 +231,16 @@ func (s *BillingService) resolveDetailExchange(moneda string, fechaEmision strin
 			Fecha:     fecha,
 		}, nil
 	}
-	fecha := fiscalDateOnly(fechaEmision)
-	res, err := exchangerate.DefaultService().GetExchangeRate(fecha)
+	// La consulta del tipo de cambio es por DÍA (AAAA-MM-DD de Lima); el payload lleva el datetime.
+	dia, err := fiscalCalendarDay(fechaEmision, "fecha del comprobante relacionado")
+	if err != nil {
+		return nil, err
+	}
+	fecha, err := fiscalDateTime(fechaEmision, "fecha del comprobante relacionado")
+	if err != nil {
+		return nil, err
+	}
+	res, err := exchangeRateLookup(dia)
 	if err != nil {
 		return nil, fmt.Errorf("tipo de cambio: %w", err)
 	}
@@ -217,7 +249,7 @@ func (s *BillingService) resolveDetailExchange(moneda string, fechaEmision strin
 		if res != nil && res.ErrorMessage != "" {
 			msg = res.ErrorMessage
 		}
-		return nil, fmt.Errorf("tipo de cambio USD/PEN (%s): %s", fecha, msg)
+		return nil, fmt.Errorf("tipo de cambio USD/PEN (%s): %s", dia, msg)
 	}
 	return &facturador.RetentionExchange{
 		MonedaRef: moneda,
@@ -240,13 +272,15 @@ func mapPaymentsInput(pagos []retentionPaymentInput, defaultMoneda, defaultFecha
 		if p.Importe <= 0 {
 			return nil, fmt.Errorf("pago/cobro #%d: importe debe ser mayor a cero", i+1)
 		}
-		fecha := strings.TrimSpace(p.Fecha)
-		if fecha == "" {
-			fecha = fiscalDateOnly(defaultFecha)
-		} else {
-			fecha = fiscalDateOnly(fecha)
+		fuente := strings.TrimSpace(p.Fecha)
+		if fuente == "" {
+			fuente = defaultFecha
 		}
-		out[i] = facturador.RetentionPayment{
+		fecha, err := fiscalDateTime(fuente, fmt.Sprintf("pago/cobro #%d: fecha", i+1))
+		if err != nil {
+			return nil, err
+		}
+		out[i] =facturador.RetentionPayment{
 			Moneda:  moneda,
 			Importe: roundMoney(p.Importe),
 			Fecha:   fecha,
@@ -268,6 +302,29 @@ type retentionDetailBuildInput struct {
 	TipoCambio     *retentionExchangeInput
 }
 
+var relatedDocNumRe = regexp.MustCompile(`^[A-Za-z0-9]{1,4}-\d{1,8}$`)
+var relatedDocNumElectronicRe = regexp.MustCompile(`^[FBEfbe][A-Za-z0-9]{3}-\d{1,8}$`)
+
+// validateRelatedDocument corta antes de enviar lo que SUNAT/Greenter rechaza sin explicar (el facturador solo devuelve
+// «Server Error»): número con formato SERIE-CORRELATIVO y fecha del comprobante relacionado no posterior a la emisión.
+func validateRelatedDocument(idx int, tipoDoc, numDoc, docFecha, emisionFecha string) error {
+	tipoDoc = strings.TrimSpace(tipoDoc)
+	numDoc = strings.TrimSpace(numDoc)
+	re := relatedDocNumRe
+	if tipoDoc == "01" || tipoDoc == "03" || tipoDoc == "07" || tipoDoc == "08" {
+		re = relatedDocNumElectronicRe
+	}
+	if !re.MatchString(numDoc) {
+		return fmt.Errorf("detalle #%d: el número de documento %q no tiene el formato SERIE-CORRELATIVO (ej. F001-00000123); corrija la serie y el número en la compra/venta origen", idx, numDoc)
+	}
+	dDoc, err1 := facturador.FiscalCalendarDay(docFecha)
+	dEm, err2 := facturador.FiscalCalendarDay(emisionFecha)
+	if err1 == nil && err2 == nil && dDoc > dEm {
+		return fmt.Errorf("detalle #%d: la fecha del comprobante relacionado (%s) es posterior a la fecha de emisión (%s)", idx, dDoc, dEm)
+	}
+	return nil
+}
+
 func (s *BillingService) buildRetentionDetails(details []retentionDetailBuildInput, docFechaEmision string) ([]facturador.RetentionDetail, error) {
 	if len(details) == 0 {
 		return nil, errors.New("se requiere al menos un comprobante relacionado")
@@ -276,6 +333,9 @@ func (s *BillingService) buildRetentionDetails(details []retentionDetailBuildInp
 	for i, d := range details {
 		if strings.TrimSpace(d.TipoDoc) == "" || strings.TrimSpace(d.NumDoc) == "" {
 			return nil, fmt.Errorf("detalle #%d: tipo y número de documento son obligatorios", i+1)
+		}
+		if err := validateRelatedDocument(i+1, d.TipoDoc, d.NumDoc, d.FechaEmision, docFechaEmision); err != nil {
+			return nil, err
 		}
 		if d.ImpTotal <= 0 {
 			return nil, fmt.Errorf("detalle #%d: importe total debe ser mayor a cero", i+1)
@@ -309,7 +369,14 @@ func (s *BillingService) buildRetentionDetails(details []retentionDetailBuildInp
 		if err != nil {
 			return nil, fmt.Errorf("detalle #%d: %w", i+1, err)
 		}
-		fechaDoc := fiscalDateOnly(d.FechaEmision)
+		fechaDoc, err := fiscalDateTime(d.FechaEmision, fmt.Sprintf("detalle #%d: fecha de emisión", i+1))
+		if err != nil {
+			return nil, err
+		}
+		fechaRetFiscal, err := fiscalDateTime(fechaRet, fmt.Sprintf("detalle #%d: fecha de retención", i+1))
+		if err != nil {
+			return nil, err
+		}
 		out[i] = facturador.RetentionDetail{
 			TipoDoc:        strings.TrimSpace(d.TipoDoc),
 			NumDoc:         strings.TrimSpace(d.NumDoc),
@@ -317,7 +384,7 @@ func (s *BillingService) buildRetentionDetails(details []retentionDetailBuildInp
 			ImpTotal:       roundMoney(d.ImpTotal),
 			Moneda:         moneda,
 			Pagos:          pagos,
-			FechaRetencion: fiscalDateOnly(fechaRet),
+			FechaRetencion: fechaRetFiscal,
 			ImpRetenido:    roundMoney(d.ImpRetenido),
 			ImpPagar:       roundMoney(d.ImpPagar),
 			TipoCambio:     exchange,
@@ -348,6 +415,9 @@ func (s *BillingService) buildPerceptionDetails(details []perceptionDetailBuildI
 		if strings.TrimSpace(d.TipoDoc) == "" || strings.TrimSpace(d.NumDoc) == "" {
 			return nil, fmt.Errorf("detalle #%d: tipo y número de documento son obligatorios", i+1)
 		}
+		if err := validateRelatedDocument(i+1, d.TipoDoc, d.NumDoc, d.FechaEmision, docFechaEmision); err != nil {
+			return nil, err
+		}
 		if d.ImpTotal <= 0 {
 			return nil, fmt.Errorf("detalle #%d: importe total debe ser mayor a cero", i+1)
 		}
@@ -377,14 +447,22 @@ func (s *BillingService) buildPerceptionDetails(details []perceptionDetailBuildI
 		if err != nil {
 			return nil, fmt.Errorf("detalle #%d: %w", i+1, err)
 		}
+		fechaDoc, err := fiscalDateTime(d.FechaEmision, fmt.Sprintf("detalle #%d: fecha de emisión", i+1))
+		if err != nil {
+			return nil, err
+		}
+		fechaPercFiscal, err := fiscalDateTime(fechaPerc, fmt.Sprintf("detalle #%d: fecha de percepción", i+1))
+		if err != nil {
+			return nil, err
+		}
 		out[i] = facturador.PerceptionDetail{
 			TipoDoc:         strings.TrimSpace(d.TipoDoc),
 			NumDoc:          strings.TrimSpace(d.NumDoc),
-			FechaEmision:    fiscalDateOnly(d.FechaEmision),
+			FechaEmision:    fechaDoc,
 			ImpTotal:        roundMoney(d.ImpTotal),
 			Moneda:          moneda,
 			Cobros:          cobros,
-			FechaPercepcion: fiscalDateOnly(fechaPerc),
+			FechaPercepcion: fechaPercFiscal,
 			ImpPercibido:    roundMoney(d.ImpPercibido),
 			ImpCobrar:       roundMoney(d.ImpCobrar),
 			TipoCambio:      exchange,
@@ -515,6 +593,23 @@ func validateReversionDetail(tipoDoc, serie, correlativo, motivo string) error {
 	}
 	if tipoDoc == "40" && !perceptionSeriesRe.MatchString(serie) {
 		return errors.New("serie de percepción a revertir debe tener formato P###")
+	}
+	return nil
+}
+
+// validateFiscalEmissionNotFuture rechaza una fecha de emisión posterior a hoy (día de Lima): SUNAT no admite comprobantes
+// con fecha futura. La fecha ya viene normalizada por fiscalDateTime.
+func validateFiscalEmissionNotFuture(fechaEmision string) error {
+	day, err := facturador.FiscalCalendarDay(fechaEmision)
+	if err != nil {
+		return nil
+	}
+	today, err := facturador.FiscalCalendarDay(facturador.FormatFiscalDateTime(time.Now()))
+	if err != nil {
+		return nil
+	}
+	if day > today {
+		return fmt.Errorf("la fecha de emisión (%s) no puede ser posterior a hoy (%s)", day, today)
 	}
 	return nil
 }

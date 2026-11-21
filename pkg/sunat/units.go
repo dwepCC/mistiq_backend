@@ -12,6 +12,10 @@ var catalog03UnitCodes = map[string]struct{}{
 	"MMK": {}, "MMQ": {}, "MLL": {}, "MU": {}, "ONZ": {}, "PF": {}, "PK": {}, "PR": {}, "FOT": {},
 	"FTK": {}, "FTQ": {}, "C62": {}, "PG": {}, "ST": {}, "INH": {}, "RM": {}, "DR": {}, "STN": {},
 	"LTN": {}, "TNE": {}, "TU": {}, "NIU": {}, "ZZ": {}, "GLL": {}, "YRD": {}, "YDK": {},
+	// Resto del catálogo sembrado en tenant_units (pkg/database/units_catalog_seed.go). Sin estos,
+	// un producto en Millar (MIL), Hora (HUR), Saco (SA)… se declaraba como NIU al vender o cotizar.
+	"AV": {}, "BT": {}, "CH": {}, "HD": {}, "HT": {}, "HUR": {}, "JG": {}, "JR": {}, "MIL": {},
+	"QD": {}, "RD": {}, "RL": {}, "SA": {}, "SEC": {}, "U2": {}, "UM": {},
 }
 
 // unitAliases mapea símbolos comerciales o códigos legacy incorrectos → catálogo SUNAT 03.

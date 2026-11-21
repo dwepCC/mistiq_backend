@@ -246,7 +246,7 @@ func TestBillTable_partialPaymentKeepsSessionOpen(t *testing.T) {
 		DocType:      "03",
 		IssueDate:    time.Now(),
 		CloseSession: false,
-		Payments:     []PaymentInput{{Method: "card", Amount: 35.4}},
+		Payments:     []PaymentInput{{Method: "cash", Amount: 35.4}},
 	}, tax.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestBillTable_fullPaymentClosesSession(t *testing.T) {
 		DocType:      "03",
 		IssueDate:    time.Now(),
 		CloseSession: true,
-		Payments:     []PaymentInput{{Method: "card", Amount: 23.6}},
+		Payments:     []PaymentInput{{Method: "cash", Amount: 23.6}},
 	}, tax.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +331,49 @@ func TestBillTable_fullPaymentClosesSession(t *testing.T) {
 	db.First(&tbl, table.ID)
 	if tbl.Status != "libre" {
 		t.Fatalf("mesa debe quedar libre tras cobro total, got %s", tbl.Status)
+	}
+}
+
+// El vuelto solo puede salir de efectivo: facturar una mesa pagando de más con un solo método
+// electrónico (sin ninguna línea de efectivo) debe rechazarse, mismo criterio que
+// sale_service.go::sumNonCashDirectPayments — regresión de la corrección de vuelto 2026-09-25.
+func TestBillTable_NonCashOverpayRejected(t *testing.T) {
+	db, table := setupTableSessionTestDB(t)
+	svc := New(db)
+
+	sess, err := svc.OpenTableExtended(openInput(table.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comanda := database.TenantComanda{
+		SessionID: sess.ID, ProductCode: "P1", ProductName: "Arroz", Quantity: 1, UnitPrice: 20,
+		Status: "pendiente", IgvAffectationType: "10",
+	}
+	if err := db.Create(&comanda).Error; err != nil {
+		t.Fatal(err)
+	}
+	series := database.TenantDocumentSeries{
+		BranchID: 1, DocType: "Boleta", SunatCode: "03", Series: "B001", Correlative: 1, Active: true,
+	}
+	if err := db.Create(&series).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.BillTable(BillInput{
+		SessionID:    sess.ID,
+		UserID:       1,
+		SeriesID:     series.ID,
+		DocType:      "03",
+		IssueDate:    time.Now(),
+		CloseSession: true,
+		Payments:     []PaymentInput{{Method: "card", Amount: 30}},
+	}, tax.DefaultConfig())
+	if err == nil {
+		t.Fatal("se esperaba un error: tarjeta (30) supera el total (23.60) sin ninguna línea de efectivo")
+	}
+	var after database.TenantTableSession
+	db.First(&after, sess.ID)
+	if after.Status == "billed" {
+		t.Fatal("la sesión no debía facturarse tras el rechazo")
 	}
 }
 
@@ -438,7 +481,7 @@ func TestAddOrder_afterSessionBilledRejected(t *testing.T) {
 	_, err = svc.BillTable(BillInput{
 		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03",
 		IssueDate: time.Now(), CloseSession: true,
-		Payments:  []PaymentInput{{Method: "card", Amount: 23.6}},
+		Payments:  []PaymentInput{{Method: "cash", Amount: 23.6}},
 	}, tax.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -502,7 +545,7 @@ func TestBillTable_concurrentOnlyOneSucceeds(t *testing.T) {
 	billInput := BillInput{
 		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03",
 		IssueDate: time.Now(), CloseSession: true,
-		Payments:  []PaymentInput{{Method: "card", Amount: 23.6}},
+		Payments:  []PaymentInput{{Method: "cash", Amount: 23.6}},
 	}
 	taxCfg := tax.DefaultConfig()
 

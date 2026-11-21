@@ -50,14 +50,36 @@ const maxQuotaPeriods = 600
 // antes de tiempo: la nueva arranca hoy pero termina N meses después del vencimiento
 // anterior).
 func QuotaPeriodBoundsAt(sub *database.SaasSubscription, at time.Time) (start, end time.Time, index int) {
-	anchor := quotaAnchor(sub)
-	subEnd := sub.EndDate.In(lima())
+	return quotaBoundsFor(quotaAnchor(sub), sub.EndDate, at)
+}
+
+// CycleQuotaPeriodBoundsAt: igual que QuotaPeriodBoundsAt pero anclado al INICIO DEL CICLO DE
+// COBRO (la fecha de la renovación), no al inicio de la suscripción. Es lo que usa el consumo.
+//
+// Anclar a la fecha de registro desfasaba el cupo cuando la renovación no caía justo en el
+// aniversario —vigencia ajustada a mano, renovación anticipada o tardía—: el tenant pagaba un
+// mes nuevo pero el cupo seguía corriendo con el calendario del primer día de su suscripción,
+// y podía quedarse sin comprobantes recién renovado.
+func CycleQuotaPeriodBoundsAt(cycle *database.SaasBillingCycle, at time.Time) (start, end time.Time, index int) {
+	return quotaBoundsFor(calendarDateLima(cycle.PeriodStart), cycle.PeriodEnd, at)
+}
+
+// TotalCycleQuotaPeriods: cuántos meses de cuota cubre el ciclo de cobro ("mes 2 de 6").
+func TotalCycleQuotaPeriods(cycle *database.SaasBillingCycle) int {
+	if cycle == nil {
+		return 0
+	}
+	return lastQuotaIndexFor(calendarDateLima(cycle.PeriodStart), cycle.PeriodEnd) + 1
+}
+
+func quotaBoundsFor(anchor, endDate, at time.Time) (start, end time.Time, index int) {
+	subEnd := endDate.In(lima())
 	target := at.In(lima())
 	if target.Before(anchor) {
 		target = anchor
 	}
 
-	lastN := lastQuotaPeriodIndex(sub)
+	lastN := lastQuotaIndexFor(anchor, endDate)
 
 	// Avanzar mientras el siguiente período ya haya empezado, sin pasar del último: el
 	// tope evita que el fin-de-día de EndDate genere un período extra de unas horas.
@@ -82,8 +104,11 @@ func QuotaPeriodBoundsAt(sub *database.SaasSubscription, at time.Time) (start, e
 // lastQuotaPeriodIndex: índice (base 0) del último período de la suscripción. Un período
 // solo existe si empieza antes del último día de la suscripción.
 func lastQuotaPeriodIndex(sub *database.SaasSubscription) int {
-	anchor := quotaAnchor(sub)
-	subEndDay := calendarDateLima(sub.EndDate)
+	return lastQuotaIndexFor(quotaAnchor(sub), sub.EndDate)
+}
+
+func lastQuotaIndexFor(anchor, endDate time.Time) int {
+	subEndDay := calendarDateLima(endDate)
 	n := 0
 	for n+1 < maxQuotaPeriods && addMonthsClamped(anchor, n+1).Before(subEndDay) {
 		n++
@@ -120,8 +145,28 @@ func EnsureQuotaPeriod(tenantID uint) (*database.SaasDocumentQuotaPeriod, *datab
 	return out, sub, nil
 }
 
+// quotaCycleAt devuelve el ciclo de cobro que cubre la fecha at. Normalmente es el ciclo vigente, pero
+// tras una renovación anticipada el ciclo nuevo todavía no empezó: mientras tanto el cupo sigue
+// siendo el del ciclo que ya está corriendo.
+func quotaCycleAt(tx *gorm.DB, sub *database.SaasSubscription, cycle *database.SaasBillingCycle, at time.Time) *database.SaasBillingCycle {
+	if !calendarDateLima(cycle.PeriodStart).After(at.In(lima())) {
+		return cycle
+	}
+	var prev database.SaasBillingCycle
+	err := tx.Where("subscription_id = ? AND status = ? AND period_start <= ? AND period_end >= ?",
+		sub.ID, database.SaasInvoicePaid, at, at).
+		Order("period_start desc").First(&prev).Error
+	if err != nil {
+		return cycle
+	}
+	return &prev
+}
+
 // ensureQuotaPeriodTx crea el período si falta. El UNIQUE (subscription_id, period_start)
 // hace que dos emisiones simultáneas no puedan duplicarlo: la perdedora relee la fila.
+//
+// Los períodos se calculan desde el inicio del ciclo de cobro (fecha de renovación), no desde el
+// de la suscripción: ver CycleQuotaPeriodBoundsAt.
 func ensureQuotaPeriodTx(
 	tx *gorm.DB,
 	sub *database.SaasSubscription,
@@ -131,12 +176,20 @@ func ensureQuotaPeriodTx(
 	if sub == nil || cycle == nil {
 		return nil, ErrNoActiveCycle
 	}
-	start, end, index := QuotaPeriodBoundsAt(sub, at)
+	cycle = quotaCycleAt(tx, sub, cycle, at)
+	start, end, index := CycleQuotaPeriodBoundsAt(cycle, at)
+	if calendarDateLima(cycle.PeriodStart).After(at.In(lima())) {
+		// Ningún ciclo pagado cubre hoy y el vigente empieza más adelante (cobro adelantado, o el
+		// ciclo anterior quedó rechazado/en otra suscripción): abrir ya la ventana futura haría
+		// consumir su cupo antes de tiempo. Mientras tanto vale el cálculo desde el registro.
+		start, end, index = QuotaPeriodBoundsAt(sub, at)
+	}
 
 	var period database.SaasDocumentQuotaPeriod
 	err := tx.Where("subscription_id = ? AND period_start = ?", sub.ID, start).First(&period).Error
 	if err == nil {
 		syncPeriodQuotaFromPlanTx(tx, &period, sub.PlanID)
+		syncPeriodWindowTx(tx, &period, cycle.ID, end, index)
 		return &period, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -147,6 +200,31 @@ func ensureQuotaPeriodTx(
 	if err := tx.First(&plan, sub.PlanID).Error; err != nil {
 		return nil, err
 	}
+
+	// Lo ya consumido del plan dentro de esta ventana cuenta: pasa cuando el cupo se re-ancla a la
+	// renovación y la ventana nueva arranca antes de hoy. Sin esto el tenant recibiría el cupo
+	// completo otra vez por documentos que ya gastó desde esa fecha.
+	var alreadyUsed int64
+	tx.Model(&database.SaasElectronicDocumentUsage{}).
+		Where("subscription_id = ? AND consumed_from = ? AND consumed_at >= ? AND consumed_at < ?",
+			sub.ID, "plan_base", start, end).
+		Count(&alreadyUsed)
+
+	// Transición: un período anclado al registro (el esquema anterior) que ya cubre hoy se
+	// respeta mientras le quede igual o más cupo que el que daría la ventana nueva. Así el
+	// re-anclaje a la renovación corrige a quien se quedó sin cupo, pero nadie pierde el que ya
+	// tenía disponible por haber desplegado este cambio.
+	if !plan.IsUnlimitedDocuments {
+		var legacy database.SaasDocumentQuotaPeriod
+		if tx.Where("subscription_id = ? AND period_start <= ? AND period_end > ?", sub.ID, at, at).
+			Order("period_start desc").First(&legacy).Error == nil &&
+			!legacy.IsUnlimitedDocuments &&
+			legacy.DocumentsLimit-legacy.DocumentsUsed >= planLimitFromPlan(&plan)-int(alreadyUsed) {
+			syncPeriodQuotaFromPlanTx(tx, &legacy, sub.PlanID)
+			return &legacy, nil
+		}
+	}
+
 	period = database.SaasDocumentQuotaPeriod{
 		TenantID:             sub.TenantID,
 		SubscriptionID:       sub.ID,
@@ -157,7 +235,7 @@ func ensureQuotaPeriodTx(
 		PeriodIndex:          index,
 		IsUnlimitedDocuments: plan.IsUnlimitedDocuments,
 		DocumentsLimit:       planLimitFromPlan(&plan),
-		DocumentsUsed:        0,
+		DocumentsUsed:        int(alreadyUsed),
 	}
 	if err := tx.Create(&period).Error; err != nil {
 		if isDuplicateKey(err) {
@@ -167,6 +245,24 @@ func ensureQuotaPeriodTx(
 		return nil, err
 	}
 	return &period, nil
+}
+
+// syncPeriodWindowTx mantiene el fin, el índice y el ciclo del período alineados con el ciclo de
+// cobro: si el operador ajusta la vigencia, el cupo debe renovarse en la fecha nueva y no en la
+// que quedó guardada.
+func syncPeriodWindowTx(tx *gorm.DB, period *database.SaasDocumentQuotaPeriod, cycleID uint, end time.Time, index int) {
+	if period.PeriodEnd.Equal(end) && period.PeriodIndex == index && period.BillingCycleID == cycleID {
+		return
+	}
+	if tx.Model(period).Updates(map[string]interface{}{
+		"period_end":       end,
+		"period_index":     index,
+		"billing_cycle_id": cycleID,
+	}).Error == nil {
+		period.PeriodEnd = end
+		period.PeriodIndex = index
+		period.BillingCycleID = cycleID
+	}
 }
 
 // syncPeriodQuotaFromPlanTx alinea el cupo del período con el plan vigente (por si el

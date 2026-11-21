@@ -2,10 +2,13 @@ package service
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/money"
+	"tukifac/pkg/paymentcondition"
 	"tukifac/pkg/saas"
 	"tukifac/pkg/salescope"
 
@@ -131,7 +134,7 @@ func (s *DashboardService) GetDashboard(branchID uint, from, toExclusive time.Ti
 // restaurantSalesScope: ventas de la sucursal en el rango (mismo criterio que /api/sales).
 // No exige restaurant_session_id: NV/FE, ventas legacy y emisiones sin sesión también cuentan.
 func restaurantSalesScope(db *gorm.DB, branchID uint, from, toExclusive time.Time, filter DashboardFilter) *gorm.DB {
-	q := salescope.CommercialSales(db.Model(&database.TenantSale{})).
+	q := salescope.EmittedSalesNoNotes(db.Model(&database.TenantSale{})).
 		Where("issue_date >= ? AND issue_date < ?", from, toExclusive).
 		Where("status != ?", "cancelled")
 	if branchID > 0 {
@@ -184,7 +187,7 @@ func (s *DashboardService) loadSummary(branchID uint, from, toExclusive time.Tim
 	var agg salesAgg
 	err := restaurantSalesScope(s.db, branchID, from, toExclusive, filter).
 		Select(`
-			COALESCE(SUM(total), 0) AS total_sales,
+			COALESCE(SUM(CASE WHEN currency = 'USD' AND exchange_rate > 0 THEN (total - COALESCE(service_charge_amount, 0)) * exchange_rate ELSE (total - COALESCE(service_charge_amount, 0)) END), 0) AS total_sales,
 			COUNT(*) AS total_orders,
 			COUNT(DISTINCT CASE WHEN contact_id IS NOT NULL AND contact_id > 0 THEN contact_id END) AS clients_served
 		`).
@@ -197,7 +200,7 @@ func (s *DashboardService) loadSummary(branchID uint, from, toExclusive time.Tim
 	err = s.db.Table("tenant_sale_items si").
 		Select("COALESCE(SUM(si.quantity), 0)").
 		Joins("INNER JOIN tenant_sales s ON s.id = si.sale_id").
-		Scopes(salescope.ScopeCommercial("s")).
+		Scopes(salescope.ScopeEmittedNoNotes("s")).
 		Where("s.issue_date >= ? AND s.issue_date < ?", from, toExclusive).
 		Where("s.status != ?", "cancelled").
 		Scopes(branchScopeSales(branchID)).
@@ -298,82 +301,121 @@ func paymentLabel(bucket string) string {
 	}
 }
 
+// paymentBucket agrupa el código de método de pago en los cubos del dashboard.
+func paymentBucket(method string) string {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "cash", "efectivo":
+		return "efectivo"
+	case "card", "tarjeta":
+		return "tarjeta"
+	case "yape":
+		return "yape"
+	case "plin":
+		return "plin"
+	case "transfer", "transferencia":
+		return "transferencia"
+	default:
+		return "otros"
+	}
+}
+
+// loadSalesByPayment reparte el dinero de las ventas del período por método de pago.
+//
+// tenant_sale_payments.amount guarda lo que el cliente ENTREGÓ (puede superar el total de la venta
+// cuando hay vuelto). Sumarlo tal cual inflaba el efectivo (y el total del gráfico) con el vuelto. Se
+// reparte con money.AllocateSalePaymentReportAmounts, igual que el dashboard del ERP y el listado de
+// ventas: el vuelto se descuenta únicamente del efectivo y ningún método supera lo que cubrió la venta.
+// Una venta sin líneas de pago (histórico) se atribuye por tenant_sales.payment_method con su total.
+// Count = ventas distintas que usaron cada método.
 func (s *DashboardService) loadSalesByPayment(branchID uint, from, toExclusive time.Time, filter DashboardFilter, out *DashboardData) error {
-	branchClause := ""
-	userClause := ""
-	argsPayments := []interface{}{from, toExclusive}
-	argsHeader := []interface{}{from, toExclusive}
-	if branchID > 0 {
-		branchClause = " AND s.branch_id = ?"
-		argsPayments = append(argsPayments, branchID)
-		argsHeader = append(argsHeader, branchID)
+	var sales []struct {
+		ID            uint
+		Total         float64
+		PaymentMethod string
 	}
-	if filter.RestrictUser && filter.UserID > 0 {
-		userClause = " AND s.user_id = ?"
-		argsPayments = append(argsPayments, filter.UserID)
-		argsHeader = append(argsHeader, filter.UserID)
-	}
-
-	sql := `
-		SELECT bucket, COALESCE(SUM(amount), 0) AS total, COALESCE(SUM(cnt), 0) AS count FROM (
-			SELECT
-				CASE
-					WHEN LOWER(TRIM(tsp.method)) IN ('cash','efectivo') THEN 'efectivo'
-					WHEN LOWER(TRIM(tsp.method)) IN ('card','tarjeta') THEN 'tarjeta'
-					WHEN LOWER(TRIM(tsp.method)) = 'yape' THEN 'yape'
-					WHEN LOWER(TRIM(tsp.method)) = 'plin' THEN 'plin'
-					WHEN LOWER(TRIM(tsp.method)) IN ('transfer','transferencia') THEN 'transferencia'
-					ELSE 'otros'
-				END AS bucket,
-				tsp.amount AS amount,
-				1 AS cnt
-			FROM tenant_sale_payments tsp
-			INNER JOIN tenant_sales s ON s.id = tsp.sale_id
-			WHERE s.issue_date >= ? AND s.issue_date < ?
-				AND s.status != 'cancelled'
-				AND ` + salescope.CommercialWhere("s") + branchClause + userClause + `
-			UNION ALL
-			SELECT
-				CASE
-					WHEN LOWER(TRIM(s.payment_method)) IN ('cash','efectivo') THEN 'efectivo'
-					WHEN LOWER(TRIM(s.payment_method)) IN ('card','tarjeta') THEN 'tarjeta'
-					WHEN LOWER(TRIM(s.payment_method)) = 'yape' THEN 'yape'
-					WHEN LOWER(TRIM(s.payment_method)) = 'plin' THEN 'plin'
-					WHEN LOWER(TRIM(s.payment_method)) IN ('transfer','transferencia') THEN 'transferencia'
-					ELSE 'otros'
-				END AS bucket,
-				s.total AS amount,
-				1 AS cnt
-			FROM tenant_sales s
-			WHERE s.issue_date >= ? AND s.issue_date < ?
-				AND s.status != 'cancelled'
-				AND ` + salescope.CommercialWhere("s") + `
-				AND NOT EXISTS (SELECT 1 FROM tenant_sale_payments tsp WHERE tsp.sale_id = s.id)` + branchClause + userClause + `
-		) AS combined
-		GROUP BY bucket
-		ORDER BY total DESC
-	`
-	fullArgs := append(argsPayments, argsHeader...)
-
-	type payRow struct {
-		Bucket string  `gorm:"column:bucket"`
-		Total  float64 `gorm:"column:total"`
-		Count  int64   `gorm:"column:count"`
-	}
-	var rows []payRow
-	if err := s.db.Raw(sql, fullArgs...).Scan(&rows).Error; err != nil {
+	if err := restaurantSalesScope(s.db, branchID, from, toExclusive, filter).
+		Select("id, total, payment_method").Scan(&sales).Error; err != nil {
 		return err
 	}
 
-	out.SalesByPaymentMethod = make([]DashboardPaymentRow, 0, len(rows))
-	for _, r := range rows {
+	type payRow struct {
+		ID     uint
+		SaleID uint
+		Method string
+		Amount float64
+	}
+	var pays []payRow
+	if err := s.db.Table("tenant_sale_payments tsp").
+		Select("tsp.id AS id, tsp.sale_id AS sale_id, LOWER(TRIM(tsp.method)) AS method, tsp.amount AS amount").
+		Joins("INNER JOIN tenant_sales s ON s.id = tsp.sale_id").
+		Scopes(salescope.ScopeEmittedNoNotes("s")).
+		Where("s.issue_date >= ? AND s.issue_date < ?", from, toExclusive).
+		Where("s.status != ?", "cancelled").
+		Scopes(branchScopeSales(branchID)).
+		Scopes(userScopeSaleJoin(filter)).
+		Order("tsp.id ASC").
+		Scan(&pays).Error; err != nil {
+		return err
+	}
+	paysBySale := make(map[uint][]payRow, len(sales))
+	for _, p := range pays {
+		paysBySale[p.SaleID] = append(paysBySale[p.SaleID], p)
+	}
+
+	totals := map[string]float64{}
+	counts := map[string]int64{}
+	for _, sale := range sales {
+		rows := paysBySale[sale.ID]
+		if len(rows) == 0 {
+			b := paymentBucket(sale.PaymentMethod)
+			totals[b] += sale.Total
+			counts[b]++
+			continue
+		}
+		lines := make([]money.SalePaymentLine, 0, len(rows))
+		bucketByID := make(map[uint]string, len(rows))
+		for _, r := range rows {
+			bucketByID[r.ID] = paymentBucket(r.Method)
+			// El marcador de crédito no es dinero recibido: no entra a la base del vuelto.
+			if paymentcondition.IsCreditCode(r.Method) {
+				continue
+			}
+			lines = append(lines, money.SalePaymentLine{ID: r.ID, Amount: r.Amount, IsCash: money.IsCashMethod(r.Method)})
+		}
+		seen := map[string]struct{}{}
+		add := func(bucket string, amount float64) {
+			totals[bucket] += amount
+			if _, ok := seen[bucket]; !ok {
+				seen[bucket] = struct{}{}
+				counts[bucket]++
+			}
+		}
+		for id, amt := range money.AllocateSalePaymentReportAmounts(sale.Total, lines) {
+			add(bucketByID[id], amt)
+		}
+		for _, r := range rows {
+			if paymentcondition.IsCreditCode(r.Method) {
+				add(bucketByID[r.ID], r.Amount)
+			}
+		}
+	}
+
+	out.SalesByPaymentMethod = make([]DashboardPaymentRow, 0, len(totals))
+	for b, total := range totals {
 		out.SalesByPaymentMethod = append(out.SalesByPaymentMethod, DashboardPaymentRow{
-			Method: r.Bucket,
-			Label:  paymentLabel(r.Bucket),
-			Total:  r.Total,
-			Count:  r.Count,
+			Method: b,
+			Label:  paymentLabel(b),
+			Total:  money.RoundDisplay(total),
+			Count:  counts[b],
 		})
 	}
+	sort.Slice(out.SalesByPaymentMethod, func(i, j int) bool {
+		a, c := out.SalesByPaymentMethod[i], out.SalesByPaymentMethod[j]
+		if a.Total != c.Total {
+			return a.Total > c.Total
+		}
+		return a.Method < c.Method
+	})
 	return nil
 }
 
@@ -392,12 +434,12 @@ func (s *DashboardService) loadTopProducts(branchID uint, from, toExclusive time
 
 	var totalAmountAll float64
 	totalSQL := `
-		SELECT COALESCE(SUM(si.total), 0)
+		SELECT COALESCE(SUM(CASE WHEN s.currency = 'USD' AND s.exchange_rate > 0 THEN si.total * s.exchange_rate ELSE si.total END), 0)
 		FROM tenant_sale_items si
 		INNER JOIN tenant_sales s ON s.id = si.sale_id
 		WHERE s.issue_date >= ? AND s.issue_date < ?
 			AND s.status != 'cancelled'
-			AND ` + salescope.CommercialWhere("s") + branchClause + userClause
+			AND ` + salescope.EmittedWhereNoNotes("s") + branchClause + userClause
 	if err := s.db.Raw(totalSQL, args...).Scan(&totalAmountAll).Error; err != nil {
 		return err
 	}
@@ -413,13 +455,13 @@ func (s *DashboardService) loadTopProducts(branchID uint, from, toExclusive time
 			COALESCE(si.product_id, 0) AS product_id,
 			COALESCE(NULLIF(TRIM(p.name), ''), NULLIF(TRIM(si.description), ''), 'Sin nombre') AS product_name,
 			COALESCE(SUM(si.quantity), 0) AS quantity_sold,
-			COALESCE(SUM(si.total), 0) AS total_amount
+			COALESCE(SUM(CASE WHEN s.currency = 'USD' AND s.exchange_rate > 0 THEN si.total * s.exchange_rate ELSE si.total END), 0) AS total_amount
 		FROM tenant_sale_items si
 		INNER JOIN tenant_sales s ON s.id = si.sale_id
 		LEFT JOIN tenant_products p ON p.id = si.product_id
 		WHERE s.issue_date >= ? AND s.issue_date < ?
 			AND s.status != 'cancelled'
-			AND ` + salescope.CommercialWhere("s") + branchClause + userClause + `
+			AND ` + salescope.EmittedWhereNoNotes("s") + branchClause + userClause + `
 		GROUP BY COALESCE(si.product_id, 0), product_name
 		ORDER BY quantity_sold DESC
 		LIMIT ?
@@ -472,14 +514,14 @@ func (s *DashboardService) loadTopCategories(branchID uint, from, toExclusive ti
 		SELECT
 			COALESCE(NULLIF(TRIM(pc.name), ''), 'Sin categoría') AS category_name,
 			COALESCE(SUM(si.quantity), 0) AS quantity_sold,
-			COALESCE(SUM(si.total), 0) AS total_amount
+			COALESCE(SUM(CASE WHEN s.currency = 'USD' AND s.exchange_rate > 0 THEN si.total * s.exchange_rate ELSE si.total END), 0) AS total_amount
 		FROM tenant_sale_items si
 		INNER JOIN tenant_sales s ON s.id = si.sale_id
 		LEFT JOIN tenant_products p ON p.id = si.product_id
 		LEFT JOIN tenant_categories pc ON pc.id = p.category_id
 		WHERE s.issue_date >= ? AND s.issue_date < ?
 			AND s.status != 'cancelled'
-			AND ` + salescope.CommercialWhere("s") + branchClause + userClause + `
+			AND ` + salescope.EmittedWhereNoNotes("s") + branchClause + userClause + `
 		GROUP BY category_name
 		ORDER BY total_amount DESC
 		LIMIT 20
@@ -511,7 +553,7 @@ func (s *DashboardService) loadSalesLast30Days(branchID uint, filter DashboardFi
 		Count int64   `gorm:"column:count"`
 	}
 	q := restaurantSalesScope(s.db, branchID, from30, toExclusive, filter).
-		Select("DATE_FORMAT(issue_date, '%Y-%m-%d') AS day, COALESCE(SUM(total), 0) AS total, COUNT(*) AS count").
+		Select("DATE_FORMAT(issue_date, '%Y-%m-%d') AS day, COALESCE(SUM(CASE WHEN currency = 'USD' AND exchange_rate > 0 THEN total * exchange_rate ELSE total END), 0) AS total, COUNT(*) AS count").
 		Group("DATE_FORMAT(issue_date, '%Y-%m-%d')").
 		Order("day")
 	var rows []dayRow

@@ -16,7 +16,7 @@ type tcontact struct {
 	DocType         string
 	DocNumber       string
 	Active          bool
-	IsDefaultWalkin bool `gorm:"column:is_default_walkin"`
+	IsDefaultWalkin bool `gorm:"column:is_default_walk_in"`
 	DeletedAt       *string
 }
 

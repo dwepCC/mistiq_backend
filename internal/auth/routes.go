@@ -12,4 +12,6 @@ func RegisterRoutes(app *fiber.App) {
 	app.Post("/api/login", h.LoginAPI)
 	// Renovación de sesión: pública (el access token puede estar expirado); valida el refresh token.
 	app.Post("/api/session/refresh", h.RefreshAPI)
+	// Canje del código de un solo uso del acceso maestro por el JWT (el token viaja en el cuerpo, nunca en la URL).
+	app.Post("/api/auth/master-exchange", h.MasterExchangeAPI)
 }

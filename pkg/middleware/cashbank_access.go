@@ -16,9 +16,18 @@ func cashbankTenantPerm(action string) string {
 		return "cashbank.close"
 	case "movements":
 		return "cashbank.movements"
-	case "manage", "delete_session":
-		// Borrar una caja es administración, no operación del turno.
+	case "manage":
 		return "cashbank.manage"
+	case "delete_session":
+		// Borrar una caja es administración, no operación del turno.
+		return "cashbank.delete_session"
+	case "bank_view":
+		// Movimientos de cuentas bancarias: no se obtienen solo por poder abrir/cerrar caja.
+		return "cashbank.bank_view"
+	case "bank_manage":
+		return "cashbank.bank_manage"
+	case "payment_methods_manage":
+		return "cashbank.payment_methods_manage"
 	case "arqueo":
 		// Guardar/editar el arqueo (conteo de efectivo) es una acción de escritura sobre el
 		// dinero contado; antes solo exigía "view" (cashbank_view), ver internal/cashbank/routes.go.
@@ -33,9 +42,11 @@ func cashbankTenantPerm(action string) string {
 // El personal con caja (mozo, cajero) puede operar su turno, pero corregir el monto de apertura
 // o borrar una caja toca el respaldo del dinero contado: eso no se delega al turno.
 var restaurantAdminActions = map[string]bool{
-	"manage":         true,
-	"adjust_opening": true,
-	"delete_session": true,
+	"manage":                 true,
+	"adjust_opening":         true,
+	"delete_session":         true,
+	"bank_manage":            true,
+	"payment_methods_manage": true,
 }
 
 // RequireCashbankAccess permite acceso a caja vía permisos tenant o staff restaurante (c.v+).

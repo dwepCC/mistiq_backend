@@ -23,6 +23,7 @@ func RegisterRoutes(api fiber.Router) {
 	r.Get("/staff", manage, h.ListStaff)
 	r.Get("/staff/management", manage, h.ListStaffManagement)
 	r.Post("/staff/users", manage, h.CreateStaffUser)
+	r.Post("/staff/users/:id/restore", manage, h.RestoreStaffUser)
 	r.Put("/users/:id/staff", manage, h.UpsertUserStaff)
 
 	r.Get("/settings", middleware.RequireAnyRestaurantPerm(restaurantperm.OrdersCharge, restaurantperm.TablesOpen, restaurantperm.KitchenView, restaurantperm.SettingsManage), h.GetSettings)
@@ -73,6 +74,7 @@ func RegisterRoutes(api fiber.Router) {
 	r.Post("/comandas/:id/print", middleware.RequireRestaurantPerm(restaurantperm.KitchenView), h.PrintComanda)
 	r.Delete("/comandas/:id", middleware.RequireAnyRestaurantPerm(restaurantperm.SettingsManage, restaurantperm.OrdersCancel), h.CancelComanda)
 
+	r.Get("/comandas/cancelled", middleware.RequireAnyRestaurantPerm(restaurantperm.KitchenView, restaurantperm.OrdersCancel, restaurantperm.SettingsManage), h.ListCancelledComandas)
 	r.Get("/kitchen", middleware.RequireRestaurantPerm(restaurantperm.KitchenView), h.KitchenView)
 
 	r.Get("/dashboard",

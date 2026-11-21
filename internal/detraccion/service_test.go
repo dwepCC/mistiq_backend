@@ -36,6 +36,14 @@ func transporteSaleInput() *SaleInput {
 		PuntoDestino:           "JR. BUENAVISTA 234 - ANCASH - CASMA - CASMA",
 		CargaEfectivaTm:        12,
 		CargaUtilTm:            15,
+		TripDetail:             "Transporte de cemento en bolsas, viaje directo sin trasbordo",
+
+		OriginUbigeo:             "150101",
+		OriginAddress:            "AV. INDUSTRIAL 578 - LIMA",
+		DestinationUbigeo:        "021803",
+		DestinationAddress:       "JR. BUENAVISTA 234 - CASMA",
+		ValorRefCargaEfectivaPen: 1100.50,
+		ValorRefCargaUtilPen:     1300.75,
 	}
 }
 
@@ -70,6 +78,9 @@ func TestPersist1004_GuardaCamposDeTransporte(t *testing.T) {
 	if row.CargaEfectivaTm == nil || *row.CargaEfectivaTm != 12 {
 		t.Errorf("carga_efectiva_tm = %v, want 12", row.CargaEfectivaTm)
 	}
+	if row.TripDetail != transporteSaleInput().TripDetail {
+		t.Errorf("trip_detail no persistido: %q", row.TripDetail)
+	}
 
 	// Releer de la BD, no solo el valor en memoria devuelto por Persist.
 	var reloaded database.TenantSaleDetraccion
@@ -81,8 +92,37 @@ func TestPersist1004_GuardaCamposDeTransporte(t *testing.T) {
 	}
 }
 
-// Los 7 campos son obligatorios (formulario oficial de SUNAT los marca con asterisco). Verifica
-// cada uno por separado para no depender de qué validación corre primero.
+// Decisión de negocio (ver evaluate): el valor referencial es una captura manual sin tabla oficial
+// que la respalde en este sistema, y NUNCA debe usarse para calcular la detracción — ni siquiera
+// cuando el usuario lo ingresa y es mayor al importe de la venta. Solo es informativo/impreso. Esto
+// difiere a propósito de calculator.go (que sí implementa la comparación "el mayor" de la R.S.
+// 073-2006-SUNAT Art. 4 como primitiva reutilizable, ver TestEvaluateDetraccion1004_ValorReferencialMayor)
+// — a nivel de servicio, deliberadamente no se invoca esa comparación.
+func TestPersist1004_ValorReferencialNuncaAumentaLaDetraccion(t *testing.T) {
+	db := setupDetraccionTestDB(t)
+	svc := NewService(db)
+
+	in := transporteSaleInput()
+	in.ValorReferencialPen = 999999 // muy por encima del importe de la venta (2000)
+
+	row, err := svc.Persist(PersistInput{
+		SaleID: 1, OperationTypeCode: sunatdet.OpDetraccionTransporte, SunatDocCode: "01",
+		Currency: "PEN", SaleTotal: 2000, BankAccount: "0004-123",
+		Detraccion: in,
+	})
+	if err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	if row.DetractionAmountPen != 80 {
+		t.Errorf("un valor referencial alto no debe aumentar la detracción: detraction_amount_pen = %v, want 80 (4%% de la venta real)", row.DetractionAmountPen)
+	}
+	if row.ValorReferencialPen == nil || *row.ValorReferencialPen != 999999 {
+		t.Errorf("el valor referencial sí debe persistirse para mostrarse en el PDF, aunque no afecte el cálculo: %v", row.ValorReferencialPen)
+	}
+}
+
+// Origen y destino son los únicos campos obligatorios de 1004: lo mínimo para identificar el
+// servicio. Verifica cada uno por separado para no depender de qué validación corre primero.
 func TestPersist1004_RechazaSinCamposObligatorios(t *testing.T) {
 	db := setupDetraccionTestDB(t)
 	svc := NewService(db)
@@ -97,14 +137,19 @@ func TestPersist1004_RechazaSinCamposObligatorios(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*SaleInput)
+		want   string
 	}{
-		{"sin registro MTC", func(s *SaleInput) { s.MtcRegistro = "" }},
-		{"sin configuración vehicular", func(s *SaleInput) { s.ConfiguracionVehicular = "" }},
-		{"sin punto origen", func(s *SaleInput) { s.PuntoOrigen = "" }},
-		{"sin punto destino", func(s *SaleInput) { s.PuntoDestino = "" }},
-		{"sin carga efectiva", func(s *SaleInput) { s.CargaEfectivaTm = 0 }},
-		{"sin carga útil", func(s *SaleInput) { s.CargaUtilTm = 0 }},
-		{"sin valor referencial", func(s *SaleInput) { s.ValorReferencialPen = 0 }},
+		// SUNAT 3116-3126: cada uno de estos faltantes rechaza el comprobante.
+		{"sin ubigeo origen (3116)", func(s *SaleInput) { s.OriginUbigeo = "" }, "ubigeo del punto de origen"},
+		{"ubigeo origen mal formado", func(s *SaleInput) { s.OriginUbigeo = "15010" }, "ubigeo del punto de origen"},
+		{"ubigeo origen con letras", func(s *SaleInput) { s.OriginUbigeo = "15O101" }, "ubigeo del punto de origen"},
+		{"sin dirección origen (3117)", func(s *SaleInput) { s.OriginAddress = "  " }, "dirección detallada del punto de origen"},
+		{"sin ubigeo destino (3118)", func(s *SaleInput) { s.DestinationUbigeo = "" }, "ubigeo del punto de destino"},
+		{"sin dirección destino (3119)", func(s *SaleInput) { s.DestinationAddress = "" }, "dirección detallada del punto de destino"},
+		{"sin detalle del viaje (3120)", func(s *SaleInput) { s.TripDetail = "" }, "detalle del viaje"},
+		{"sin valor ref. servicio (3124)", func(s *SaleInput) { s.ValorReferencialPen = 0 }, "valor referencial del servicio"},
+		{"sin valor ref. carga efectiva (3125)", func(s *SaleInput) { s.ValorRefCargaEfectivaPen = 0 }, "carga efectiva"},
+		{"sin valor ref. carga útil (3126)", func(s *SaleInput) { s.ValorRefCargaUtilPen = 0 }, "carga útil nominal"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -112,10 +157,62 @@ func TestPersist1004_RechazaSinCamposObligatorios(t *testing.T) {
 			s := transporteSaleInput()
 			c.mutate(s)
 			in.Detraccion = s
-			if _, err := svc.Persist(in); err == nil {
+			_, err := svc.Persist(in)
+			if err == nil {
 				t.Fatalf("%s: esperaba error", c.name)
 			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s: error %q no menciona %q", c.name, err.Error(), c.want)
+			}
 		})
+	}
+}
+
+// Registro MTC, configuración vehicular, carga efectiva, carga útil, detalle del viaje y valor
+// referencial son opcionales: ninguno es obligatorio en el esquema UBL 2.1 de SUNAT
+// (cac:AdditionalItemProperty tiene cardinalidad 0..n), y calcular el valor referencial real
+// exige la tabla oficial del MTC (D.S. 020-2021-MTC) que este sistema no tiene integrada — la
+// propia norma permite usar solo el importe de la operación cuando no hay valor referencial
+// determinable (ver validateTransporteFields). Persist debe aceptar la venta sin ellos, calcular
+// la detracción sobre el importe de la venta, y el comprobante no debe llevar AdditionalItemProperty
+// vacíos ni en "0.00" para los códigos correspondientes.
+func TestPersist1004_CamposDescriptivosSonOpcionales(t *testing.T) {
+	db := setupDetraccionTestDB(t)
+	svc := NewService(db)
+
+	in := transporteSaleInput()
+	in.MtcRegistro = ""
+	in.ConfiguracionVehicular = ""
+	in.CargaEfectivaTm = 0
+	in.CargaUtilTm = 0
+
+	row, err := svc.Persist(PersistInput{
+		SaleID: 1, OperationTypeCode: sunatdet.OpDetraccionTransporte, SunatDocCode: "01",
+		Currency: "PEN", SaleTotal: 2000, BankAccount: "0004-123",
+		Detraccion: in,
+	})
+	if err != nil {
+		t.Fatalf("Persist no debía rechazar la venta sin los campos descriptivos opcionales: %v", err)
+	}
+	if row.CargaEfectivaTm != nil || row.CargaUtilTm != nil {
+		t.Errorf("TM de carga efectiva/útil sin completar deben quedar nil, got ce=%v cu=%v", row.CargaEfectivaTm, row.CargaUtilTm)
+	}
+	if row.DetractionAmountPen != 80 {
+		t.Errorf("sin valor referencial, la detracción debe calcularse sobre el importe de la venta: detraction_amount_pen = %v, want 80 (4%% de 2000)", row.DetractionAmountPen)
+	}
+
+	payload := &facturador.InvoicePayload{
+		Details: []facturador.InvoiceDetail{{Descripcion: "Servicio de transporte de carga"}},
+	}
+	ApplyToInvoicePayload(payload, row)
+	for _, a := range payload.Details[0].Atributos {
+		if a.Code == "3006" || a.Code == "3007" || a.Code == "3010" || a.Code == "3013" || a.Code == "3014" {
+			t.Errorf("no debía enviarse AdditionalItemProperty %s vacío, got %+v", a.Code, a)
+		}
+	}
+	// Solo los 8 datos de cac:Delivery (origen, destino, viaje, 3 valores referenciales).
+	if len(payload.Details[0].Atributos) != 8 {
+		t.Errorf("esperaba 8 atributos de cac:Delivery, got %d", len(payload.Details[0].Atributos))
 	}
 }
 
@@ -178,8 +275,9 @@ func TestApplyToInvoicePayload_1004(t *testing.T) {
 		t.Fatal("falta la leyenda 2006")
 	}
 
-	if len(payload.Details) != 1 || len(payload.Details[0].Atributos) != 7 {
-		t.Fatalf("esperaba 7 AdditionalItemProperty en el ítem, got %d", len(payload.Details[0].Atributos))
+	// 4 AdditionalItemProperty (MTC, config. vehicular, TM efectiva y útil) + 8 datos de cac:Delivery.
+	if len(payload.Details) != 1 || len(payload.Details[0].Atributos) != 12 {
+		t.Fatalf("esperaba 12 atributos en el ítem, got %d", len(payload.Details[0].Atributos))
 	}
 	codes := map[string]string{}
 	for _, a := range payload.Details[0].Atributos {
@@ -188,15 +286,81 @@ func TestApplyToInvoicePayload_1004(t *testing.T) {
 	want := map[string]string{
 		"3006": "15X123CNG",
 		"3007": "C3",
-		"3008": "AV. INDUSTRIAL 578 - LIMA - LIMA - LIMA",
-		"3009": "JR. BUENAVISTA 234 - ANCASH - CASMA - CASMA",
-		"3010": "1232.28",
 		"3013": "12.00",
 		"3014": "15.00",
+		// cac:InvoiceLine/cac:Delivery (SUNAT 3116-3126), que el facturador convierte a XML.
+		"T1004_ORIG_UBIGEO":       "150101",
+		"T1004_ORIG_DIR":          "AV. INDUSTRIAL 578 - LIMA",
+		"T1004_DEST_UBIGEO":       "021803",
+		"T1004_DEST_DIR":          "JR. BUENAVISTA 234 - CASMA",
+		"T1004_VIAJE":             "Transporte de cemento en bolsas, viaje directo sin trasbordo",
+		"T1004_VR_SERVICIO":       "1232.28",
+		"T1004_VR_CARGA_EFECTIVA": "1100.50",
+		"T1004_VR_CARGA_UTIL":     "1300.75",
 	}
 	for code, val := range want {
 		if codes[code] != val {
 			t.Errorf("AdditionalItemProperty %s = %q, want %q", code, codes[code], val)
+		}
+	}
+	// Origen/destino y valor referencial ya no van como item property 3008/3009/3010: los reemplaza
+	// cac:Delivery.
+	for code := range codes {
+		if code == "3008" || code == "3009" || code == "3010" {
+			t.Errorf("no debía enviarse el AdditionalItemProperty %s cuando hay cac:Delivery", code)
+		}
+	}
+}
+
+// Con varias líneas, los datos de cac:Delivery van solo en la primera (SUNAT pide uno y solo uno de
+// cada valor referencial).
+func TestApplyToInvoicePayload_1004_DeliverySoloEnPrimeraLinea(t *testing.T) {
+	db := setupDetraccionTestDB(t)
+	svc := NewService(db)
+	if _, err := svc.Persist(PersistInput{
+		SaleID: 1, OperationTypeCode: sunatdet.OpDetraccionTransporte, SunatDocCode: "01",
+		Currency: "PEN", SaleTotal: 2000, BankAccount: "0004-1234567890", Detraccion: transporteSaleInput(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := svc.LoadBySaleID(1)
+	payload := &facturador.InvoicePayload{Details: []facturador.InvoiceDetail{{Descripcion: "a"}, {Descripcion: "b"}}}
+	ApplyToInvoicePayload(payload, row)
+	count := func(d facturador.InvoiceDetail) int {
+		n := 0
+		for _, a := range d.Atributos {
+			if strings.HasPrefix(a.Code, "T1004_") {
+				n++
+			}
+		}
+		return n
+	}
+	if count(payload.Details[0]) != 8 || count(payload.Details[1]) != 0 {
+		t.Errorf("T1004_* en línea 1 = %d (want 8), en línea 2 = %d (want 0)", count(payload.Details[0]), count(payload.Details[1]))
+	}
+}
+
+// Ventas guardadas antes de la v163 (solo texto libre, sin ubigeo) siguen enviándose como antes:
+// 3008/3009/3010 y sin atributos reservados.
+func TestApplyToInvoicePayload_1004_FilaAnteriorSoloTexto(t *testing.T) {
+	vr, ce, cu := 1232.28, 12.0, 15.0
+	row := &database.TenantSaleDetraccion{
+		SaleID: 1, OperationTypeCode: sunatdet.OpDetraccionTransporte, GoodCode: "027",
+		PaymentMethodCode: "001", BankAccount: "0004-1", RatePercent: 4, DetractionAmountPen: 80,
+		PuntoOrigen: "LIMA", PuntoDestino: "CASMA", ValorReferencialPen: &vr, CargaEfectivaTm: &ce, CargaUtilTm: &cu,
+	}
+	payload := &facturador.InvoicePayload{Details: []facturador.InvoiceDetail{{Descripcion: "a"}}}
+	ApplyToInvoicePayload(payload, row)
+	codes := map[string]string{}
+	for _, a := range payload.Details[0].Atributos {
+		codes[a.Code] = a.Value
+	}
+	if codes["3008"] != "LIMA" || codes["3009"] != "CASMA" || codes["3010"] != "1232.28" {
+		t.Errorf("fila anterior debe conservar 3008/3009/3010, got %v", codes)
+	}
+	for code := range codes {
+		if strings.HasPrefix(code, "T1004_") {
+			t.Errorf("fila anterior no debe llevar atributos reservados: %s", code)
 		}
 	}
 }

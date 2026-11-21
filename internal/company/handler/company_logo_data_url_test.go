@@ -10,31 +10,9 @@ import (
 	"tukifac/pkg/tenantstorage"
 )
 
-func TestLogoFilenameFromURL(t *testing.T) {
-	cases := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{"ruta pública normal", "/uploads/tenants/10726187938/company/logo.png", "logo.png"},
-		{"con ?v= antichaché", "/uploads/tenants/10726187938/company/logo.png?v=1736899200000", "logo.png"},
-		{"con fragmento", "/uploads/tenants/1/company/logo.webp#x", "logo.webp"},
-		{"absoluta", "https://api.tukifac.com/uploads/tenants/1/company/logo.jpg?v=9", "logo.jpg"},
-		{"vacía", "", ""},
-		{"solo barras", "///", ""},
-		// La URL sale de la BD: pase lo que pase, el resultado debe ser un nombre plano que
-		// no permita salir de la carpeta del tenant.
-		{"traversal codificado se rechaza", "/uploads/tenants/1/company/..%2f..%2fsecret.png", ""},
-		{"traversal literal se queda en el nombre base", "/uploads/tenants/1/company/../../secret.png", "secret.png"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := logoFilenameFromURL(tc.url); got != tc.want {
-				t.Errorf("logoFilenameFromURL(%q) = %q, want %q", tc.url, got, tc.want)
-			}
-		})
-	}
-}
+// logoFilenameFromURL se movió a pkg/branchlogo (dataurl.go) — su test vive ahí ahora
+// (pkg/branchlogo/dataurl_test.go), ya que attachLogoDataURL/attachBranchLogoDataURL en este
+// paquete son solo wrappers finos sobre branchlogo.ResolveCompanyDataURL/ResolveBranchDataURL.
 
 func TestAttachLogoDataURL(t *testing.T) {
 	ruc := "10726187938"
@@ -61,11 +39,16 @@ func TestAttachLogoDataURL(t *testing.T) {
 		}
 	})
 
-	t.Run("config antigua ya embebida se respeta", func(t *testing.T) {
+	// Antes se devolvía el mismo data URL también en logo_data_url (la respuesta pesaba el doble). Ahora el logo
+	// viaja una sola vez, en logo_url; los clientes lo aceptan ahí cuando logo_data_url no viene.
+	t.Run("logo_url ya embebido no se duplica en logo_data_url", func(t *testing.T) {
 		cfg := &database.TenantCompanyConfig{LogoURL: "data:image/png;base64,AAAA"}
 		attachLogoDataURL(ruc, cfg)
-		if cfg.LogoDataURL != "data:image/png;base64,AAAA" {
-			t.Errorf("esperaba devolver el data URL tal cual, got %q", cfg.LogoDataURL)
+		if cfg.LogoDataURL != "" {
+			t.Errorf("no debía duplicarse, got %q", cfg.LogoDataURL)
+		}
+		if cfg.LogoURL != "data:image/png;base64,AAAA" {
+			t.Errorf("logo_url debe conservar el logo embebido, got %q", cfg.LogoURL)
 		}
 	})
 

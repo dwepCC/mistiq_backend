@@ -3,6 +3,8 @@ package service
 import (
 	"encoding/json"
 	"strings"
+
+	"tukifac/pkg/facturador"
 )
 
 // enrichFiscalPayloadJSON añade tipoDoc y _meta para el deserializador Greenter en facturador SSOT.
@@ -19,6 +21,12 @@ func enrichFiscalPayloadJSON(payloadJSON, tipoDoc, documentKind string) string {
 	}
 	if documentKind != "" {
 		m["_meta"] = map[string]string{"document_kind": documentKind}
+	}
+	// Retención/percepción: el facturador (JMS) exige Y-m-d\TH:i:sP en TODAS las fechas. Los
+	// payloads persistidos antes de este fix traen fechas "solo día"; se normalizan al enviar
+	// (sin tocar lo guardado en BD) para que el reenvío del mismo comprobante no vuelva a fallar.
+	if documentKind == "retention" || documentKind == "perception" {
+		facturador.NormalizeRetentionPerceptionPayloadDates(m)
 	}
 	// NC/ND en cola antigua: relDocs sin tipDocAfectado → XML SUNAT con DocumentTypeCode vacío.
 	if documentKind == "note" {

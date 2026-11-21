@@ -1,0 +1,13 @@
+# Normaliza saltos de línea al hacer commit (LF adentro del repo) y deja que git decida
+# texto/binario automáticamente para todo lo demás.
+* text=auto
+
+# Scripts que se ejecutan directo en el VPS (Linux): SIEMPRE LF, sin importar core.autocrlf del
+# checkout de origen. Un CRLF en la primera línea rompe el shebang ("#!/usr/bin/env bash\r" busca
+# un binario llamado "bash\r", que no existe) — causa real de que el cron de migraciones
+# (migrate-fleet.sh) quedara muerto ~3 días (2026-09-09 a 2026-09-12) sin ningún error visible: /opt/tukifac
+# en el VPS no es un checkout de git, así que estos archivos se transfieren tal cual estén en el
+# checkout de origen (Windows con core.autocrlf=true los convierte a CRLF al hacer checkout).
+*.sh text eol=lf
+dockerfile text eol=lf
+Dockerfile text eol=lf

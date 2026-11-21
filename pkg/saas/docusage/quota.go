@@ -48,7 +48,7 @@ func buildView(
 	}
 	if sub != nil {
 		v.QuotaPeriodIndex = period.PeriodIndex
-		v.QuotaPeriodTotal = TotalQuotaPeriods(sub)
+		v.QuotaPeriodTotal = TotalCycleQuotaPeriods(cycle)
 	}
 	if v.IsUnlimited {
 		v.CanEmit = true

@@ -10,28 +10,23 @@ import (
 	"gorm.io/gorm"
 )
 
-// Valores por defecto cuando el cliente no tiene dirección/ubigeo (SUNAT, XML, impresión).
-// Ubigeo 040101 = distrito Arequipa (provincia y departamento Arequipa), catálogo INEI.
-const (
-	DefaultTenantContactAddress = "Arequipa"
-	DefaultTenantContactUbigeo  = "040101"
-)
-
-// NormalizeTenantContactAddressUbigeo rellena dirección y ubigeo vacíos con los valores por
-// defecto del tenant. El cliente walk-in del POS (EnsureDefaultSaleContact) pasa por acá siempre
-// vacío a propósito —nunca declara domicilio propio—, así que esta función no loguea nada: quien
-// necesita saber si el default se aplicó a algo que SÍ debería tener domicilio real (el
-// fiscal de la empresa) es EnsureCompanyFiscalDomicile, más abajo.
+// Hasta 2026-09, un cliente sin dirección/ubigeo se rellenaba con un default fijo
+// ("Arequipa"/040101) — pensado para cumplir el requisito técnico de SUNAT de traer *algún*
+// ubigeo/dirección en el XML. Es innecesario: SUNAT NO exige dirección del cliente ni en factura
+// ni en boleta (solo la del emisor, y la del destinatario real en guías de remisión, por
+// logística). Confirmado contra la fuente: Greenter\Model\Client\Client::$address es nullable
+// (vendor/greenter/core/.../Client.php) y el propio template UBL 2.1 de Greenter
+// (invoice2.1.xml.twig: `{% if client.address %}`) omite el nodo <cac:RegistrationAddress>
+// completo cuando address es null — XML 100% válido, así lo hacen los ejemplos oficiales de
+// Greenter (nunca llaman a Client::setAddress). El default fijo causaba que TODO tenant sin
+// dirección de cliente cargada mostrara "Arequipa" en sus comprobantes, sin importar en qué
+// departamento estuviera el tenant real — confuso y falso para el cliente que lo recibe.
+//
+// NormalizeTenantContactAddressUbigeo ahora solo recorta espacios — ya NO fabrica un valor. Los
+// callers deben tratar "" como "sin dirección" y, para emisión SUNAT, omitir el objeto Address
+// del cliente en vez de mandarlo con campos vacíos (ver billing_service.go/fiscal_document_emit.go).
 func NormalizeTenantContactAddressUbigeo(addr, ubigeo string) (string, string) {
-	a := strings.TrimSpace(addr)
-	u := strings.TrimSpace(ubigeo)
-	if a == "" {
-		a = DefaultTenantContactAddress
-	}
-	if u == "" {
-		u = DefaultTenantContactUbigeo
-	}
-	return a, u
+	return strings.TrimSpace(addr), strings.TrimSpace(ubigeo)
 }
 
 // EnsureDefaultSaleContact garantiza el cliente genérico del POS (SUNAT doc_type 0, doc_number 99999999)

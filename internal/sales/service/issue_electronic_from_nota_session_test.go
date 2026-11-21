@@ -37,6 +37,7 @@ func setupIssueElectronicFromNotaSessionTestDB(t *testing.T) *gorm.DB {
 		&database.TenantSale{},
 		&database.TenantSaleItem{},
 		&database.TenantSalePayment{},
+		&database.TenantSaleCreditInstallment{},
 		&database.TenantCashSession{},
 		&database.TenantCashMovement{},
 		&database.TenantBankMovement{},

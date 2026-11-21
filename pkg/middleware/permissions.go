@@ -34,6 +34,17 @@ func RequirePermission(permission string) fiber.Handler {
 	}
 }
 
+// HasPermission expone tenantHasPermission (con sus mismas implicancias, ej. "{modulo}.manage")
+// para código fuera de este paquete que necesita el booleano en vez de bloquear la ruta completa
+// — ej. un service que solo exime UNA validación interna según el permiso del usuario, sin
+// rechazar el request entero (ver sales.override_price / validateAuthorizedPrices).
+func HasPermission(claims *TenantClaims, permission string) bool {
+	if claims == nil {
+		return false
+	}
+	return tenantHasPermission(claims.Permissions, permission)
+}
+
 // RequireAnyPermission permite el acceso si el usuario tiene AL MENOS UNO de los permisos dados
 // (con las mismas implicancias de RequirePermission). Para endpoints que sirven más de una acción
 // de negocio a la vez (ej. un mismo POST que puede crear una nota de crédito o una de débito según

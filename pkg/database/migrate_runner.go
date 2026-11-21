@@ -35,6 +35,9 @@ func RunCentralMigration() error {
 	if err := SeedCentral(); err != nil {
 		return fmt.Errorf("seed central: %w", err)
 	}
+	if err := MigrateSplitDespatchModules(); err != nil {
+		return fmt.Errorf("split despatch modules: %w", err)
+	}
 	if err := SyncModuleCodeMetadata(); err != nil {
 		return fmt.Errorf("sync module metadata: %w", err)
 	}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"tukifac/pkg/dailyfx"
+	"tukifac/pkg/datespe"
 
 	"tukifac/pkg/database"
 
@@ -72,13 +74,16 @@ func (s *CashBankService) CreateBankReversal(tx *gorm.DB, original database.Tena
 		Category:      category,
 		Notes:         notes,
 		CreatedAt:     now,
+		// Snapshot del original: la reversión vale lo mismo aunque el TC del documento o el del día cambien.
+		Currency:      original.Currency,
+		ExchangeRate:  original.ExchangeRate,
+		AmountPEN:     original.AmountPEN,
+		AccountAmount: original.AccountAmount,
 	}
 	if err := exec.Create(&rev).Error; err != nil {
 		return err
 	}
-	return exec.Model(&database.TenantBankAccount{}).
-		Where("id = ?", original.BankAccountID).
-		Update("balance", gorm.Expr("balance + ?", delta)).Error
+	return applyBankDelta(exec, original.BankAccountID, &rev, delta, false)
 }
 
 // ReverseBankMovementsByReference revierte movimientos bancarios del tipo indicado que comparten referencia.
@@ -139,6 +144,9 @@ func (s *CashBankService) CreateCashReversal(tx *gorm.DB, original database.Tena
 		Notes:         notes,
 		UserID:        uid,
 		CreatedAt:     now,
+		Currency:      original.Currency,
+		ExchangeRate:  original.ExchangeRate,
+		AmountPEN:     original.AmountPEN,
 	}
 	return exec.Create(&rev).Error
 }
@@ -178,6 +186,9 @@ func (s *CashBankService) reverseManualCashMovement(tx *gorm.DB, movementID, use
 	if original.SaleID != nil || original.PurchaseID != nil {
 		return errors.New("este movimiento pertenece a una venta o compra; anúlela desde ahí")
 	}
+	if original.TransferID != nil {
+		return errors.New("este movimiento forma parte de una transferencia; anúlela desde Cuentas / Bancos → Transferencias recientes")
+	}
 	if original.ReversalOfID != nil {
 		return errors.New("no se puede revertir una reversión")
 	}
@@ -215,6 +226,9 @@ func (s *CashBankService) reverseManualBankMovement(tx *gorm.DB, movementID, use
 	if original.SaleID != nil || original.PurchaseID != nil {
 		return errors.New("este movimiento pertenece a una venta o compra; anúlela desde ahí")
 	}
+	if original.TransferID != nil {
+		return errors.New("este movimiento forma parte de una transferencia; anúlela desde Cuentas / Bancos → Transferencias recientes")
+	}
 	if original.ReversalOfID != nil {
 		return errors.New("no se puede revertir una reversión")
 	}
@@ -245,4 +259,46 @@ func (s *CashBankService) reverseManualBankMovement(tx *gorm.DB, movementID, use
 		desc = category
 	}
 	return s.CreateBankReversal(exec, original, desc, original.Reference, category, notes, userID)
+}
+
+// errUSDSinTC: documento en dólares sin tipo de cambio: la cuenta (en soles) no se puede acreditar sin convertir.
+var errUSDSinTC = errors.New("no se puede convertir el importe a la moneda de la cuenta bancaria: falta el tipo de cambio (registre el del documento o el del día)")
+
+// applyBankDelta actualiza el saldo de la cuenta con el cambio del movimiento ya creado (en soles). strict=true rechaza un USD sin
+// TC (cobros nuevos); strict=false cae al importe tal cual (reversiones: no se bloquea una anulación).
+func applyBankDelta(db *gorm.DB, accountID uint, m *database.TenantBankMovement, delta float64, strict bool) error {
+	d, ok := m.BalanceDelta(delta)
+	if ok && m.AccountAmount == nil {
+		// Sin importe en moneda de cuenta: solo es válido el camino heredado para cuentas en soles; una cuenta en dólares no puede
+		// recibir el equivalente en soles como si fueran dólares.
+		var cur string
+		db.Model(&database.TenantBankAccount{}).Select("currency").Where("id = ?", accountID).Scan(&cur)
+		if strings.EqualFold(strings.TrimSpace(cur), "USD") {
+			ok = false
+		}
+	}
+	if !ok {
+		if strict {
+			return errUSDSinTC
+		}
+		d = delta
+	}
+	return db.Model(&database.TenantBankAccount{}).Where("id = ?", accountID).Update("balance", gorm.Expr("balance + ?", d)).Error
+}
+
+// requireRateForManualUSD un movimiento manual en una cuenta en dólares necesita el TC del día para valuarse en soles (reportes,
+// arqueo); sin TC se rechaza en vez de contarse como soles.
+func requireRateForManualUSD(acc *database.TenantBankAccount, when time.Time) error {
+	if acc == nil || !strings.EqualFold(strings.TrimSpace(acc.Currency), "USD") {
+		return nil
+	}
+	if when.IsZero() {
+		when = time.Now()
+	}
+	if r, _, ok := dailyfx.SaleRate(when.In(datespe.Location()).Format("2006-01-02")); !ok || r <= 0 {
+		if dailyfx.Configured() {
+			return errors.New("no hay tipo de cambio guardado para esa fecha: no se puede registrar un movimiento en una cuenta en dólares")
+		}
+	}
+	return nil
 }

@@ -41,7 +41,11 @@ func RegisterRoutes(api fiber.Router) {
 	api.Post("/inventory/documents/:id/void", mod, voidDoc, h.DocumentVoidAPI)
 	api.Get("/inventory/stock-summary", mod, loadRest, viewOrRestaurant, h.StockSummaryAPI)
 	api.Get("/inventory/reserved-summary", mod, loadRest, viewOrRestaurant, h.ReservedSummaryAPI)
-	api.Get("/inventory/stock/:productId", mod, loadRest, viewOrRestaurant, h.StockAPI)
+	// stock/:productId: botón «Ver stock» de las tarjetas del POS y del selector de productos.
+	// Permiso propio pos.view_stock (repartido a todos los roles por la migración v165, el dueño
+	// puede quitarlo) + puente de restaurante, sin exigir inventory.view. Solo devuelve cantidades
+	// por sucursal, sin costos.
+	api.Get("/inventory/stock/:productId", mod, loadRest, middleware.RequireStockViewAccess(), h.StockAPI)
 	api.Get("/inventory/movements", mod, loadRest, viewOrRestaurant, h.MovementsAPI)
 	api.Get("/inventory/transfers", mod, view, h.TransfersListAPI)
 	api.Post("/inventory/transfer", mod, transfer, h.TransferAPI)

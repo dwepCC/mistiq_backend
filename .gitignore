@@ -8,3 +8,9 @@
 
 # Entorno
 .env
+
+# Bases SQLite que generan los tests: se recrean solas en cada corrida.
+# Versionarlas provocaba conflictos de merge en binarios sin contenido útil.
+*.db
+*.db-wal
+*.db-shm

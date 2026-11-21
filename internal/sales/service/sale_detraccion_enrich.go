@@ -1,6 +1,9 @@
 package service
 
-import "tukifac/pkg/database"
+import (
+	"tukifac/pkg/database"
+	"tukifac/pkg/taxpayment"
+)
 
 func (s *SaleService) enrichSalesWithDetraccion(sales []database.TenantSale) {
 	if len(sales) == 0 {
@@ -26,6 +29,10 @@ func (s *SaleService) enrichSalesWithDetraccion(sales []database.TenantSale) {
 		sales[i].HasDetraccion = true
 		sales[i].DetraccionAmount = r.DetractionAmountPen
 		sales[i].NetPayable = r.NetPayablePen
+		if taxpayment.IsSelfDetractionStatus(r.BnConfirmationStatus) && r.InvoiceTotalPen > 0 {
+			// Autodetracción: lo que se cobra al cliente es el total, no el neto.
+			sales[i].NetPayable = r.InvoiceTotalPen
+		}
 		sales[i].DetraccionRatePercent = r.RatePercent
 	}
 }

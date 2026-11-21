@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"tukifac/internal/company/service"
+	"tukifac/pkg/branch"
+	"tukifac/pkg/branchlogo"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/middleware"
@@ -33,7 +36,8 @@ func (h *CompanyHandler) GetConfigAPI(c fiber.Ctx) error {
 	if ruc, rucErr := tenantstorage.ResolveTenantRUC(c); rucErr == nil {
 		attachLogoDataURL(ruc, cfg)
 	}
-	return c.JSON(cfg)
+	// ETag: la config (con logo) casi nunca cambia y se pide en cada carga de página → 304 en las repetidas.
+	return jsonWithETag(c, cfg)
 }
 
 // PUT /api/company/config
@@ -324,7 +328,14 @@ func (h *CompanyHandler) ListBranchesAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"data": branches})
+	// Igual que GetConfigAPI con el logo global: se embebe como data URL para que cualquier
+	// dispositivo lo tenga sin depender de red/CORS al imprimir.
+	if ruc, rucErr := tenantstorage.ResolveTenantRUC(c); rucErr == nil {
+		for i := range branches {
+			attachBranchLogoDataURL(ruc, &branches[i])
+		}
+	}
+	return jsonWithETag(c, fiber.Map{"data": branches})
 }
 
 // POST /api/company/branches
@@ -338,6 +349,9 @@ func (h *CompanyHandler) CreateBranchAPI(c fiber.Ctx) error {
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
+	}
+	if ok, gerr := guardAdminOnly(c); !ok {
+		return gerr
 	}
 	if middleware.EnforceCreateQuota(c, db(c), saas.QuotaBranches) {
 		return nil
@@ -365,6 +379,16 @@ func (h *CompanyHandler) UpdateBranchAPI(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
+	if ok, gerr := guardConfigBranch(c, uint(id), "sucursal no encontrada"); !ok {
+		return gerr
+	}
+	// Marcar otra sucursal como principal cambia al tenant entero: solo quien administra todas.
+	if body.IsMain && !branch.IsBranchAdmin(c) {
+		var cur database.TenantBranch
+		if db(c).First(&cur, uint(id)).Error == nil && !cur.IsMain {
+			return guardForbidden(c, "Solo quien administra todas las sucursales puede cambiar la sucursal principal")
+		}
+	}
 	if err := service.NewCompanyService(db(c)).UpdateBranch(uint(id), body.Name, body.Address, body.Phone, body.FiscalDomicileCode, body.IsMain); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -377,10 +401,102 @@ func (h *CompanyHandler) DeleteBranchAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	if ok, gerr := guardAdminOnly(c); !ok {
+		return gerr
+	}
 	if err := service.NewCompanyService(db(c)).DeleteBranch(uint(id)); err != nil {
+		var blocked *service.BranchDeleteBlockedError
+		if errors.As(err, &blocked) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": blocked.Error()})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
+}
+
+// UploadBranchLogoAPI POST /api/company/branches/:id/logo — imagen en
+// uploads/tenants/{RUC}/company/branches/{id}/. Logo propio de la sucursal: no toca el logo
+// global de la empresa ni se sincroniza con el facturador (Lycet sigue usando solo el logo
+// global, ver pkg/branchlogo).
+func (h *CompanyHandler) UploadBranchLogoAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if ok, gerr := guardConfigBranch(c, uint(id), "sucursal no encontrada"); !ok {
+		return gerr
+	}
+	ruc, err := tenantstorage.ResolveTenantRUC(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	file, err := c.FormFile("image")
+	if err != nil || file == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "envía un archivo en el campo 'image'"})
+	}
+	if file.Size > uploadlimits.MaxFileBytes {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "la imagen no debe superar 10 MB"})
+	}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	allowed := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".webp": true}
+	if !allowed[ext] {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "formato no permitido. Usa JPG, PNG o WebP"})
+	}
+
+	subdir := branchlogo.BranchSubdir(uint(id))
+	dir := tenantstorage.TenantUploadDir(ruc, subdir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("no se pudo crear carpeta %s: %v", dir, err),
+		})
+	}
+	filename := "logo" + ext
+	savePath := filepath.Join(dir, filename)
+	for _, oldExt := range []string{".jpg", ".jpeg", ".png", ".webp"} {
+		if oldExt == ext {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, "logo"+oldExt))
+	}
+	if err := c.SaveFile(file, savePath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("error guardando logo en %s: %v", savePath, err),
+		})
+	}
+	imageURL := tenantstorage.TenantUploadPublicURL(ruc, subdir, filename)
+	// ?v= evita caché del navegador al reemplazar el mismo archivo logo.*
+	storedURL := fmt.Sprintf("%s?v=%d", imageURL, time.Now().UnixMilli())
+	svc := service.NewCompanyService(db(c))
+	if err := svc.UpdateBranchLogoURL(uint(id), storedURL); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	b, err := svc.GetBranch(uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	attachBranchLogoDataURL(ruc, b)
+	return c.JSON(fiber.Map{"success": true, "logo_url": storedURL, "data": b})
+}
+
+// DeleteBranchLogoAPI DELETE /api/company/branches/:id/logo — quita el logo propio de la
+// sucursal; vuelve a depender del logo global de la empresa (pkg/branchlogo.ResolveURL).
+func (h *CompanyHandler) DeleteBranchLogoAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if ok, gerr := guardConfigBranch(c, uint(id), "sucursal no encontrada"); !ok {
+		return gerr
+	}
+	svc := service.NewCompanyService(db(c))
+	if err := svc.UpdateBranchLogoURL(uint(id), ""); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	b, err := svc.GetBranch(uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": b})
 }
 
 // filterActiveSeries descarta las series desactivadas. Se aplica a todo consumidor que
@@ -414,7 +530,13 @@ func queryFlag(c fiber.Ctx, name string) bool {
 func (h *CompanyHandler) ListSeriesAPI(c fiber.Ctx) error {
 	svc := service.NewCompanyService(db(c))
 	branchID, _ := strconv.ParseUint(c.Query("branch_id"), 10, 32)
-	series, err := svc.ListSeriesEnriched(uint(branchID))
+	// branch_id debe ser accesible. Sin branch_id: quien ve todo recibe todas las series (pantalla de configuración);
+	// el resto, solo las de su sucursal activa (antes cualquiera listaba las series de todas).
+	listBranch := uint(branchID)
+	if listBranch > 0 || !branch.IsBranchAdmin(c) {
+		listBranch = branch.ResolveReadBranchFilter(c, uint(branchID))
+	}
+	series, err := svc.ListSeriesEnriched(listBranch)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -470,6 +592,14 @@ func (h *CompanyHandler) CreateSeriesAPI(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "JSON inválido"})
 	}
+	if body.BranchID > 0 {
+		if ok, gerr := guardConfigBranch(c, body.BranchID, "sucursal no encontrada"); !ok {
+			return gerr
+		}
+		if verr := db(c).Select("id").First(&database.TenantBranch{}, body.BranchID).Error; verr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "la sucursal indicada no existe"})
+		}
+	}
 	if err := service.NewCompanyService(db(c)).CreateSeries(body.BranchID, body.DocType, body.Series, body.Correlative, body.IsDefault); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -481,6 +611,9 @@ func (h *CompanyHandler) UpdateSeriesAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if ok, gerr := guardSeriesByID(c, uint(id)); !ok {
+		return gerr
 	}
 	var body struct {
 		Series      string `json:"series"`
@@ -509,6 +642,9 @@ func (h *CompanyHandler) SetDefaultSeriesAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
+	if ok, gerr := guardSeriesByID(c, uint(id)); !ok {
+		return gerr
+	}
 	if err := service.NewCompanyService(db(c)).SetDefaultSeries(uint(id)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -520,6 +656,9 @@ func (h *CompanyHandler) DeleteSeriesAPI(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+	}
+	if ok, gerr := guardSeriesByID(c, uint(id)); !ok {
+		return gerr
 	}
 	if err := service.NewCompanyService(db(c)).DeleteSeries(uint(id)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})

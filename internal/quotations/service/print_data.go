@@ -4,9 +4,13 @@ import (
 	"strings"
 
 	salessvc "tukifac/internal/sales/service"
+	"tukifac/pkg/branchlogo"
 	"tukifac/pkg/database"
+	"tukifac/pkg/receiptdesign"
 	"tukifac/pkg/datespe"
 	"tukifac/pkg/money"
+	"tukifac/pkg/tax"
+	"tukifac/pkg/taxregime"
 	"tukifac/pkg/numeroletras"
 
 	"gorm.io/gorm"
@@ -44,6 +48,7 @@ func BuildPrintDataForQuotation(db *gorm.DB, quotationID uint) (*salessvc.PrintD
 		Total:        q.Total,
 		Notes:        strings.TrimSpace(q.Notes),
 		Payments:     []salessvc.PrintPayment{},
+		ReferencePayments: paymentRefsToPrint(q.PaymentMethodsJSON),
 		QRData:       "",
 	}
 
@@ -86,7 +91,18 @@ func BuildPrintDataForQuotation(db *gorm.DB, quotationID uint) (*salessvc.PrintD
 			Website:         strings.TrimSpace(company.Website),
 			LogoURL:         company.LogoURL,
 			AdditionalNotes: strings.TrimSpace(company.AdditionalNotes),
+			// Mismo criterio que el comprobante de venta (BuildPrintData): sin esto el PDF ocultaba
+			// Subtotal, descuentos e IGV y solo mostraba el total.
+			ShowIgvBreakdown: taxregime.For(company.TaxpayerRegime).ShowIgvBreakdown,
+			ShowIgvBreakdownOnSaleNote: company.ShowIgvBreakdownOnSaleNote,
+			// Antes faltaban: el A4 de la cotización ignoraba el tamaño de logo del tenant.
+			LogoSizeTicket: salessvc.NormalizePrintLogoSize(company.LogoSizeTicket),
+			LogoSizeA4:     salessvc.NormalizePrintLogoSize(company.LogoSizeA4),
+			PdfA4Design:    receiptdesign.NormalizeA4(company.PdfA4Design),
 		}
+		// Wallet Yape/Plin y cuentas bancarias — mismo criterio que un comprobante de venta
+		// (BuildPrintData), para que la cotización también los muestre cuando estén configurados.
+		pd.PaymentWallet, pd.BankAccounts = salessvc.PopulateCompanyPaymentInfo(db, company)
 	}
 
 	if q.UserID > 0 {
@@ -102,23 +118,76 @@ func BuildPrintDataForQuotation(db *gorm.DB, quotationID uint) (*salessvc.PrintD
 		if addr := strings.TrimSpace(branch.Address); addr != "" {
 			pd.Company.Address = addr
 		}
+		if ph := strings.TrimSpace(branch.Phone); ph != "" {
+			pd.Company.Phone = ph
+		}
+		pd.Company.LogoURL = branchlogo.ResolveURL(branch.LogoURL, pd.Company.LogoURL)
+		// Embebido como data: URL — mismo motivo que en sales/print_data.go: sin esto el
+		// frontend necesita un fetch en vivo a /uploads/* al generar el PDF, que puede fallar en
+		// producción (CORS/alcanzabilidad).
+		branchDataURL := branchlogo.ResolveBranchDataURL(company.RUC, branch.ID, branch.LogoURL)
+		companyDataURL := branchlogo.ResolveCompanyDataURL(company.RUC, company.LogoURL)
+		if dataURL := branchlogo.ResolvePrintLogo(branch.LogoURL, branchDataURL, company.LogoURL, companyDataURL); dataURL != "" {
+			pd.Company.LogoURL = dataURL
+		}
+	}
+
+	// Desglose del descuento (por línea y global) con EXACTAMENTE el motor de la venta: así el PDF de
+	// la cotización muestra los descuentos igual que el de una venta. Sin este desglose el generador
+	// de PDF los reconstruía con una heurística a partir del monto bruto combinado (línea + global
+	// juntos) y mostraba, p. ej., 13.47 en vez de 8.47 por línea y 5.00 global. Cotizaciones
+	// anteriores a v151 (sin modo/valor guardado) conservan el comportamiento previo.
+	lineDisc := make([]float64, len(items))
+	globalDisc := make([]float64, len(items))
+	structured := q.GlobalDiscountMode != "" || q.GlobalDiscountValue > 0
+	for _, it := range items {
+		if it.LineDiscountMode != "" || it.LineDiscountValue > 0 {
+			structured = true
+		}
+	}
+	if structured {
+		taxCfg := tax.LoadFromDB(db)
+		lines := make([]tax.SaleLineInput, len(items))
+		for i, it := range items {
+			lines[i] = tax.SaleLineInput{
+				UnitPrice: it.UnitPrice, Quantity: it.Quantity, IgvAffectationType: it.IgvAffectationType,
+				PriceIncludesIgv: it.PriceIncludesIgv, LineDiscountMode: it.LineDiscountMode, LineDiscountValue: it.LineDiscountValue,
+			}
+		}
+		res := tax.CalcSaleCheckout(tax.SaleCheckoutInput{
+			Lines: lines, GlobalDiscountMode: q.GlobalDiscountMode, GlobalDiscountValue: q.GlobalDiscountValue, TaxCfg: taxCfg,
+		})
+		var lineSum float64
+		for i := range items {
+			lineDisc[i] = res.Lines[i].LineDiscountSubtotal
+			globalDisc[i] = res.Lines[i].GlobalDiscountSubtotal
+			lineSum = money.RoundSunat(lineSum + lineDisc[i])
+		}
+		pd.LineDiscountTotal = lineSum
+		pd.GlobalDiscountAmount = res.GlobalDiscountAmount
 	}
 
 	pd.Items = make([]salessvc.PrintItem, len(items))
 	affMap := make(map[string]*salessvc.PrintAffectTotal)
 	for i, it := range items {
 		pd.Items[i] = salessvc.PrintItem{
-			Code:          it.Code,
-			Description:   it.Description,
-			Unit:          it.Unit,
-			Quantity:      it.Quantity,
-			UnitPrice:     it.UnitPrice,
-			Discount:      it.Discount,
-			Subtotal:      it.Subtotal,
-			TaxAmount:     it.TaxAmount,
-			Total:         it.Total,
-			ModifiersJSON: it.ModifiersJSON,
-			ItemNote:      it.ItemNote,
+			Code:                   it.Code,
+			Description:            it.Description,
+			Unit:                   it.Unit,
+			Quantity:               it.Quantity,
+			UnitPrice:              it.UnitPrice,
+			Discount:               it.Discount,
+			LineDiscountSubtotal:   lineDisc[i],
+			GlobalDiscountSubtotal: globalDisc[i],
+			Subtotal:               it.Subtotal,
+			TaxAmount:              it.TaxAmount,
+			Total:                  it.Total,
+			IgvAffectationType:     it.IgvAffectationType,
+			ModifiersJSON:          it.ModifiersJSON,
+			ItemNote:               it.ItemNote,
+			PackLabel:              it.PackLabel,
+			ProductID:              it.ProductID,
+			SaleUnitID:             it.SaleUnitID,
 		}
 		code := strings.TrimSpace(it.IgvAffectationType)
 		if code == "" {
@@ -151,6 +220,9 @@ func BuildPrintDataForQuotation(db *gorm.DB, quotationID uint) (*salessvc.PrintD
 			}
 		}
 	}
+
+	// Foto de la cotización: ver salessvc.FreezePrintData. Se descarta al editarla (su contenido cambia a propósito).
+	salessvc.FreezePrintData(db, database.SnapshotKindQuotation, quotationID, pd)
 
 	return pd, nil
 }

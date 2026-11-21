@@ -94,7 +94,7 @@ func TestGreenterXML_PrepaymentEmission_InvoiceTypeCodeConfigured(t *testing.T) 
 		},
 		Client: facturador.InvoiceClient{
 			TipoDoc: "0", NumDoc: "99999999999", RznSocial: "Clientes Varios",
-			Address: facturador.InvoiceAddress{Ubigueo: "040101", CodigoPais: "PE", Direccion: "Arequipa"},
+			Address: &facturador.InvoiceAddress{Ubigueo: "040101", CodigoPais: "PE", Direccion: "Arequipa"},
 		},
 	}
 	prepaymentsvc.ApplyEmitToInvoicePayload(&payload, &database.TenantSalePrepaymentVoucher{SaleID: 1})

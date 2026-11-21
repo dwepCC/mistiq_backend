@@ -20,6 +20,12 @@ import (
 //   - acumular las salidas de almacén de cada componente.
 //
 // Sin esto, un combo se cobraría al precio base y no descontaría nada del inventario.
+// ResolveComboItems expone la resolución de combos (precio del grupo y componentes) a otros
+// módulos que cotizan lo mismo que luego se vende (cotizaciones).
+func ResolveComboItems(db *gorm.DB, items []SaleItemInput) ([]SaleItemInput, []ExtraStockMovement, error) {
+	return resolveComboItems(db, items)
+}
+
 func resolveComboItems(
 	db *gorm.DB,
 	items []SaleItemInput,
@@ -64,6 +70,10 @@ func resolveComboItems(
 		}
 
 		item.UnitPrice = res.UnitPrice
+		// El precio del combo (fijo + sobreprecios de opciones) ya lo resolvió combos.Resolve
+		// contra el catálogo — no es ni product.SalePrice ni presentation.SalePrice, así que
+		// validateAuthorizedPrices no podría (ni debe) reevaluarlo.
+		item.PriceAuthorized = true
 		if strings.TrimSpace(item.Description) == "" {
 			item.Description = res.Name
 		}

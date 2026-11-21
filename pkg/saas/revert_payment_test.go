@@ -38,7 +38,7 @@ func TestRevertApprovedPayment_cycleLinked_restoresPriorState(t *testing.T) {
 	}
 	db.Create(&pay)
 
-	if err := ApprovePayment(pay.ID, 0, 0, "ok", 1); err != nil {
+	if err := ApprovePayment(pay.ID, 0, 0, "ok", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment: %v", err)
 	}
 	var afterApprove database.SaasPayment
@@ -116,7 +116,7 @@ func TestRevertApprovedPayment_noCycle_deletesCreatedCycleAndRestoresSubscriptio
 	}
 	db.Create(&pay)
 
-	if err := ApprovePayment(pay.ID, plan.ID, 1, "renovación anticipada", 1); err != nil {
+	if err := ApprovePayment(pay.ID, plan.ID, 1, "renovación anticipada", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment: %v", err)
 	}
 
@@ -178,13 +178,13 @@ func TestRevertApprovedPayment_blocksWhenNewerApprovedPaymentExists(t *testing.T
 
 	pay1 := database.SaasPayment{TenantID: tenant.ID, Amount: 99, Currency: "PEN", PeriodMonths: 1, Status: database.SaasPayPendingReview}
 	db.Create(&pay1)
-	if err := ApprovePayment(pay1.ID, plan.ID, 1, "primero", 1); err != nil {
+	if err := ApprovePayment(pay1.ID, plan.ID, 1, "primero", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment #1: %v", err)
 	}
 
 	pay2 := database.SaasPayment{TenantID: tenant.ID, Amount: 99, Currency: "PEN", PeriodMonths: 1, Status: database.SaasPayPendingReview}
 	db.Create(&pay2)
-	if err := ApprovePayment(pay2.ID, plan.ID, 1, "segundo", 1); err != nil {
+	if err := ApprovePayment(pay2.ID, plan.ID, 1, "segundo", 1, nil); err != nil {
 		t.Fatalf("ApprovePayment #2: %v", err)
 	}
 

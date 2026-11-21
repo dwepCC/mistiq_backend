@@ -311,6 +311,7 @@ func (h *CashBankHandler) CreateBankAccountForm(c fiber.Ctx) error {
 		c.FormValue("name"),
 		c.FormValue("bank_name"),
 		c.FormValue("account_number"),
+		c.FormValue("cci"),
 		currency,
 		accType,
 		c.FormValue("payment_method"),

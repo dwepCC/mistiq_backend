@@ -113,5 +113,8 @@ func ensureInventorySeries(db *gorm.DB, branchID uint, seriesCode, docType strin
 		Correlative: 1,
 		Active:      true,
 	}
-	return db.Create(&row).Error
+	// Omit is_default: la columna se agrega recién en V114DocumentSeriesIsDefault, versiones
+	// después de esta seed (V83). Al reproducir migraciones desde un tenant atrasado, insertar
+	// este campo aquí falla con "Unknown column" porque la columna todavía no existe en ese punto.
+	return db.Omit("is_default").Create(&row).Error
 }

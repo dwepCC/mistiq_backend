@@ -34,6 +34,13 @@ func restoreStockFromKardexTx(tx *gorm.DB, sale *database.TenantSale, ref string
 		return nil
 	}
 
+	// Lo que ya repusieron notas de crédito parciales aceptadas de esta venta no se repone dos
+	// veces al anularla en total (parcial + total dejaba el stock inflado).
+	alreadyBack, err := partialNoteRestoredQty(tx, sale.ID)
+	if err != nil {
+		return err
+	}
+
 	uid := userID
 	if uid == 0 {
 		uid = sale.UserID
@@ -44,20 +51,81 @@ func restoreStockFromKardexTx(tx *gorm.DB, sale *database.TenantSale, ref string
 		if mv.Quantity <= 0 {
 			continue
 		}
+		qty := mv.Quantity
+		key := stockKey{mv.ProductID, presentationKey(mv.PresentationID), mv.BranchID}
+		if back := alreadyBack[key]; back > 0 {
+			d := back
+			if d > qty {
+				d = qty
+			}
+			alreadyBack[key] = back - d
+			qty -= d
+		}
+		if qty <= 0 {
+			continue
+		}
 		if err := inv.RecordMovementTx(tx, invsvc.MovementInput{
 			ProductID:      mv.ProductID,
 			PresentationID: mv.PresentationID,
 			BranchID:       mv.BranchID,
 			Type:           "in",
-			Quantity:       mv.Quantity,
+			Quantity:       qty,
 			Reference:      ref,
 			UserID:         uid,
 			OperationCode:  "SALE",
+			// Snapshot de trazabilidad: la reversión ya sabe cuánto devolver (mv.Quantity, en
+			// unidad base, sin cambios). Esto solo conserva CON QUÉ unidad de venta/factor se
+			// vendió originalmente, para que el Kardex de la reversión sea igual de legible que
+			// el de la salida ("+150 KG, equivalente a 1.5 SACO 100KG") en vez de solo "+150 KG".
+			SaleUnitID:       mv.SaleUnitID,
+			SaleUnitQuantity: mv.SaleUnitQuantity,
+			ConversionFactor: mv.ConversionFactor,
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+type stockKey struct {
+	productID      uint
+	presentationID uint
+	branchID       uint
+}
+
+func presentationKey(p *uint) uint {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// partialNoteRestoredQty suma lo que las notas de crédito (parciales) de la venta ya repusieron
+// al kardex, por producto/presentación/sucursal. Las notas guardan su reposición con la
+// referencia "NC/<número de la nota>".
+func partialNoteRestoredQty(tx *gorm.DB, saleID uint) (map[stockKey]float64, error) {
+	out := map[stockKey]float64{}
+	var numbers []string
+	if err := tx.Model(&database.TenantSale{}).
+		Where("original_sale_id = ? AND doc_type = ?", saleID, "NOTA_CREDITO").
+		Pluck("number", &numbers).Error; err != nil {
+		return nil, err
+	}
+	if len(numbers) == 0 {
+		return out, nil
+	}
+	refs := make([]string, len(numbers))
+	for i, n := range numbers {
+		refs[i] = "NC/" + n
+	}
+	var ins []database.TenantStockMovement
+	if err := tx.Where("reference IN ? AND type = ?", refs, "in").Find(&ins).Error; err != nil {
+		return nil, err
+	}
+	for _, m := range ins {
+		out[stockKey{m.ProductID, presentationKey(m.PresentationID), m.BranchID}] += m.Quantity
+	}
+	return out, nil
 }
 
 // RestorePartialStockFromKardexTx repone al inventario SOLO lo que corresponde a las líneas
@@ -94,14 +162,21 @@ func RestorePartialStockFromKardexTx(tx *gorm.DB, noteSale *database.TenantSale,
 		if len(outs) == 0 {
 			continue
 		}
-		var totalOut float64
-		for _, mv := range outs {
-			totalOut += mv.Quantity
+		// El ratio se calcula en unidad COMERCIAL: ni.Quantity (lo que devuelve la nota) contra
+		// originalItem.Quantity (lo que se vendió), ambos TenantSaleItem.Quantity — siempre la
+		// misma unidad entre sí, haya o no SaleUnit. NO se calcula contra la suma del kardex
+		// (antes: totalOut): para una línea con SaleUnit, kardex.Quantity está en unidad BASE
+		// (ej. 200 KG) mientras que ni.Quantity está en unidad COMERCIAL (ej. 0.5 sacos) — son
+		// unidades distintas, dividir una entre otra daría un ratio sin sentido. Para líneas sin
+		// SaleUnit esto no cambia nada: ahí unidad comercial y base siempre coinciden.
+		var originalItem database.TenantSaleItem
+		if err := tx.First(&originalItem, *ni.OriginalSaleItemID).Error; err != nil {
+			return err
 		}
-		if totalOut <= 0 {
+		if originalItem.Quantity <= 0 {
 			continue
 		}
-		ratio := ni.Quantity / totalOut
+		ratio := ni.Quantity / originalItem.Quantity
 		if ratio > 1 {
 			ratio = 1
 		}
@@ -111,15 +186,25 @@ func RestorePartialStockFromKardexTx(tx *gorm.DB, noteSale *database.TenantSale,
 			if qty <= 0 {
 				continue
 			}
+			// La cantidad comercial también se prorratea (misma ratio que la cantidad base); el
+			// factor usado en la venta original no cambia por ser una devolución parcial.
+			var saleUnitQty *float64
+			if mv.SaleUnitQuantity != nil {
+				q := *mv.SaleUnitQuantity * ratio
+				saleUnitQty = &q
+			}
 			if err := inv.RecordMovementTx(tx, invsvc.MovementInput{
-				ProductID:      mv.ProductID,
-				PresentationID: mv.PresentationID,
-				BranchID:       mv.BranchID,
-				Type:           "in",
-				Quantity:       qty,
-				Reference:      ref,
-				UserID:         uid,
-				OperationCode:  "SALE",
+				ProductID:        mv.ProductID,
+				PresentationID:   mv.PresentationID,
+				BranchID:         mv.BranchID,
+				Type:             "in",
+				Quantity:         qty,
+				Reference:        ref,
+				UserID:           uid,
+				OperationCode:    "SALE",
+				SaleUnitID:       mv.SaleUnitID,
+				SaleUnitQuantity: saleUnitQty,
+				ConversionFactor: mv.ConversionFactor,
 			}); err != nil {
 				return err
 			}

@@ -19,7 +19,8 @@ func isNoteSaleDocType(docType string) bool {
 	}
 }
 
-// shouldRegenerateNotePayload true cuando no hay payload o el envío previo falló (error).
+// shouldRegenerateNotePayload true cuando no hay payload o el envío previo falló (error) o SUNAT lo rechazó (rejected): el payload
+// guardado es el que se rechazó, así que reenviarlo tal cual lo rechazaría igual aunque el armado ya esté corregido.
 func shouldRegenerateNotePayload(inv *database.TenantInvoice) bool {
 	if inv == nil {
 		return true
@@ -27,7 +28,8 @@ func shouldRegenerateNotePayload(inv *database.TenantInvoice) bool {
 	if strings.TrimSpace(inv.NotePayloadJSON) == "" {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(inv.SunatStatus), "error")
+	st := strings.TrimSpace(inv.SunatStatus)
+	return strings.EqualFold(st, "error") || strings.EqualFold(st, "rejected")
 }
 
 func parseNotePayloadJSON(raw string) (*facturador.NotePayload, error) {

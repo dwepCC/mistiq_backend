@@ -18,6 +18,12 @@ func isGuiaSaleDocType(docType string) bool {
 	return dt == "GUIA_REMISION" || dt == "GUIA_TRANSPORTISTA"
 }
 
+// isSalesNoteDocType nota de venta (comprobante interno, sin código SUNAT).
+func isSalesNoteDocType(docType string) bool {
+	dt := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(docType), "_", " "))
+	return dt == "NOTA DE VENTA" || dt == "NOTA VENTA"
+}
+
 func isRetentionSaleDocType(docType string) bool {
 	return strings.ToUpper(strings.TrimSpace(docType)) == "RETENCION"
 }
@@ -89,12 +95,8 @@ func validateDespatchInput(input CreateDespatchInput, sunatCode string) error {
 	if strings.TrimSpace(dest.RznSocial) == "" {
 		return errors.New("razón social del destinatario es obligatoria")
 	}
-	if strings.TrimSpace(dest.Address) == "" {
-		return errors.New("dirección del destinatario es obligatoria")
-	}
-	if strings.TrimSpace(dest.Ubigeo) == "" {
-		return errors.New("ubigeo del destinatario es obligatorio")
-	}
+	// La dirección y el ubigeo del destinatario no los exige SUNAT (el XML lleva el punto de
+	// llegada aparte): son datos de ayuda que el formulario autocompleta y deja editar.
 	env := input.Envio
 	if strings.TrimSpace(env.CodTraslado) == "" {
 		return errors.New("motivo de traslado es obligatorio")
@@ -129,7 +131,7 @@ func validateDespatchInput(input CreateDespatchInput, sunatCode string) error {
 			return errors.New("razón social del transportista es obligatoria en transporte público")
 		}
 	}
-	if sunatCode == "09" && modTraslado == greModTrasladoPrivado {
+	if sunatCode == "09" && modTraslado == greModTrasladoPrivado && !env.IndM1L {
 		if strings.TrimSpace(env.TransportistaPlaca) == "" {
 			return errors.New("placa del vehículo es obligatoria en transporte privado")
 		}
@@ -164,8 +166,8 @@ func (s *BillingService) applyDespatchPrefillFromSale(input *CreateDespatchInput
 		return fmt.Errorf("venta origen no encontrada: %w", err)
 	}
 	srcCode := strings.TrimSpace(getSeriesSunatCode(s.db, src.SeriesID))
-	if srcCode != "01" && srcCode != "03" {
-		return fmt.Errorf("solo se puede generar guía desde factura (01) o boleta (03)")
+	if srcCode != "01" && srcCode != "03" && srcCode != "00" && !isSalesNoteDocType(src.DocType) {
+		return fmt.Errorf("solo se puede generar guía desde factura, boleta o nota de venta")
 	}
 	if input.BranchID == 0 {
 		input.BranchID = src.BranchID
@@ -247,6 +249,10 @@ func (s *BillingService) despatchAddDocFromSale(sourceSaleID uint, emisorRUC str
 			tipo = "03"
 		}
 	}
+	// Solo factura y boleta son documentos relacionados válidos (catálogo 61); la nota de venta no.
+	if tipo != "01" && tipo != "03" {
+		return nil
+	}
 	nro := formatAffectedDocumentNumber(&src)
 	if tipo == "" || nro == "" {
 		return nil
@@ -272,10 +278,14 @@ func (s *BillingService) despatchAddDocFromSale(sourceSaleID uint, emisorRUC str
 // origen, el destinatario real solo se guardaba en tenant_despatches, nunca en tenant_sales), y
 // print_data.go (PDF del panel) solo mira sale.ContactID: al no encontrarlo, caía siempre al
 // "Cliente genérico" (doc 99999999) sin importar quién fuera el destinatario real de la guía.
-func (s *BillingService) resolveOrCreateDespatchContact(dest DespatchDestinatarioInput) (*uint, error) {
+func (s *BillingService) resolveOrCreateDespatchContact(dest DespatchDestinatarioInput, contactType, emisorRUC string) (*uint, error) {
 	numDoc := strings.TrimSpace(dest.NumDoc)
-	if numDoc == "" {
+	if numDoc == "" || (emisorRUC != "" && numDoc == strings.TrimSpace(emisorRUC)) {
+		// La propia empresa (traslado entre locales, compra) no es un contacto del directorio.
 		return nil, nil
+	}
+	if contactType == "" {
+		contactType = "customer"
 	}
 	tipoDoc := strings.TrimSpace(dest.TipoDoc)
 	if tipoDoc == "" {
@@ -284,6 +294,17 @@ func (s *BillingService) resolveOrCreateDespatchContact(dest DespatchDestinatari
 	var contact database.TenantContact
 	err := s.db.Where("doc_number = ? AND active = ?", numDoc, true).First(&contact).Error
 	if err == nil {
+		// Guarda lo que el usuario completó en la guía solo si el contacto no lo tenía.
+		upd := map[string]interface{}{}
+		if strings.TrimSpace(contact.Address) == "" && strings.TrimSpace(dest.Address) != "" {
+			upd["address"] = strings.TrimSpace(dest.Address)
+		}
+		if strings.TrimSpace(contact.Ubigeo) == "" && strings.TrimSpace(dest.Ubigeo) != "" {
+			upd["ubigeo"] = strings.TrimSpace(dest.Ubigeo)
+		}
+		if len(upd) > 0 {
+			_ = s.db.Model(&contact).Updates(upd).Error
+		}
 		return &contact.ID, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -295,7 +316,7 @@ func (s *BillingService) resolveOrCreateDespatchContact(dest DespatchDestinatari
 		razon = numDoc
 	}
 	contact = database.TenantContact{
-		Type:         "customer",
+		Type:         contactType,
 		DocType:      tipoDoc,
 		DocNumber:    numDoc,
 		BusinessName: razon,

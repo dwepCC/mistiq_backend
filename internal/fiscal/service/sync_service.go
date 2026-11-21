@@ -48,7 +48,7 @@ func (s *SyncService) ApplyStatus(db *gorm.DB, p *StatusWebhookPayload) error {
 		return errors.New("sale_id requerido")
 	}
 
-	pipeline := mapFiscalStatusToPipeline(p.Status, p.SunatCode)
+	pipeline, outage := mapFiscalStatusToPipeline(p.Status, p.SunatCode, p.SunatMessage)
 
 	var inv database.TenantInvoice
 	err := db.Where("sale_id = ?", p.SaleID).First(&inv).Error
@@ -71,7 +71,8 @@ func (s *SyncService) ApplyStatus(db *gorm.DB, p *StatusWebhookPayload) error {
 
 	now := time.Now()
 	currentPipeline := billingstate.NormalizePipeline(inv.PipelineStatus)
-	if !billingstate.CanTransition(currentPipeline, pipeline) {
+	// Un falso «rechazado»/«error» causado por una caída de SUNAT sí puede volver a «enviado» (y luego a «aceptado»).
+	if !billingstate.CanApplyFiscal(currentPipeline, pipeline, outage) {
 		pipeline = currentPipeline
 	}
 
@@ -118,51 +119,10 @@ func (s *SyncService) ApplyStatus(db *gorm.DB, p *StatusWebhookPayload) error {
 	return billingstate.SyncSaleBillingStatus(db, p.SaleID, pipeline)
 }
 
-func mapFiscalStatusToPipeline(status, sunatCode string) string {
-	status = strings.ToLower(strings.TrimSpace(status))
-	code := strings.TrimSpace(sunatCode)
-
-	if code != "" {
-		if n, err := strconv.Atoi(code); err == nil {
-			if n >= 4000 {
-				return billingstate.OBSERVED
-			}
-			if n != 0 && status != "accepted" && status != "observed" {
-				return billingstate.SUNAT_REJECTED
-			}
-		}
-	}
-
-	switch status {
-	case "accepted":
-		if isSunatObservedCode(code) {
-			return billingstate.OBSERVED
-		}
-		return billingstate.SUNAT_ACCEPTED
-	case "observed":
-		return billingstate.OBSERVED
-	case "rejected":
-		return billingstate.SUNAT_REJECTED
-	case "queued", "pending":
-		return billingstate.PENDING_FISCAL
-	case "sending", "sent":
-		return billingstate.SENDING_TO_SUNAT
-	case "retrying":
-		return billingstate.RETRYING
-	case "error":
-		if code != "" && code != "0" {
-			return billingstate.SUNAT_REJECTED
-		}
-		return billingstate.FAILED
-	default:
-		if isSunatObservedCode(code) {
-			return billingstate.OBSERVED
-		}
-		if code == "0" {
-			return billingstate.SUNAT_ACCEPTED
-		}
-		return billingstate.UNKNOWN
-	}
+// mapFiscalStatusToPipeline traduce el estado del facturador al pipeline. Ver billingstate.PipelineFromFiscal: una caída
+// de SUNAT/red o un veredicto pendiente nunca se marca como «rechazado».
+func mapFiscalStatusToPipeline(status, sunatCode, sunatMessage string) (pipeline string, outage bool) {
+	return billingstate.PipelineFromFiscal(status, sunatCode, sunatMessage)
 }
 
 func isSunatObservedCode(code string) bool {

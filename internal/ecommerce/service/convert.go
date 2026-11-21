@@ -152,10 +152,22 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 				igvType = p.IgvAffectationType
 				priceIncludesIgv = p.PriceIncludesIgv
 			}
+			// Con unidad de venta (Gramo, Caja…) la línea se declara con SU unidad SUNAT: la
+			// cantidad del pedido está en esa unidad, no en la base del producto.
+			if it.SaleUnitID != nil && *it.SaleUnitID > 0 {
+				var su database.TenantProductSaleUnit
+				if s.db.Select("unit").Where("id = ? AND product_id = ?", *it.SaleUnitID, it.ProductID).First(&su).Error == nil &&
+					strings.TrimSpace(su.Unit) != "" {
+					unit = su.Unit
+				}
+			}
 		}
 		saleItems = append(saleItems, salessvc.SaleItemInput{
 			ProductID:          productID,
 			Code:               code,
+			PresentationID:     it.PresentationID,
+			SaleUnitID:         it.SaleUnitID,
+			ModifiersJSON:      it.ModifiersJSON,
 			Description:        it.Name,
 			Unit:               unit,
 			Quantity:           it.Quantity,
@@ -163,6 +175,10 @@ func (s *EcommerceService) ConvertToSale(orderID uint, input ConvertInput) (*dat
 			IgvAffectationType: igvType,
 			PriceIncludesIgv:   priceIncludesIgv,
 			ComboJSON:          it.ComboJSON,
+			// El precio es el que el cliente vio y pagó al hacer el pedido web — puede haber
+			// cambiado en el catálogo desde entonces; convertir no debe reevaluarlo contra
+			// validateAuthorizedPrices (mismo criterio que una cotización ya pactada).
+			PriceAuthorized: true,
 		})
 	}
 

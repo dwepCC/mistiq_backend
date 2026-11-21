@@ -2,8 +2,7 @@ package service
 
 import (
 	"context"
-	"strconv"
-	"strings"
+	"tukifac/pkg/branchscope"
 
 	fiscalsvc "tukifac/internal/fiscal/service"
 	"tukifac/pkg/billingevents"
@@ -31,7 +30,7 @@ func NotifyFromWebhookPayload(tenantID uint, p *fiscalsvc.StatusWebhookPayload) 
 	if p == nil {
 		return
 	}
-	pipeline := pipelineFromFiscalStatus(p.Status, p.SunatCode)
+	pipeline := pipelineFromFiscalStatus(p.Status, p.SunatCode, p.SunatMessage)
 	NotifyBillingStatusUpdated(tenantID, p.SaleID, pipeline, p.SunatMessage)
 	RunFiscalWebhookSideEffects(tenantID, p.TenantSlug, p.SaleID, pipeline)
 }
@@ -53,6 +52,7 @@ func RunFiscalWebhookSideEffects(tenantID uint, tenantSlug string, saleID uint, 
 		return
 	}
 	defer database.ReleaseTenantDB(tenant.DBName)
+	db = branchscope.System(db, "billing: notificación de comprobante (proceso interno)")
 	svc := NewBillingService(db)
 	svc.SetCentralTenantID(tenantID)
 	if tenant.Slug != "" {
@@ -63,47 +63,7 @@ func RunFiscalWebhookSideEffects(tenantID uint, tenantSlug string, saleID uint, 
 	svc.PostFiscalAcceptSideEffects(saleID, pipeline)
 }
 
-func pipelineFromFiscalStatus(status, sunatCode string) string {
-	status = strings.ToLower(strings.TrimSpace(status))
-	code := strings.TrimSpace(sunatCode)
-	if code != "" {
-		if n, err := strconv.Atoi(code); err == nil {
-			if n >= 4000 {
-				return billingstate.OBSERVED
-			}
-			if n != 0 && status != "accepted" && status != "observed" {
-				return billingstate.SUNAT_REJECTED
-			}
-		}
-	}
-	switch status {
-	case "accepted":
-		if n, err := strconv.Atoi(code); err == nil && n >= 4000 {
-			return billingstate.OBSERVED
-		}
-		return billingstate.SUNAT_ACCEPTED
-	case "observed":
-		return billingstate.OBSERVED
-	case "rejected":
-		return billingstate.SUNAT_REJECTED
-	case "queued", "pending":
-		return billingstate.PENDING_FISCAL
-	case "sending", "sent":
-		return billingstate.SENDING_TO_SUNAT
-	case "retrying":
-		return billingstate.RETRYING
-	case "error":
-		if code != "" && code != "0" {
-			return billingstate.SUNAT_REJECTED
-		}
-		return billingstate.FAILED
-	default:
-		if n, err := strconv.Atoi(code); err == nil && n >= 4000 {
-			return billingstate.OBSERVED
-		}
-		if code == "0" {
-			return billingstate.SUNAT_ACCEPTED
-		}
-		return billingstate.UNKNOWN
-	}
+func pipelineFromFiscalStatus(status, sunatCode, sunatMessage string) string {
+	p, _ := billingstate.PipelineFromFiscal(status, sunatCode, sunatMessage)
+	return p
 }

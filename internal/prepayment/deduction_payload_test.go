@@ -197,7 +197,7 @@ func TestGreenterXML_PrepaymentDeduction_PayableAmountPositive(t *testing.T) {
 		},
 		Client: facturador.InvoiceClient{
 			TipoDoc: "6", NumDoc: "20100070970", RznSocial: "CLIENTE SAC",
-			Address: facturador.InvoiceAddress{Ubigueo: "040101", CodigoPais: "PE", Direccion: "Arequipa"},
+			Address: &facturador.InvoiceAddress{Ubigueo: "040101", CodigoPais: "PE", Direccion: "Arequipa"},
 		},
 	}
 	apps := []database.TenantSalePrepaymentApplication{
@@ -289,7 +289,7 @@ func TestGreenterXML_PrepaymentDeduction_PartialNetPayable(t *testing.T) {
 		},
 		Client: facturador.InvoiceClient{
 			TipoDoc: "6", NumDoc: "20100070970", RznSocial: "CLIENTE SAC",
-			Address: facturador.InvoiceAddress{Ubigueo: "040101", CodigoPais: "PE", Direccion: "Arequipa"},
+			Address: &facturador.InvoiceAddress{Ubigueo: "040101", CodigoPais: "PE", Direccion: "Arequipa"},
 		},
 	}
 	apps := []database.TenantSalePrepaymentApplication{

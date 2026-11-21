@@ -20,6 +20,10 @@ type PaymentDetail struct {
 	TenantName string `json:"tenant_name"`
 	TenantSlug string `json:"tenant_slug"`
 	TenantRUC  string `json:"tenant_ruc"`
+	// CycleAmount: monto BASE del ciclo (plan, sin reconexión) que este pago cancela — para que
+	// el panel pueda desglosar plan vs. reconexión en vez de mostrar solo un total sin explicar.
+	// nil si el pago no está ligado a un ciclo (ver SaasPayment.BillingCycleID).
+	CycleAmount *float64 `json:"cycle_amount,omitempty"`
 }
 
 // PaymentListParams filtros de /superadmin/payments — mismo patrón que
@@ -85,6 +89,21 @@ func (s *PaymentService) List(params PaymentListParams) ([]PaymentDetail, int64,
 		}
 	}
 
+	cycleIDs := make([]uint, 0, len(payments))
+	for _, p := range payments {
+		if p.BillingCycleID != nil {
+			cycleIDs = append(cycleIDs, *p.BillingCycleID)
+		}
+	}
+	cycleAmountByID := map[uint]float64{}
+	if len(cycleIDs) > 0 {
+		var cycles []database.SaasBillingCycle
+		database.CentralDB.Select("id", "amount").Where("id IN ?", cycleIDs).Find(&cycles)
+		for _, c := range cycles {
+			cycleAmountByID[c.ID] = c.Amount
+		}
+	}
+
 	result := make([]PaymentDetail, 0, len(payments))
 	for _, p := range payments {
 		d := PaymentDetail{SaasPayment: p}
@@ -92,6 +111,11 @@ func (s *PaymentService) List(params PaymentListParams) ([]PaymentDetail, int64,
 			d.TenantName = t.Name
 			d.TenantSlug = t.Slug
 			d.TenantRUC = t.RUC
+		}
+		if p.BillingCycleID != nil {
+			if amt, ok := cycleAmountByID[*p.BillingCycleID]; ok {
+				d.CycleAmount = &amt
+			}
 		}
 		result = append(result, d)
 	}
@@ -124,6 +148,10 @@ type CreatePaymentInput struct {
 	BillingCycleID uint `json:"billing_cycle_id" form:"billing_cycle_id"`
 	// ReviewedBy superadmin que registra el pago; queda como quien lo aprobó.
 	ReviewedBy uint `json:"-"`
+	// ReconnectionFeeOverride: excepción del panel central (ver saas.ApprovePayment) para
+	// condonar (0) o descontar el recargo de reconexión al registrar el pago del tenant que
+	// vino a pagar en persona. nil = cobrar el recargo completo, como siempre.
+	ReconnectionFeeOverride *float64 `json:"reconnection_fee_override" form:"reconnection_fee_override"`
 }
 
 // Create registra un pago cobrado fuera del sistema (efectivo, transferencia directa) y lo
@@ -150,7 +178,7 @@ func (s *PaymentService) Create(input CreatePaymentInput) (*database.SaasPayment
 	// Aplica la renovación: extiende la suscripción, marca el cobro pagado y sincroniza
 	// módulos. Si fallara, el pago queda registrado como pendiente y se puede aprobar a
 	// mano desde la misma pantalla; por eso el error dice dónde quedó.
-	if err := saas.ApprovePayment(payment.ID, 0, input.PeriodMonths, input.Notes, input.ReviewedBy); err != nil {
+	if err := saas.ApprovePayment(payment.ID, 0, input.PeriodMonths, input.Notes, input.ReviewedBy, input.ReconnectionFeeOverride); err != nil {
 		return nil, fmt.Errorf("el pago se registró pero no pudo aplicarse (queda pendiente de aprobación): %w", err)
 	}
 
@@ -168,10 +196,14 @@ type ApproveInput struct {
 	// el tenant), no fuerza 1 mes.
 	PeriodMonths int
 	ReviewerID   uint
+	// ReconnectionFeeOverride: excepción del panel central (ver saas.ApprovePayment) para
+	// condonar (0) o descontar el recargo de reconexión al aprobar. nil = exigir el recargo
+	// completo, como siempre.
+	ReconnectionFeeOverride *float64
 }
 
 func (s *PaymentService) Approve(paymentID uint, input ApproveInput) error {
-	return saas.ApprovePayment(paymentID, input.PlanID, input.PeriodMonths, input.AdminNotes, input.ReviewerID)
+	return saas.ApprovePayment(paymentID, input.PlanID, input.PeriodMonths, input.AdminNotes, input.ReviewerID, input.ReconnectionFeeOverride)
 }
 
 func (s *PaymentService) Reject(paymentID uint, adminNotes string, reviewerID uint) error {

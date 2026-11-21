@@ -22,6 +22,8 @@ func setupComboOrderTestDB(t *testing.T) (*gorm.DB, *database.TenantRestaurantTa
 		&database.TenantComboGroupItem{},
 		// resolveRestaurantOrderItem consulta presentaciones y extras de todo producto.
 		&database.TenantProductPresentation{},
+		&database.TenantProductStock{},
+		&database.TenantProductPresentationStock{},
 		&database.TenantModifierGroup{},
 		&database.TenantModifierOption{},
 		&database.TenantProductModifierGroup{},
@@ -560,6 +562,7 @@ func TestRecordComboComponentStock_IgnoresPlainComandas(t *testing.T) {
 	svc := New(db)
 
 	db.Model(&database.TenantProduct{}).Where("id = ?", f.Papas.ID).Update("manage_stock", true)
+	db.Create(&database.TenantProductStock{ProductID: f.Papas.ID, BranchID: 1, Quantity: 10})
 
 	sess, _ := svc.OpenTableExtended(openInput(table.ID))
 	papasID := f.Papas.ID

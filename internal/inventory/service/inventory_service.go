@@ -1,6 +1,7 @@
 package service
 
 import (
+	"tukifac/pkg/branchscope"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 
 	"tukifac/pkg/database"
 	"tukifac/pkg/stockreserve"
+	"tukifac/pkg/categorybranch"
+	"tukifac/pkg/productbranch"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -47,6 +50,19 @@ type MovementInput struct {
 	// confirmados. Lo usan las transferencias y las salidas manuales; las ventas validan el
 	// disponible antes de llegar aquí (y excluyen la reserva del propio pedido).
 	RespectReserved bool
+	// PurchaseItemID: enlace directo a la línea de compra que originó este movimiento, para que
+	// una reversión (PurchaseService.Void) pueda releer la cantidad/costo BASE históricos de esta
+	// línea específica en vez de recalcularlos desde TenantPurchaseItem (que guarda cantidad/costo
+	// COMERCIALES).
+	PurchaseItemID *uint
+	// SaleUnitID/SaleUnitQuantity/ConversionFactor: snapshot histórico de la conversión cuando el
+	// movimiento nace de una venta con unidad de venta (TenantProductSaleUnit). Quantity de este
+	// mismo MovementInput debe venir YA convertida a unidad base — este método no hace ninguna
+	// conversión, solo persiste el snapshot que el caller ya calculó (ver
+	// internal/sales/service/sale_unit_resolver.go).
+	SaleUnitID       *uint
+	SaleUnitQuantity *float64
+	ConversionFactor *float64
 }
 
 func (s *InventoryService) resolveMovementOperationType(tx *gorm.DB, input *MovementInput) error {
@@ -66,6 +82,61 @@ func (s *InventoryService) resolveMovementOperationType(tx *gorm.DB, input *Move
 	return nil
 }
 
+// CheckProductPresentation valida la combinación producto/presentación de un movimiento de stock
+// y devuelve los nombres para armar mensajes legibles.
+//   - Un producto con presentaciones (has_variants) SIEMPRE mueve el stock de una presentación:
+//     sin ella el movimiento caía en la fila "agregada" del producto, que ningún total ni venta
+//     lee (stock invisible).
+//   - La presentación debe pertenecer al producto (antes se aceptaba la de otro producto) y, si
+//     requireActive, estar activa (las ventas/egresos no deben salir de una presentación inactiva).
+//   - Un producto sin presentaciones no acepta presentation_id.
+//
+// Si el producto no existe devuelve nil: quien llama ya valida eso por su cuenta.
+func CheckProductPresentation(tx *gorm.DB, productID uint, presentationID *uint, requireActive bool) (productName, presentationName string, err error) {
+	var product database.TenantProduct
+	if tx.Select("id", "name", "has_variants").First(&product, productID).Error != nil {
+		return "", "", nil
+	}
+	byPresentation := presentationID != nil && *presentationID > 0
+	if !product.HasVariants {
+		if byPresentation {
+			return product.Name, "", fmt.Errorf("«%s» no maneja presentaciones", product.Name)
+		}
+		return product.Name, "", nil
+	}
+	if !byPresentation {
+		var n int64
+		tx.Model(&database.TenantProductPresentation{}).Where("product_id = ?", productID).Count(&n)
+		if n == 0 {
+			return product.Name, "", nil // marcado con variantes pero sin ninguna creada: sin qué elegir
+		}
+		return product.Name, "", fmt.Errorf("«%s» maneja stock por presentación: seleccione una presentación", product.Name)
+	}
+	var pres database.TenantProductPresentation
+	if tx.First(&pres, *presentationID).Error != nil {
+		return product.Name, "", fmt.Errorf("la presentación indicada no existe para «%s»", product.Name)
+	}
+	if pres.ProductID != productID {
+		return product.Name, pres.Name, fmt.Errorf("la presentación «%s» no pertenece a «%s»", pres.Name, product.Name)
+	}
+	if requireActive && !pres.Active {
+		return product.Name, pres.Name, fmt.Errorf("la presentación «%s» de «%s» está inactiva", pres.Name, product.Name)
+	}
+	return product.Name, pres.Name, nil
+}
+
+// stockLabel arma «Producto» o «Producto» (Presentación) para los mensajes de stock.
+func stockLabel(productName, presentationName string) string {
+	switch {
+	case productName == "":
+		return "el producto"
+	case presentationName == "":
+		return "«" + productName + "»"
+	default:
+		return "«" + productName + "» (" + presentationName + ")"
+	}
+}
+
 // RecordMovementTx registra un movimiento y actualiza stock dentro de una transacción existente.
 // Si input.PresentationID viene informado, el saldo afectado es el de esa variante
 // (TenantProductPresentationStock) en vez del agregado del producto (TenantProductStock).
@@ -77,6 +148,11 @@ func (s *InventoryService) RecordMovementTx(tx *gorm.DB, input MovementInput) er
 		return errors.New("la cantidad debe ser mayor a cero")
 	}
 	if err := s.resolveMovementOperationType(tx, &input); err != nil {
+		return err
+	}
+	isOut := input.Type == "out" || input.Type == "adjustment_out"
+	productName, presentationName, err := CheckProductPresentation(tx, input.ProductID, input.PresentationID, isOut)
+	if err != nil {
 		return err
 	}
 
@@ -115,7 +191,8 @@ func (s *InventoryService) RecordMovementTx(tx *gorm.DB, input MovementInput) er
 	case "out", "adjustment_out":
 		newBalance = currentQty - input.Quantity
 		if newBalance < 0 {
-			return errors.New("stock insuficiente")
+			return fmt.Errorf("stock insuficiente para %s: requiere %.2f, hay %.2f",
+				stockLabel(productName, presentationName), input.Quantity, currentQty)
 		}
 		if input.RespectReserved && input.Type == "out" {
 			if reserved, rerr := stockreserve.ReservedFor(tx, input.BranchID, 0, input.ProductID, input.PresentationID); rerr == nil && newBalance < reserved {
@@ -134,11 +211,26 @@ func (s *InventoryService) RecordMovementTx(tx *gorm.DB, input MovementInput) er
 		Quantity: input.Quantity, UnitCost: input.UnitCost, Balance: newBalance,
 		Reference: input.Reference, Notes: input.Notes, UserID: input.UserID,
 		OperationTypeID: input.OperationTypeID, InventoryDocumentID: input.InventoryDocumentID,
-		TransferID: input.TransferID, SaleItemID: input.SaleItemID,
+		TransferID: input.TransferID, SaleItemID: input.SaleItemID, PurchaseItemID: input.PurchaseItemID,
+		SaleUnitID: input.SaleUnitID, SaleUnitQuantity: input.SaleUnitQuantity, ConversionFactor: input.ConversionFactor,
 		CreatedAt: time.Now(),
 	}
 	if err := tx.Create(&movement).Error; err != nil {
 		return err
+	}
+
+	// Entra stock a una sucursal donde el producto no está asignado (y sí lo está a otras):
+	// se asigna, si no ese stock quedaría invisible en la sucursal que lo recibió. Un producto
+	// sin asignación (= todas) no se toca. Ver pkg/productbranch.
+	if input.Type == "in" || input.Type == "adjustment_in" || (input.Type == "adjustment" && newBalance > 0) {
+		if err := productbranch.AssignIfRestricted(tx, input.ProductID, input.BranchID); err != nil {
+			return err
+		}
+		// Y si su categoría es exclusiva de otra sucursal, se amplía a todas: el producto ya se vende también aquí y no
+		// debe quedar sin categoría visible (ver categorybranch.WidenForBranch).
+		if err := categorybranch.WidenForBranch(tx, input.ProductID, input.BranchID); err != nil {
+			return err
+		}
 	}
 
 	if byPresentation {
@@ -604,9 +696,12 @@ func (s *InventoryService) ConfirmTransfer(transferID, userID uint) error {
 				if err := json.Unmarshal([]byte(logRow.SerialsJSON), &serials); err != nil {
 					return err
 				}
-				// Mover seriales de origen (in_transit) a destino (available)
+				// Mover seriales de origen (in_transit) a destino (available). Las filas están en la sucursal ORIGEN y quien confirma solo
+				// tiene acceso al destino: la autorización (activa == destino) ya la validó el handler, así que este paso interno de la
+				// transferencia se ejecuta fuera del scope de sucursal (con él, el UPDATE afectaba 0 filas sin error).
+				sysTx := branchscope.System(tx, "inventario: confirmación de transferencia mueve series de origen a destino")
 				for _, serial := range serials {
-					if err := tx.Model(&database.TenantProductSerial{}).
+					if err := sysTx.Model(&database.TenantProductSerial{}).
 						Where("product_id = ? AND branch_id = ? AND serial = ? AND status = ?",
 							logRow.ProductID, logRow.FromBranchID, serial, "in_transit").
 						Updates(map[string]interface{}{
@@ -683,11 +778,24 @@ func (s *InventoryService) CancelTransfer(transferID, userID uint) error {
 
 // ListTransfersByHeader devuelve las transferencias agrupadas por cabecera (solo las que tienen transfer_id o todas las cabeceras).
 func (s *InventoryService) ListTransfersByHeader(limit int) ([]database.TenantTransfer, []database.TenantTransferLog, error) {
+	return s.ListTransfersByHeaderForBranches(limit, nil)
+}
+
+// ListTransfersByHeaderForBranches igual que ListTransfersByHeader pero, si branchIDs no es nil, solo devuelve las
+// transferencias cuyo origen O destino está en branchIDs (slice vacío = ninguna: falla cerrado).
+func (s *InventoryService) ListTransfersByHeaderForBranches(limit int, branchIDs []uint) ([]database.TenantTransfer, []database.TenantTransferLog, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	var transfers []database.TenantTransfer
-	if err := s.db.Order("created_at DESC").Limit(limit).Find(&transfers).Error; err != nil {
+	q := s.db.Order("created_at DESC").Limit(limit)
+	if branchIDs != nil {
+		if len(branchIDs) == 0 {
+			return transfers, nil, nil
+		}
+		q = q.Where("from_branch_id IN ? OR to_branch_id IN ?", branchIDs, branchIDs)
+	}
+	if err := q.Find(&transfers).Error; err != nil {
 		return nil, nil, err
 	}
 	if len(transfers) == 0 {

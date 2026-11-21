@@ -1,6 +1,7 @@
 package service
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestBillTable_splitByComandaIDs_partialKeepsSessionOpen(t *testing.T) {
 		DocType:    "03",
 		IssueDate:  time.Now(),
 		ComandaIDs: []uint{c1.ID},
-		Payments:   []PaymentInput{{Method: "card", Amount: 35.4}},
+		Payments:   []PaymentInput{{Method: "cash", Amount: 35.4}},
 	}, tax.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +104,7 @@ func TestBillTable_splitByComandaIDs_coveringAllPendingClosesSession(t *testing.
 		IssueDate:    time.Now(),
 		CloseSession: false,
 		ComandaIDs:   []uint{c1.ID},
-		Payments:     []PaymentInput{{Method: "card", Amount: 35.4}},
+		Payments:     []PaymentInput{{Method: "cash", Amount: 35.4}},
 	}, tax.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +158,7 @@ func TestBillTable_splitByComandaIDs_partialComboRejected(t *testing.T) {
 		DocType:    "03",
 		IssueDate:  time.Now(),
 		ComandaIDs: []uint{combo1.ID, suelto.ID},
-		Payments:   []PaymentInput{{Method: "card", Amount: 100}},
+		Payments:   []PaymentInput{{Method: "cash", Amount: 100}},
 	}, tax.DefaultConfig())
 	if err == nil {
 		t.Fatal("esperaba error al partir un combo entre selecciones")
@@ -196,7 +197,7 @@ func TestBillTable_splitByComandaIDs_alreadyBilledRejected(t *testing.T) {
 
 	if _, err := svc.BillTable(BillInput{
 		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03", IssueDate: time.Now(),
-		ComandaIDs: []uint{c1.ID}, Payments: []PaymentInput{{Method: "card", Amount: 35.4}},
+		ComandaIDs: []uint{c1.ID}, Payments: []PaymentInput{{Method: "cash", Amount: 35.4}},
 	}, tax.DefaultConfig()); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +205,7 @@ func TestBillTable_splitByComandaIDs_alreadyBilledRejected(t *testing.T) {
 	// Reintentar cobrar c1 (ya facturada) junto con c2: debe rechazar por completo.
 	_, err = svc.BillTable(BillInput{
 		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03", IssueDate: time.Now(),
-		ComandaIDs: []uint{c1.ID, c2.ID}, Payments: []PaymentInput{{Method: "card", Amount: 45}},
+		ComandaIDs: []uint{c1.ID, c2.ID}, Payments: []PaymentInput{{Method: "cash", Amount: 45}},
 	}, tax.DefaultConfig())
 	if err == nil {
 		t.Fatal("esperaba error al reintentar cobrar una comanda ya facturada")
@@ -239,7 +240,7 @@ func TestCancelComanda_alreadyBilledRejected(t *testing.T) {
 
 	if _, err := svc.BillTable(BillInput{
 		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03", IssueDate: time.Now(),
-		ComandaIDs: []uint{c1.ID}, Payments: []PaymentInput{{Method: "card", Amount: 35.4}},
+		ComandaIDs: []uint{c1.ID}, Payments: []PaymentInput{{Method: "cash", Amount: 35.4}},
 	}, tax.DefaultConfig()); err != nil {
 		t.Fatal(err)
 	}
@@ -250,5 +251,91 @@ func TestCancelComanda_alreadyBilledRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "facturada") {
 		t.Fatalf("mensaje inesperado: %v", err)
+	}
+}
+
+func TestBillTable_splitByQuantity_partialUnitsOfSameLine(t *testing.T) {
+	db, table := setupTableSessionTestDB(t)
+	svc := New(db)
+
+	sess, err := svc.OpenTableExtended(openInput(table.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 3 chichas en una sola línea (S/ 10 c/u, IGV incluido) + el mismo producto en otra línea.
+	c1 := database.TenantComanda{SessionID: sess.ID, ProductCode: "P2", ProductName: "Chicha", Quantity: 3, UnitPrice: 10, Status: "pendiente", IgvAffectationType: "10", PriceIncludesIgv: true}
+	c2 := database.TenantComanda{SessionID: sess.ID, ProductCode: "P2", ProductName: "Chicha", Quantity: 1, UnitPrice: 10, Status: "pendiente", IgvAffectationType: "10", PriceIncludesIgv: true}
+	for _, c := range []*database.TenantComanda{&c1, &c2} {
+		if err := db.Create(c).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	series := seedSplitBillSeries(t, db)
+
+	// Primer comensal: 1 de las 3 unidades de c1.
+	sale1, err := svc.BillTable(BillInput{
+		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03", IssueDate: time.Now(),
+		ComandaSplits: []ComandaSplit{{ComandaID: c1.ID, Quantity: 1}},
+		Payments:      []PaymentInput{{Method: "cash", Amount: 10}},
+	}, tax.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(sale1.Total-10) > 0.01 {
+		t.Fatalf("total primer cobro: esperaba 10, got %v", sale1.Total)
+	}
+	var sess1 database.TenantTableSession
+	db.First(&sess1, sess.ID)
+	if sess1.Status != sessionStatusOpen {
+		t.Fatalf("la mesa debe seguir abierta, got %s", sess1.Status)
+	}
+	var orig database.TenantComanda
+	db.First(&orig, c1.ID)
+	if orig.Quantity != 2 || orig.BilledAt != nil {
+		t.Fatalf("la línea original debe quedar con 2 pendientes, got qty=%v billed=%v", orig.Quantity, orig.BilledAt)
+	}
+
+	// Sobrepasar lo pendiente se rechaza y no altera nada.
+	if _, err := svc.BillTable(BillInput{
+		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03", IssueDate: time.Now(),
+		ComandaSplits: []ComandaSplit{{ComandaID: c1.ID, Quantity: 5}},
+		Payments:      []PaymentInput{{Method: "cash", Amount: 50}},
+	}, tax.DefaultConfig()); err == nil {
+		t.Fatal("esperaba error al cobrar más unidades de las pendientes")
+	}
+
+	// Segundo cobro: 1 más de c1 + la línea c2 completa.
+	sale2, err := svc.BillTable(BillInput{
+		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03", IssueDate: time.Now(),
+		ComandaSplits: []ComandaSplit{{ComandaID: c1.ID, Quantity: 1}},
+		ComandaIDs:    []uint{c2.ID},
+		Payments:      []PaymentInput{{Method: "cash", Amount: 20}},
+	}, tax.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(sale2.Total-20) > 0.01 {
+		t.Fatalf("total segundo cobro: esperaba 20, got %v", sale2.Total)
+	}
+	db.First(&sess1, sess.ID)
+	if sess1.Status != sessionStatusOpen {
+		t.Fatalf("queda 1 unidad pendiente: la mesa debe seguir abierta, got %s", sess1.Status)
+	}
+
+	// Tercer cobro: la unidad restante (cantidad completa de la línea) cierra la mesa.
+	sale3, err := svc.BillTable(BillInput{
+		SessionID: sess.ID, UserID: 1, SeriesID: series.ID, DocType: "03", IssueDate: time.Now(),
+		ComandaSplits: []ComandaSplit{{ComandaID: c1.ID, Quantity: 1}},
+		Payments:      []PaymentInput{{Method: "cash", Amount: 10}},
+	}, tax.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.First(&sess1, sess.ID)
+	if sess1.Status != "billed" {
+		t.Fatalf("al cobrar todo lo pendiente la mesa debe cerrarse, got %s", sess1.Status)
+	}
+	if sum := sale1.Total + sale2.Total + sale3.Total; math.Abs(sum-40) > 0.01 {
+		t.Fatalf("la suma de los cobros debe ser 40, got %v", sum)
 	}
 }

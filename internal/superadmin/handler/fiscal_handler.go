@@ -24,6 +24,10 @@ import (
 //     usuario tras revisar la documentación disponible — no hay visibilidad de código fuente de
 //     facturador_lycet, que vive en otro repositorio).
 //   - cancel → fiscal.cancel (individual; no existe en bulk).
+//   - attend, unattend → fiscal.attend (individual; no existe en bulk — "atendido" es una
+//     decisión de un documento a la vez, ver facturador_lycet FiscalController::attend/unattend,
+//     2026-09-22). Deliberadamente separado de fiscal.cancel/fiscal.retry: marcar un documento
+//     como atendido no reenvía nada a SUNAT/OSE, es puramente administrativo.
 //   - send, retry, email, poll (bulk) → fiscal.bulk — permiso paraguas ya sembrado en el
 //     catálogo ("Acciones masivas sobre comprobantes fiscales"), separado del individual: tener
 //     fiscal.retry NO concede operaciones bulk.
@@ -52,6 +56,8 @@ func requiredPermissionForFiscalAction(action string, bulk bool) (permission str
 		return "fiscal.retry", true
 	case "cancel":
 		return "fiscal.cancel", true
+	case "attend", "unattend":
+		return "fiscal.attend", true
 	default: // "force"
 		return "", false
 	}
@@ -274,7 +280,7 @@ func (h *FiscalHandler) DocumentActionAPI(c fiber.Ctx) error {
 	uuid := c.Params("uuid")
 	action := strings.TrimSpace(c.Params("action"))
 	switch action {
-	case "send", "retry", "force", "email", "poll", "cancel":
+	case "send", "retry", "force", "email", "poll", "cancel", "attend", "unattend":
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "acción no soportada"})
 	}
@@ -286,12 +292,21 @@ func (h *FiscalHandler) DocumentActionAPI(c fiber.Ctx) error {
 		return err
 	}
 	path := "/api/v1/fiscal/documents/" + url.PathEscape(uuid) + "/" + action
-	raw, status, err := fiscaladmin.PostJSON(path, nil)
+	// attend acepta un body opcional ({reason, attended_by}) que facturador_lycet persiste tal
+	// cual — unattend y el resto de acciones no llevan body, igual que antes.
+	var body interface{}
+	if action == "attend" {
+		var raw json.RawMessage
+		if err := c.Bind().JSON(&raw); err == nil && len(raw) > 0 {
+			body = raw
+		}
+	}
+	raw, status, err := fiscaladmin.PostJSON(path, body)
 	logFiscalActionAudit(c, action, uuid, err == nil)
 	if err != nil {
 		return h.proxyError(c, err, raw, status)
 	}
-	if action == "cancel" {
+	if action == "cancel" || action == "attend" || action == "unattend" {
 		c.Status(fiber.StatusOK)
 	} else {
 		c.Status(fiber.StatusAccepted)
@@ -344,7 +359,7 @@ func (h *FiscalHandler) OperationsQueueAPI(c fiber.Ctx) error {
 	if err := h.ensureConfigured(c); err != nil {
 		return err
 	}
-	raw, status, err := fiscaladmin.GetJSON("/api/v1/fiscal/operations/queue", nil)
+	raw, status, err := fiscaladmin.GetJSON("/api/v1/fiscal/operations/queue", collectQuery(c))
 	if err != nil {
 		return h.proxyError(c, err, raw, status)
 	}

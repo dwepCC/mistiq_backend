@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"os"
+	"runtime/debug"
 
 	"tukifac/config"
 	"tukifac/pkg/cmd"
@@ -49,16 +50,21 @@ func runServer(cfg *config.Config) {
 	cron.StartExchangeRateScheduler()
 	cron.StartFiscalReconcileWorker()
 	cron.StartPickupReminderWorker()
+	cron.StartFiscalTenantSnapshotWorker()
 
 	app := fiber.New(fiber.Config{
 		AppName:      "Mistiq SaaS ERP",
 		ServerHeader: "",
 		BodyLimit:    cfg.BodyLimitBytes,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-		IdleTimeout:  cfg.IdleTimeout,
-		ProxyHeader:  fiber.HeaderXForwardedFor,
-		TrustProxy:   true,
+		// El JWT lleva permisos y módulos (un Administrador ronda los 3 KB) y Cloudflare/el proxy
+		// suman sus cabeceras: con el búfer por defecto (4096) esas peticiones se rechazaban con
+		// 431 "Request Header Fields Too Large" antes de llegar a cualquier middleware.
+		ReadBufferSize: 16384,
+		ReadTimeout:    cfg.ReadTimeout,
+		WriteTimeout:   cfg.WriteTimeout,
+		IdleTimeout:    cfg.IdleTimeout,
+		ProxyHeader:    fiber.HeaderXForwardedFor,
+		TrustProxy:     true,
 		TrustProxyConfig: fiber.TrustProxyConfig{
 			Loopback:  true,
 			Private:   true,
@@ -76,8 +82,26 @@ func runServer(cfg *config.Config) {
 		},
 	})
 
+	// Un panic en un handler lo captura recover y el ErrorHandler responde 500 genérico. El logger de peticiones va
+	// por dentro de recover, así que el panic lo atraviesa sin quedar registrado: sin este handler no hay ningún rastro
+	// en producción (guía T001-5 de 20615174638, 20/11/2026: 500 en GET /api/sales/:id y cero líneas de log).
 	app.Use(recover.New(recover.Config{
-		EnableStackTrace: cfg.IsDev(),
+		EnableStackTrace: true,
+		StackTraceHandler: func(c fiber.Ctx, e any) {
+			attrs := []any{
+				slog.String("method", c.Method()),
+				slog.String("route", c.Path()),
+				slog.Any("panic", e),
+				slog.String("stack", string(debug.Stack())),
+			}
+			if slug, ok := c.Locals("tenant_slug").(string); ok && slug != "" {
+				attrs = append(attrs, slog.String("tenant", slug))
+			}
+			if uid, ok := c.Locals("user_id").(uint); ok && uid > 0 {
+				attrs = append(attrs, slog.Uint64("user_id", uint64(uid)))
+			}
+			logger.L.Error("panic_recovered", attrs...)
+		},
 	}))
 
 	routes.Setup(app)

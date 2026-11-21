@@ -15,7 +15,11 @@ import (
 // action "credit_note": bridgea a o.cx (OrdersCancel) — anular con nota de crédito, mismo permiso
 // que ya usa RequireSalesAccess("cancel").
 // debit_note/despatch/advanced_docs NO tienen puente: confirmado que Tukichef no los usa.
-func RequireBillingAccess(tenantPerm, action string) fiber.Handler {
+//
+// alsoPerms: permisos tenant alternativos que también abren el endpoint. Las rutas de SOLO LECTURA
+// (lista, estado, descargas) piden billing.view y aceptan billing.send como alternativa, de modo que
+// quien ya podía enviar nunca pierde la consulta; el permiso de envío NO se relaja.
+func RequireBillingAccess(tenantPerm, action string, alsoPerms ...string) fiber.Handler {
 	restPerm := restaurantperm.OrdersCharge
 	if action == "credit_note" {
 		restPerm = restaurantperm.OrdersCancel
@@ -27,6 +31,11 @@ func RequireBillingAccess(tenantPerm, action string) fiber.Handler {
 		}
 		if tenantHasPermission(claims.Permissions, tenantPerm) {
 			return c.Next()
+		}
+		for _, alt := range alsoPerms {
+			if tenantHasPermission(claims.Permissions, alt) {
+				return c.Next()
+			}
 		}
 		if claims.AuthMethod == "pin" || claims.EmployeeType != "" {
 			if HasRestaurantPerm(c, restPerm) {

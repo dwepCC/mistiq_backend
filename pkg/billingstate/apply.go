@@ -170,7 +170,7 @@ func BuildStatusView(inv *database.TenantInvoice, sale *database.TenantSale) Sta
 	v.SafeToPrint = p == SUNAT_ACCEPTED || p == OBSERVED || IsAcceptanceEvidence(ev)
 	v.Async = isAsyncInProgress(p, inv.JobStatus)
 	v.BillingStatus = EffectiveBillingStatus(sale, inv)
-	v.DisplayPhase = DisplayPhaseFromPipeline(p, inv.JobStatus)
+	v.DisplayPhase = DisplayPhaseForInvoice(inv, p)
 	v.DisplayLabel = DisplayLabelSpanish(v.DisplayPhase)
 	return v
 }

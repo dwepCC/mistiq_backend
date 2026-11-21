@@ -1,9 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"strings"
-	"time"
 
+	authservice "tukifac/internal/auth/service"
 	"tukifac/internal/restaurant/staff"
 	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
@@ -11,7 +12,6 @@ import (
 	"tukifac/pkg/saas"
 
 	"github.com/gofiber/fiber/v3"
-	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
 )
 
@@ -67,54 +67,21 @@ func (h *RestaurantHandler) PinLogin(c fiber.Ctx) error {
 	var role database.TenantRole
 	tenantDB.First(&role, user.RoleID)
 
-	enabledModules := moduleKeysForTenant(tenant.ID)
-	hasRestaurant := false
-	for _, m := range enabledModules {
-		if m == "restaurant" {
-			hasRestaurant = true
-			break
+	// Un único emisor arma claims (sin Permissions: perfil "pin"), fija 12 h y firma. Exige módulo restaurante y personal activo.
+	sess, err := authservice.DefaultIssuer().Issue(tenant, tenantDB, &user, authservice.IssueOpts{Kind: authservice.KindPin})
+	if err != nil {
+		if errors.Is(err, authservice.ErrSessionNoLongerValid) {
+			return c.Status(403).JSON(fiber.Map{"error": "módulo restaurante no habilitado"})
 		}
-	}
-	if !hasRestaurant {
-		return c.Status(403).JSON(fiber.Map{"error": "módulo restaurante no habilitado"})
-	}
-
-	permVer, _ := staffSvc.GetPermCacheVersion()
-	activeBranchID, err := branch.ResolveUserSessionBranchID(tenantDB, &user)
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
-	}
-	canSwitch := branch.UserCanSwitchBranch(tenantDB, role.Name, &user)
-	allowedBranches, _ := branch.ListUserBranchBriefs(tenantDB, user.ID)
-	sessionVersion := user.BranchSessionVersion
-
-	claims := &middleware.TenantClaims{
-		UserID:               userID,
-		Email:                user.Email,
-		RoleID:               user.RoleID,
-		RoleName:             role.Name,
-		TenantSlug:           tenant.Slug,
-		TenantDB:             tenant.DBName,
-		TenantID:             tenant.ID,
-		TenantVersion:        middleware.CurrentTenantJWTVersion(),
-		Modules:              enabledModules,
-		EmployeeType:         employeeType,
-		AuthMethod:           "pin",
-		PermVer:              permVer,
-		StaffID:              staffID,
-		Status:               tenant.Status,
-		Type:                 "tenant",
-		ActiveBranchID:       activeBranchID,
-		BranchSessionVersion: sessionVersion,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(middleware.PinSessionTTL)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-	tokenString, err := middleware.BuildTenantToken(claims, middleware.PinSessionTTL)
-	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "error generando sesión"})
 	}
+	claims := sess.Claims
+	enabledModules := claims.Modules
+	permVer := claims.PermVer
+	activeBranchID := claims.ActiveBranchID
+	canSwitch := branch.UserCanSwitchBranchAuth(tenantDB, role.Name, &user, "pin")
+	allowedBranches, _ := branch.ListUserBranchBriefs(tenantDB, user.ID)
+	tokenString := sess.Token
 	activeBrief, _ := branch.GetBranchBrief(tenantDB, activeBranchID)
 	keys, _ := staffSvc.ResolvePermissionKeys(tenant.Slug, tenant.ID, userID, permVer)
 

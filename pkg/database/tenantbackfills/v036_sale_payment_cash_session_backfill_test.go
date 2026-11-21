@@ -36,6 +36,7 @@ type tbankMovement struct {
 	Type          string
 	Amount        float64
 	SaleID        *uint
+	BankAccountID uint
 }
 
 func (tbankMovement) TableName() string { return "tenant_bank_movements" }

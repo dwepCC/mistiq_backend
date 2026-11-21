@@ -40,17 +40,17 @@ func buildDespatchShipment(input CreateDespatchInput, sunatCode, fechaEmision, e
 	modTraslado := resolveDespatchModTraslado(sunatCode, input.Envio.ModTraslado)
 
 	shipment := facturador.DespatchShipment{
-		CodTraslado:               input.Envio.CodTraslado,
-		DesTraslado:               input.Envio.DesTraslado,
-		ModTraslado:               modTraslado,
-		FecTraslado:               fecTraslado,
-		FecEntregaBienes:          fecEntrega,
-		FecEntregaTransportista:   fecEntrega,
-		Partida:                   partida,
-		Llegada:                   llegada,
-		PesoTotal:                 input.Envio.PesoTotal,
-		UndPesoTotal:              input.Envio.UndPesoTotal,
-		NumBultos:                 input.Envio.NumBultos,
+		CodTraslado:             input.Envio.CodTraslado,
+		DesTraslado:             input.Envio.DesTraslado,
+		ModTraslado:             modTraslado,
+		FecTraslado:             fecTraslado,
+		FecEntregaBienes:        fecEntrega,
+		FecEntregaTransportista: fecEntrega,
+		Partida:                 partida,
+		Llegada:                 llegada,
+		PesoTotal:               input.Envio.PesoTotal,
+		UndPesoTotal:            input.Envio.UndPesoTotal,
+		NumBultos:               input.Envio.NumBultos,
 	}
 	if shipment.UndPesoTotal == "" {
 		shipment.UndPesoTotal = "KGM"
@@ -63,8 +63,15 @@ func buildDespatchShipment(input CreateDespatchInput, sunatCode, fechaEmision, e
 		choferTipo = "1"
 	}
 	driver := buildDespatchDriver(input, choferTipo, choferDoc)
+	// M1/L: SUNAT no admite datos de vehículo ni de conductor en traslados en vehículos de las
+	// categorías M1 o L (se informa solo el indicador).
+	m1l := sunatCode == "09" && input.Envio.IndM1L
+	if m1l {
+		driver = nil
+		placa = ""
+	}
 
-	needsVehicle := sunatCode == "31" || (sunatCode == "09" && modTraslado == greModTrasladoPrivado) || placa != ""
+	needsVehicle := sunatCode == "31" || (sunatCode == "09" && modTraslado == greModTrasladoPrivado && !m1l) || placa != ""
 	// GRE remitente + transporte público: SUNAT solo acepta que el remitente declare el
 	// vehículo si TAMBIÉN declara el conductor (exención "flota del transportista", el
 	// indicador que se agrega más abajo) — declarar el vehículo solo, sin conductor, es
@@ -80,9 +87,17 @@ func buildDespatchShipment(input CreateDespatchInput, sunatCode, fechaEmision, e
 			input.Envio.VehiculoHabCert,
 			input.Envio.VehiculoCodEmisor,
 		)
+		if sec := input.Envio.VehiculoSecundario; sec != nil && shipment.Vehiculo != nil {
+			if v := buildDespatchVehicle(sec.Placa, sec.HabCert, ""); v != nil {
+				shipment.Vehiculo.Secundarios = []facturador.DespatchVehicle{*v}
+			}
+		}
 	}
 	if driver != nil {
 		shipment.Choferes = []facturador.DespatchDriver{*driver}
+		if sec, err := buildDespatchSecondaryDriver(input.Envio.ChoferSecundario); err == nil && sec != nil {
+			shipment.Choferes = append(shipment.Choferes, *sec)
+		}
 	}
 
 	if carrier := buildDespatchCarrier(input, sunatCode, modTraslado, emisorRUC, emisorRazon); carrier != nil {
@@ -93,6 +108,9 @@ func buildDespatchShipment(input CreateDespatchInput, sunatCode, fechaEmision, e
 	if sunatCode == "09" && modTraslado == greModTrasladoPublico &&
 		shipment.Vehiculo != nil && len(shipment.Choferes) > 0 {
 		shipment.Indicadores = []string{greIndVehCondTransport}
+	}
+	for _, ind := range despatchExtraIndicators(input.Envio, sunatCode) {
+		shipment.Indicadores = appendUniqueString(shipment.Indicadores, ind)
 	}
 
 	return shipment
@@ -235,10 +253,18 @@ func validateDespatchDriverFields(env DespatchEnvioInput, required bool) error {
 }
 
 func validateDespatchBusinessRules(input CreateDespatchInput, sunatCode, emisorRUC string) error {
+	if err := validateDespatchRelatedDocs(input.DocsRelacionados); err != nil {
+		return err
+	}
 	emisorRUC = strings.TrimSpace(emisorRUC)
 	destDoc := strings.TrimSpace(input.Destinatario.NumDoc)
-	if emisorRUC != "" && destDoc == emisorRUC {
+	// El destinatario puede ser la propia empresa solo cuando el motivo lo exige (traslado entre
+	// locales y compra); en cualquier otro caso SUNAT lo trata como un envío a sí mismo.
+	if emisorRUC != "" && destDoc == emisorRUC && !despatchDestinatarioEsEmpresa(sunatCode, despatchMotivo(input.Envio)) {
 		return fmt.Errorf("el destinatario (%s) no puede ser el mismo RUC del emisor; seleccione un cliente distinto", destDoc)
+	}
+	if err := validateDespatchMotivoRules(input, sunatCode); err != nil {
+		return err
 	}
 
 	modTraslado := resolveDespatchModTraslado(sunatCode, input.Envio.ModTraslado)
@@ -278,13 +304,16 @@ func validateDespatchBusinessRules(input CreateDespatchInput, sunatCode, emisorR
 		}
 	}
 
-	if sunatCode == "09" && modTraslado == greModTrasladoPrivado {
+	if sunatCode == "09" && modTraslado == greModTrasladoPrivado && !input.Envio.IndM1L {
 		if strings.TrimSpace(input.Envio.TransportistaPlaca) == "" {
 			return fmt.Errorf("la placa del vehículo es obligatoria en transporte privado (flota propia)")
 		}
 		if err := validateDespatchDriverFields(input.Envio, true); err != nil {
 			return err
 		}
+	}
+	if _, err := buildDespatchSecondaryDriver(input.Envio.ChoferSecundario); err != nil {
+		return err
 	}
 
 	// Si se informa placa + conductor en transporte público (indicador GRE-T), validar licencia real.
@@ -376,7 +405,7 @@ func enrichDespatchPayloadMap(m map[string]interface{}) {
 			hasChofer = true
 		}
 		if modFinal == greModTrasladoPublico && hasVeh && hasChofer {
-			envio["indicadores"] = []interface{}{greIndVehCondTransport}
+			envio["indicadores"] = appendUniqueAny(envio["indicadores"], greIndVehCondTransport)
 		}
 		// Vehículo sin conductor en modalidad pública: SUNAT lo rechaza (código 3354, "No debe
 		// ingresar información de vehículo principal"). Si esta pasada de enriquecimiento se
@@ -442,4 +471,15 @@ func normalizeDespatchDateTime(value, fallback string) string {
 		return t.Format(facturador.FiscalDateTimeLayout)
 	}
 	return value
+}
+
+// appendUniqueAny agrega un indicador a la lista del payload (decodificada de JSON) sin duplicarlo.
+func appendUniqueAny(current interface{}, v string) []interface{} {
+	list, _ := current.([]interface{})
+	for _, x := range list {
+		if s, ok := x.(string); ok && s == v {
+			return list
+		}
+	}
+	return append(list, v)
 }

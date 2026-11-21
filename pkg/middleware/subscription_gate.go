@@ -25,6 +25,10 @@ func SubscriptionGate() fiber.Handler {
 		if view.CanOperate {
 			return c.Next()
 		}
+		// Suspendida/vencida por falta de pago: solo se permite CONSULTAR los reportes.
+		if view.CanViewReports && IsReportsReadPath(c.Method(), c.Path()) {
+			return c.Next()
+		}
 		code := "SUBSCRIPTION_REQUIRED"
 		if view.IsBlocked {
 			code = "TENANT_BLOCKED"

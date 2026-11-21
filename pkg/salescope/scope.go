@@ -101,3 +101,19 @@ func issuedFromNotaSetExpr(alias string) string {
 	}
 	return fmt.Sprintf("(%sissued_from_nota_sale_id IS NOT NULL AND %sissued_from_nota_sale_id > 0)", prefix, prefix)
 }
+
+// ExcludeNotaWithLiveIssued deja fuera la NV que ya tiene un comprobante hijo vigente (factura/
+// boleta emitida desde ella, no anulada). Ese comprobante hereda la deuda; la NV queda solo como
+// historial, así que no debe contar en Cuentas por Cobrar ni en saldos (evita doble deuda).
+// Si el hijo se anula, la NV vuelve a ser cobrable.
+func ExcludeNotaWithLiveIssued(db *gorm.DB) *gorm.DB {
+	return db.Where(NotaWithoutLiveIssuedWhere(defaultTable))
+}
+
+// NotaWithoutLiveIssuedWhere es el fragmento SQL de ExcludeNotaWithLiveIssued (alias de tenant_sales).
+func NotaWithoutLiveIssuedWhere(alias string) string {
+	if strings.TrimSpace(alias) == "" {
+		alias = defaultTable
+	}
+	return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM tenant_sales ch WHERE ch.issued_from_nota_sale_id = %s.id AND ch.status <> 'cancelled')", alias)
+}

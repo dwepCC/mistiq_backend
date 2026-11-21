@@ -1,9 +1,13 @@
 package service
 
 import (
+	"errors"
 	"strings"
 
 	"tukifac/pkg/database"
+	"tukifac/pkg/productbranch"
+
+	"gorm.io/gorm"
 )
 
 // BulkPriceUpdateRow una fila del Excel de "Actualizar precio": código de barras + precio(s)
@@ -34,6 +38,22 @@ type BulkPriceUpdateResult struct {
 // (tenant_products.code). Usada por "Actualizar precio" en Productos: exporta código + precios de
 // la sucursal activa, el usuario edita el Excel, lo vuelve a subir y acá se aplica fila por fila.
 func (s *ProductService) BulkUpdatePrices(rows []BulkPriceUpdateRow) (BulkPriceUpdateResult, error) {
+	return s.BulkUpdatePricesWith(rows, BulkPriceUpdateOptions{})
+}
+
+// BulkPriceUpdateOptions acota "Actualizar precio".
+//   - BranchID > 0: el precio de venta se guarda como precio POR SUCURSAL (TenantProductBranchPrice, override que ya
+//     usa el POS) y NO toca el precio global del producto; el producto debe estar disponible en esa sucursal.
+//     El precio de compra (costo) no tiene versión por sucursal y sigue siendo el global.
+//   - BranchID == 0: actualiza el precio global (comportamiento histórico).
+//   - Visible (opcional): filtra los productos que el usuario puede ver; los demás se reportan como inexistentes.
+type BulkPriceUpdateOptions struct {
+	BranchID uint
+	Visible  func(p database.TenantProduct) bool
+}
+
+// BulkUpdatePricesWith es BulkUpdatePrices con alcance por sucursal (ver BulkPriceUpdateOptions).
+func (s *ProductService) BulkUpdatePricesWith(rows []BulkPriceUpdateRow, opts BulkPriceUpdateOptions) (BulkPriceUpdateResult, error) {
 	result := BulkPriceUpdateResult{Rows: make([]BulkPriceUpdateRowResult, 0, len(rows))}
 
 	codes := make([]string, 0, len(rows))
@@ -89,20 +109,41 @@ func (s *ProductService) BulkUpdatePrices(rows []BulkPriceUpdateRow) (BulkPriceU
 			rr.Status, rr.Error = "error", "Precio de compra inválido"
 		default:
 			p, ok := byCode[code]
+			if ok && opts.Visible != nil && !opts.Visible(p) {
+				ok = false
+			}
 			if !ok {
 				rr.Status, rr.Error = "error", "No se encontró ningún producto con este código"
 				break
 			}
+			if opts.BranchID > 0 {
+				if p.BranchID > 0 && p.BranchID != opts.BranchID {
+					rr.Status, rr.Error = "error", "El producto no pertenece a esta sucursal"
+					break
+				}
+				if err := productbranch.EnsureAvailable(s.db, p.ID, opts.BranchID, p.Name); err != nil {
+					rr.Status, rr.Error = "error", err.Error()
+					break
+				}
+			}
 			upd := map[string]interface{}{}
-			if r.SalePrice != nil {
+			if r.SalePrice != nil && opts.BranchID == 0 {
 				upd["sale_price"] = *r.SalePrice
 			}
 			if r.PurchasePrice != nil {
 				upd["purchase_price"] = *r.PurchasePrice
 			}
-			if err := s.db.Model(&database.TenantProduct{}).Where("id = ?", p.ID).Updates(upd).Error; err != nil {
-				rr.Status, rr.Error = "error", "Error al guardar: "+err.Error()
-				break
+			if len(upd) > 0 {
+				if err := s.db.Model(&database.TenantProduct{}).Where("id = ?", p.ID).Updates(upd).Error; err != nil {
+					rr.Status, rr.Error = "error", "Error al guardar: "+err.Error()
+					break
+				}
+			}
+			if opts.BranchID > 0 && r.SalePrice != nil {
+				if err := s.upsertProductBranchSalePrice(p.ID, opts.BranchID, *r.SalePrice); err != nil {
+					rr.Status, rr.Error = "error", "Error al guardar el precio de la sucursal: "+err.Error()
+					break
+				}
 			}
 			rr.ProductID = p.ID
 			rr.ProductName = p.Name
@@ -117,4 +158,17 @@ func (s *ProductService) BulkUpdatePrices(rows []BulkPriceUpdateRow) (BulkPriceU
 	}
 
 	return result, nil
+}
+
+// upsertProductBranchSalePrice crea o actualiza (y reactiva) el precio por sucursal de un producto.
+func (s *ProductService) upsertProductBranchSalePrice(productID, branchID uint, price float64) error {
+	var row database.TenantProductBranchPrice
+	err := s.db.Where("product_id = ? AND branch_id = ?", productID, branchID).First(&row).Error
+	if err == nil {
+		return s.db.Model(&row).Updates(map[string]interface{}{"sale_price": price, "active": true}).Error
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return s.db.Create(&database.TenantProductBranchPrice{ProductID: productID, BranchID: branchID, SalePrice: price, Active: true}).Error
 }

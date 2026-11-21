@@ -1,11 +1,19 @@
 package billingstate
 
+import (
+	"strings"
+
+	"tukifac/pkg/database"
+)
+
 // Fases UX para tenant (más granulares que billing_status almacenado).
 const (
 	PhaseDraft      = "draft"
 	PhasePending    = "pending"
 	PhaseQueued     = "queued"
 	PhaseSending    = "sending"
+	// PhaseSent: el comprobante ya llegó al proveedor/SUNAT, pero SUNAT no dio veredicto (caída, sin CDR todavía).
+	PhaseSent = "sent"
 	PhaseRetrying   = "retrying"
 	PhaseAccepted   = "accepted"
 	PhaseObserved   = "observed"
@@ -58,6 +66,8 @@ func DisplayLabelSpanish(phase string) string {
 		return "En cola"
 	case PhaseSending:
 		return "Enviando"
+	case PhaseSent:
+		return "Enviado"
 	case PhaseRetrying:
 		return "Reintentando"
 	case PhaseAccepted:
@@ -73,4 +83,15 @@ func DisplayLabelSpanish(phase string) string {
 	default:
 		return "Pendiente"
 	}
+}
+
+// DisplayPhaseForInvoice igual que DisplayPhaseFromPipeline, pero distingue «Enviado»: un comprobante en trámite que ya
+// tiene un código/mensaje de SUNAT o del proveedor sin veredicto (SUNAT caído, CDR pendiente) se muestra «Enviado», no
+// «Enviando»/«Reintentando», y menos «Rechazado».
+func DisplayPhaseForInvoice(inv *database.TenantInvoice, pipeline string) string {
+	phase := DisplayPhaseFromPipeline(pipeline, inv.JobStatus)
+	if (phase == PhaseSending || phase == PhaseRetrying) && strings.TrimSpace(inv.SunatCDRCode) != "" {
+		return PhaseSent
+	}
+	return phase
 }

@@ -215,5 +215,9 @@ func createRefundInSessionTx(
 		Notes:         reason,
 		UserID:        uid,
 		CreatedAt:     time.Now(),
+		// Snapshot del original (misma moneda/TC/equivalente en soles).
+		Currency:     original.Currency,
+		ExchangeRate: original.ExchangeRate,
+		AmountPEN:    original.AmountPEN,
 	}).Error
 }

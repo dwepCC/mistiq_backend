@@ -105,6 +105,9 @@ func EnrichSalesBillingStatus(db *gorm.DB, sales []database.TenantSale) {
 	for i := range invoices {
 		bySale[invoices[i].SaleID] = &invoices[i]
 	}
+	// Los desvíos se persisten agrupados por estado destino (un UPDATE por estado, no uno por venta):
+	// esto corre dentro de un GET de listado y con miles de filas generaba miles de escrituras.
+	idsByStatus := make(map[string][]uint)
 	for i := range sales {
 		inv := bySale[sales[i].ID]
 		effective := EffectiveBillingStatus(&sales[i], inv)
@@ -112,7 +115,16 @@ func EnrichSalesBillingStatus(db *gorm.DB, sales []database.TenantSale) {
 			continue
 		}
 		sales[i].BillingStatus = effective
-		_ = db.Model(&database.TenantSale{}).Where("id = ?", sales[i].ID).
-			Update("billing_status", effective).Error
+		idsByStatus[effective] = append(idsByStatus[effective], sales[i].ID)
+	}
+	for status, group := range idsByStatus {
+		for start := 0; start < len(group); start += 500 {
+			end := start + 500
+			if end > len(group) {
+				end = len(group)
+			}
+			_ = db.Model(&database.TenantSale{}).Where("id IN ?", group[start:end]).
+				Update("billing_status", status).Error
+		}
 	}
 }

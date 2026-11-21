@@ -25,6 +25,41 @@ func IsSubscriptionExemptPath(path string) bool {
 	return false
 }
 
+// reportsReadPaths rutas de LECTURA (GET, coincidencia exacta) que usa el módulo de Reportes y su
+// cascarón (menú, cabecera, permisos). Con la cuenta suspendida por falta de pago el ERP queda cerrado,
+// salvo esto: el cliente puede seguir consultando sus reportes mientras regulariza. Todo lo que no esté
+// aquí sigue respondiendo 402.
+var reportsReadPaths = map[string]struct{}{
+	// Cascarón: configuración de la empresa, módulos y permisos de la sesión.
+	"/api/company/config":              {},
+	"/api/company/sunat":               {},
+	"/api/company/series":              {},
+	"/api/company/branches":            {},
+	"/api/session/modules":             {},
+	"/api/session/capabilities":        {},
+	"/api/billing/notification-counts": {},
+	// Datos de los reportes.
+	"/api/sales":                      {},
+	"/api/sales/by-product":           {},
+	"/api/sales/profit-detail":        {},
+	"/api/purchases":                  {},
+	"/api/products":                   {},
+	"/api/categories":                 {},
+	"/api/payment-methods":            {},
+	"/api/inventory/movements":        {},
+	"/api/inventory/operation-types":  {},
+	"/api/cashbank/reports/movements": {},
+}
+
+// IsReportsReadPath true si la petición es una lectura (GET) permitida del módulo de Reportes.
+func IsReportsReadPath(method, path string) bool {
+	if !strings.EqualFold(method, "GET") {
+		return false
+	}
+	_, ok := reportsReadPaths[strings.TrimRight(strings.TrimSpace(path), "/")]
+	return ok
+}
+
 // IsSubscriptionHubPath rutas del Billing Hub (/api/subscription/*).
 func IsSubscriptionHubPath(path string) bool {
 	return strings.HasPrefix(strings.TrimSpace(path), "/api/subscription")

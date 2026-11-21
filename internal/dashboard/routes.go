@@ -16,4 +16,5 @@ func RegisterRoutes(api fiber.Router) {
 	view := middleware.RequirePermission("dashboard.view")
 	api.Get("/dashboard/stats", view, h.StatsAPI)
 	api.Get("/dashboard/analytics", view, h.AnalyticsAPI)
+	api.Get("/dashboard/profit", view, h.ProfitAPI)
 }

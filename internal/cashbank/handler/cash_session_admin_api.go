@@ -27,6 +27,9 @@ func (h *CashBankHandler) UpdateOpeningBalanceAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 	}
 	// Un cajero solo corrige la suya; quien administra la caja, cualquiera de la sucursal.
+	if denied, resp := sessionWriteDenied(c, session); denied {
+		return resp
+	}
 	if !canAccessCashSession(c, session) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "No puede modificar esta sesión de caja"})
 	}
@@ -49,6 +52,9 @@ func (h *CashBankHandler) DeleteSessionAPI(c fiber.Ctx) error {
 	session, err := svc.GetSessionByID(uint(id))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	}
+	if denied, resp := sessionWriteDenied(c, session); denied {
+		return resp
 	}
 	if !canAccessCashSession(c, session) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "No puede eliminar esta sesión de caja"})

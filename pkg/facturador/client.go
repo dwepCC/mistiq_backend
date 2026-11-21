@@ -278,6 +278,9 @@ type InvoicePayload struct {
 	MtoImpVenta     float64            `json:"mtoImpVenta"`
 	Descuentos      []InvoiceCharge    `json:"descuentos,omitempty"`
 	SumOtrosDescuentos float64         `json:"sumOtrosDescuentos,omitempty"`
+	// Cargos globales que no afectan la base del IGV (cat. 53, p. ej. 46 recargo al consumo) y su sumatoria (ChargeTotalAmount).
+	Cargos          []InvoiceCharge    `json:"cargos,omitempty"`
+	SumOtrosCargos  float64            `json:"sumOtrosCargos,omitempty"`
 	Details         []InvoiceDetail    `json:"details"`
 	Observacion     string             `json:"observacion,omitempty"` // Leyenda en letras sin languageLocaleID (ver SetSUNATLegendViaObservacion)
 	Legends         []InvoiceLegend    `json:"legends,omitempty"`
@@ -342,11 +345,16 @@ type InvoiceAddress struct {
 	Direccion    string `json:"direccion"`
 }
 
+// Address es un puntero: SUNAT no exige dirección del cliente en factura/boleta (solo la del
+// emisor) — cuando el contacto no tiene dirección real, se omite el campo entero (nil,
+// omitempty) en vez de mandar un objeto con strings vacíos. Greenter (Client::$address es
+// nullable) y su propio template UBL 2.1 soportan esto de forma nativa: omiten
+// <cac:RegistrationAddress> completo cuando el address es null, generando XML válido.
 type InvoiceClient struct {
-	TipoDoc  string         `json:"tipoDoc"`
-	NumDoc   string         `json:"numDoc"`
-	RznSocial string        `json:"rznSocial"`
-	Address  InvoiceAddress `json:"address"`
+	TipoDoc   string          `json:"tipoDoc"`
+	NumDoc    string          `json:"numDoc"`
+	RznSocial string          `json:"rznSocial"`
+	Address   *InvoiceAddress `json:"address,omitempty"`
 }
 
 type InvoiceCharge struct {
@@ -429,6 +437,8 @@ type NotePayload struct {
 	ValorVenta      float64            `json:"valorVenta"`
 	SubTotal        float64            `json:"subTotal"`
 	MtoImpVenta     float64            `json:"mtoImpVenta"`
+	// SumOtrosCargos: ChargeTotalAmount de la nota (la NC/ND no lleva nodo de cargo global, solo este total; guía UBL 2.1 de SUNAT).
+	SumOtrosCargos  float64            `json:"sumOtrosCargos,omitempty"`
 	Details         []InvoiceDetail    `json:"details"`
 	Observacion     string             `json:"observacion,omitempty"`
 	Legends         []InvoiceLegend    `json:"legends,omitempty"`
@@ -834,6 +844,8 @@ type SummaryDetail struct {
 	Total          float64 `json:"total"`
 	MtoOperGravadas float64 `json:"mtoOperGravadas"`
 	MtoIGV         float64 `json:"mtoIGV"`
+	// MtoOtrosCargos: otros cargos de la boleta (p. ej. recargo al consumo); Total ya los incluye.
+	MtoOtrosCargos float64 `json:"mtoOtrosCargos,omitempty"`
 }
 
 // SummaryPayload es el body para POST /summary/send.
@@ -940,6 +952,10 @@ type DespatchDirection struct {
 	Provincia    string `json:"provincia,omitempty"`
 	Distrito     string `json:"distrito,omitempty"`
 	Direccion    string `json:"direccion"`
+	// Ruc y CodLocal identifican el establecimiento anexo (AddressTypeCode). SUNAT los pide en
+	// el traslado entre establecimientos (motivo 04); en los demás motivos no se emiten.
+	Ruc      string `json:"ruc,omitempty"`
+	CodLocal string `json:"codLocal,omitempty"`
 }
 
 // DespatchTransportist datos del transportista.
@@ -948,9 +964,9 @@ type DespatchTransportist struct {
 	NumDoc        string `json:"numDoc"`
 	RznSocial     string `json:"rznSocial"`
 	NroMtc        string `json:"nroMtc,omitempty"`
-	Placa         string `json:"placa"`
-	ChoferTipoDoc string `json:"choferTipoDoc"`
-	ChoferDoc     string `json:"choferDoc"`
+	Placa         string `json:"placa,omitempty"`
+	ChoferTipoDoc string `json:"choferTipoDoc,omitempty"`
+	ChoferDoc     string `json:"choferDoc,omitempty"`
 }
 
 // DespatchShipment datos del traslado (Greenter Shipment / GRE 2022).
@@ -978,6 +994,8 @@ type DespatchVehicle struct {
 	NroCirculacion  string `json:"nroCirculacion,omitempty"`
 	NroAutorizacion string `json:"nroAutorizacion,omitempty"`
 	CodEmisor       string `json:"codEmisor,omitempty"`
+	// Secundarios: semirremolque u otros vehículos adicionales de la misma guía.
+	Secundarios []DespatchVehicle `json:"secundarios,omitempty"`
 }
 
 // DespatchDriver conductor GRE.
@@ -1158,6 +1176,7 @@ type RetentionPayload struct {
 
 // SendRetention envía comprobante de retención (POST /retention/send).
 func (c *Client) SendRetention(payload *RetentionPayload) (*SunatResponse, error) {
+	normalizeRetentionPayloadDates(payload)
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("payload: %w", err)
@@ -1187,6 +1206,7 @@ func (c *Client) postRetentionDocument(path string, payload *RetentionPayload) (
 	if payload == nil {
 		return nil, fmt.Errorf("payload: nil")
 	}
+	normalizeRetentionPayloadDates(payload)
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("payload: %w", err)
@@ -1251,6 +1271,7 @@ type PerceptionPayload struct {
 
 // SendPerception envía comprobante de percepción (POST /perception/send).
 func (c *Client) SendPerception(payload *PerceptionPayload) (*SunatResponse, error) {
+	normalizePerceptionPayloadDates(payload)
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("payload: %w", err)
@@ -1280,6 +1301,7 @@ func (c *Client) postPerceptionDocument(path string, payload *PerceptionPayload)
 	if payload == nil {
 		return nil, fmt.Errorf("payload: nil")
 	}
+	normalizePerceptionPayloadDates(payload)
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("payload: %w", err)

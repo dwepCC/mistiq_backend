@@ -25,7 +25,9 @@ func TenantBranchMultiSchemaReady(db *gorm.DB) bool {
 	if db == nil {
 		return false
 	}
-	return db.Migrator().HasColumn(&TenantUser{}, "HomeBranchID")
+	return CachedSchemaProbe(db, "tenant_users.home_branch_id", func() bool {
+		return db.Migrator().HasColumn(&TenantUser{}, "HomeBranchID")
+	})
 }
 
 // TenantBranchSessionVersionReady indica si existe branch_session_version.
@@ -33,7 +35,9 @@ func TenantBranchSessionVersionReady(db *gorm.DB) bool {
 	if db == nil {
 		return false
 	}
-	return db.Migrator().HasColumn(&TenantUser{}, "BranchSessionVersion")
+	return CachedSchemaProbe(db, "tenant_users.branch_session_version", func() bool {
+		return db.Migrator().HasColumn(&TenantUser{}, "BranchSessionVersion")
+	})
 }
 
 // TenantRestaurantBranchColumnReady indica si floors/tables tienen branch_id.

@@ -78,6 +78,11 @@ var seriesDocumentCatalog = []SeriesDocumentType{
 		Electronic: false, SunatNumbering: false, FormSelectable: true,
 	},
 	{
+		ID: "orden_compra", DocType: "Orden de compra", Label: "Orden de compra",
+		DocumentCode: "OC", Category: "orden_compra", CategoryLabel: "Orden de compra", SeriesPrefixHint: "OC",
+		Electronic: false, SunatNumbering: false, FormSelectable: true,
+	},
+	{
 		ID: "ingreso_inventario", DocType: "INGRESO_INVENTARIO", Label: "Ingreso de inventario",
 		DocumentCode: "00", Category: "almacen", CategoryLabel: "Almacén", SeriesPrefixHint: "ING",
 		Electronic: false, SunatNumbering: false, FormSelectable: true,

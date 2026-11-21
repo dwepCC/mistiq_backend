@@ -15,8 +15,10 @@ import (
 	"tukifac/config"
 	"tukifac/internal/ecommerce/service"
 	salessvc "tukifac/internal/sales/service"
+	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	"tukifac/pkg/tax"
+	"tukifac/pkg/tenantctx"
 	"tukifac/pkg/tenantstorage"
 	"tukifac/pkg/uploadlimits"
 
@@ -65,6 +67,8 @@ func (h *EcommerceHandler) UpdateSettingsAPI(c fiber.Ctx) error {
 		RequirePaymentValidation *bool   `json:"require_payment_validation"`
 		EmitSaleOnDispatch       *bool   `json:"emit_sale_on_dispatch"`
 		EmitSaleTarget           *string `json:"emit_sale_target"`
+		HeroStyle      *string `json:"hero_style"`
+		PaymentMethods *[]service.PaymentMethod `json:"payment_methods"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "datos inválidos"})
@@ -84,6 +88,8 @@ func (h *EcommerceHandler) UpdateSettingsAPI(c fiber.Ctx) error {
 		CardStyle:      body.CardStyle,
 		CategoryStyle:  body.CategoryStyle,
 		ShowStock:      body.ShowStock,
+		HeroStyle:      body.HeroStyle,
+		PaymentMethods: body.PaymentMethods,
 	}
 	if body.WhatsAppNumber != nil {
 		input.WhatsAppNumber = &body.WhatsAppNumber
@@ -364,11 +370,16 @@ func (h *EcommerceHandler) ConvertOrderAPI(c fiber.Ctx) error {
 	if body.BranchID == 0 {
 		return c.Status(400).JSON(fiber.Map{"error": "branch_id es obligatorio"})
 	}
+	// El branch_id del body ya no es de confianza: debe ser la sucursal activa o una a la que el usuario accede.
+	branchID, berr := branch.ResolveWriteBranchID(c, body.BranchID)
+	if berr != nil {
+		return c.Status(403).JSON(fiber.Map{"error": berr.Error(), "code": branch.CodeBranchForbidden})
+	}
 	svc := service.NewEcommerceService(db(c))
 	sale, err := svc.ConvertToSale(uint(id), service.ConvertInput{
 		Target:        body.Target,
 		SeriesID:      body.SeriesID,
-		BranchID:      body.BranchID,
+		BranchID:      branchID,
 		IssueDate:     parseOrderIssueDate(body.IssueDate),
 		ContactID:     body.ContactID,
 		UserID:        orderUserID(c),
@@ -609,8 +620,96 @@ func (h *EcommerceHandler) PublicSettingsAPI(c fiber.Ctx) error {
 		"card_style":           settings.CardStyle,
 		"category_style":       settings.CategoryStyle,
 		"show_stock":           settings.ShowStock,
+		"hero_style":           settings.HeroStyle,
+		"contact":              svc.ResolvePublicContact(settings),
+		"payment_methods":      service.EnabledPaymentMethods(settings.PaymentMethodsJSON),
 		"sliders":              sliders,
 	})
+}
+
+// publicAssetAbsoluteURL replica la resolución de logo_url del frontend (config/apiBaseUrl.ts
+// resolvePublicAssetUrl): si ya es absoluta la deja igual, si no la prefija con el origen
+// central de assets (https://api.{AppDomain}) — necesario porque los bots de link preview no
+// ejecutan JS y necesitan una URL absoluta en <meta property="og:image">.
+func publicAssetAbsoluteURL(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	root := ""
+	if config.AppConfig != nil {
+		root = strings.TrimSpace(config.AppConfig.AppDomain)
+	}
+	if root == "" || root == "localhost" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return "https://api." + root + path
+}
+
+// PublicMetaHTMLAPI sirve un HTML mínimo con Open Graph tags de la tienda del tenant (nombre,
+// descripción, logo), para que WhatsApp/Facebook/Telegram etc. muestren la marca del negocio en
+// vez de la genérica de Tukifac al compartir el link /ecommerce. Estos crawlers no ejecutan JS,
+// así que no basta con lo que la SPA setea en runtime — necesitan esto en el HTML de la primera
+// respuesta. Pensado para que nginx lo sirva SOLO a bots conocidos (User-Agent) en /ecommerce*;
+// usuarios reales siguen recibiendo la SPA normal vía <meta refresh> hacia la misma ruta.
+func (h *EcommerceHandler) PublicMetaHTMLAPI(c fiber.Ctx) error {
+	svc := service.NewEcommerceService(db(c))
+	settings, err := svc.GetSettings()
+	if err != nil {
+		return c.Status(500).SendString("error cargando la tienda")
+	}
+
+	storeName := strings.TrimSpace(settings.StoreName)
+	if storeName == "" {
+		storeName = "Tienda online"
+	}
+	description := strings.TrimSpace(settings.Description)
+	if description == "" {
+		description = strings.TrimSpace(settings.Tagline)
+	}
+	if description == "" {
+		description = "Catálogo y pedidos online de " + storeName
+	}
+	logoURL := publicAssetAbsoluteURL(settings.LogoURL)
+
+	host := strings.TrimSpace(c.Hostname())
+	pageURL := ""
+	if host != "" {
+		pageURL = "https://" + host + "/ecommerce"
+	}
+
+	title := html.EscapeString(storeName)
+	desc := html.EscapeString(description)
+	img := html.EscapeString(logoURL)
+	url := html.EscapeString(pageURL)
+
+	var b strings.Builder
+	b.WriteString("<!DOCTYPE html><html lang=\"es\"><head><meta charset=\"UTF-8\">")
+	b.WriteString("<title>" + title + "</title>")
+	b.WriteString("<meta name=\"description\" content=\"" + desc + "\">")
+	b.WriteString("<meta property=\"og:type\" content=\"website\">")
+	b.WriteString("<meta property=\"og:title\" content=\"" + title + "\">")
+	b.WriteString("<meta property=\"og:description\" content=\"" + desc + "\">")
+	if img != "" {
+		b.WriteString("<meta property=\"og:image\" content=\"" + img + "\">")
+	}
+	if url != "" {
+		b.WriteString("<meta property=\"og:url\" content=\"" + url + "\">")
+	}
+	b.WriteString("<meta name=\"twitter:card\" content=\"summary_large_image\">")
+	if url != "" {
+		b.WriteString("<meta http-equiv=\"refresh\" content=\"0; url=" + url + "\">")
+	}
+	b.WriteString("</head><body></body></html>")
+
+	c.Set("Content-Type", "text/html; charset=utf-8")
+	return c.SendString(b.String())
 }
 
 func (h *EcommerceHandler) PublicCategoriesAPI(c fiber.Ctx) error {
@@ -733,6 +832,36 @@ func (h *EcommerceHandler) PublicProductsAPI(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"data": items, "total": total})
 }
 
+// PublicProductOptionsAPI presentaciones, unidades de venta y extras de un producto de la tienda.
+func (h *EcommerceHandler) PublicProductOptionsAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil || id == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "producto inválido"})
+	}
+	svc := service.NewEcommerceService(db(c))
+	settings, err := svc.GetSettings()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	opts, err := svc.ProductOptions(uint(id), settings.ShowStock)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(opts)
+}
+
+func (h *EcommerceHandler) PublicProductGalleryAPI(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 32)
+	if err != nil || id == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "producto inválido"})
+	}
+	urls, err := service.NewEcommerceService(db(c)).PublicProductGallery(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"images": urls})
+}
+
 // CreatePublicOrderAPI Contrato ecommerce v2 Fase 3/4: el cliente SOLO puede mandar identidad de
 // producto/presentación + cantidad por línea — nombre/precio/subtotal/total nunca vienen del
 // cliente, EcommerceService.CreateOrder los resuelve siempre contra el catálogo real del tenant.
@@ -816,5 +945,36 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.Status(201).JSON(fiber.Map{"data": order, "items": orderItems, "order_number": order.ID})
+	pdfToken := ""
+	if t, ok := tenantctx.Tenant(c); ok {
+		pdfToken = service.OrderPDFToken(t.ID, order.ID)
+	}
+	return c.Status(201).JSON(fiber.Map{"data": order, "items": orderItems, "order_number": order.ID, "pdf_token": pdfToken})
+}
+
+// PublicOrderPDFAPI sirve el PDF del pedido web a quien tenga el enlace firmado (?t=). Se abre
+// desde el mensaje de WhatsApp, sin sesión, por eso la firma es obligatoria.
+func (h *EcommerceHandler) PublicOrderPDFAPI(c fiber.Ctx) error {
+	id, _ := strconv.ParseUint(c.Params("id"), 10, 32)
+	t, ok := tenantctx.Tenant(c)
+	if !ok || id == 0 || !service.ValidOrderPDFToken(t.ID, uint(id), c.Query("t")) {
+		return c.Status(404).SendString("pedido no encontrado")
+	}
+	svc := service.NewEcommerceService(db(c))
+	var order database.TenantEcommerceOrder
+	if err := db(c).First(&order, uint(id)).Error; err != nil {
+		return c.Status(404).SendString("pedido no encontrado")
+	}
+	storeName := "Tienda online"
+	if settings, err := svc.GetSettings(); err == nil && strings.TrimSpace(settings.StoreName) != "" {
+		storeName = settings.StoreName
+	}
+	pdf, err := service.BuildOrderPDF(&order, storeName)
+	if err != nil {
+		return c.Status(500).SendString("no se pudo generar el PDF")
+	}
+	c.Set("Content-Type", "application/pdf")
+	c.Set("Content-Disposition", fmt.Sprintf("inline; filename=\"pedido-%d.pdf\"", order.ID))
+	c.Set("Cache-Control", "private, max-age=300")
+	return c.Send(pdf)
 }

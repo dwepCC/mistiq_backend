@@ -12,8 +12,8 @@ import (
 // Nota: ActiveBranchID usa fiber.Ctx en helpers HTTP.
 
 const (
-	CodeSessionUpdated = "SESSION_UPDATED"
-	CodeBranchRequired = "BRANCH_REQUIRED"
+	CodeSessionUpdated  = "SESSION_UPDATED"
+	CodeBranchRequired  = "BRANCH_REQUIRED"
 	CodeBranchForbidden = "BRANCH_FORBIDDEN"
 )
 
@@ -82,13 +82,58 @@ func ActiveBranchID(c fiber.Ctx) uint {
 	return v
 }
 
-// IsBranchAdmin desde Locals.
+// IsBranchAdmin: el usuario puede VER todas las sucursales del tenant (hoy: rol Administrador; la Fase 3B lo
+// reemplaza por el permiso branches.view_all). Tener varias sucursales asignadas NO lo activa.
 func IsBranchAdmin(c fiber.Ctx) bool {
 	v, _ := c.Locals("is_branch_admin").(bool)
 	return v
 }
 
-// ResolveWriteBranchID usa sucursal activa; admin puede enviar otra solo si can switch.
+// AllowedBranchIDs sucursales que el usuario tiene asignadas (más la activa), según el middleware.
+func AllowedBranchIDs(c fiber.Ctx) []uint {
+	v, _ := c.Locals("allowed_branch_ids").([]uint)
+	return v
+}
+
+// NoBranchFilter es un id que no existe: un filtro "branch_id = NoBranchFilter" no devuelve nada. Se usa para que
+// una consulta sin sucursal resuelta falle cerrada en lugar de mostrar todas.
+const NoBranchFilter uint = 1<<32 - 1
+
+// CanAccessBranch indica si el usuario puede LEER datos de la sucursal id (activa, asignada, o todas si ve todo).
+func CanAccessBranch(c fiber.Ctx, id uint) bool {
+	if id == 0 {
+		return false
+	}
+	if id == ActiveBranchID(c) || IsBranchAdmin(c) {
+		return true
+	}
+	for _, a := range AllowedBranchIDs(c) {
+		if a == id {
+			return true
+		}
+	}
+	return false
+}
+
+// RecordReadable: puede leer un registro cuyo branch_id es recordBranchID. Un registro sin sucursal (0, datos
+// previos al multi-sucursal) se considera del tenant y es legible.
+func RecordReadable(c fiber.Ctx, recordBranchID uint) bool {
+	return recordBranchID == 0 || CanAccessBranch(c, recordBranchID)
+}
+
+// RecordWritable: solo se puede modificar/anular/emitir un registro de la sucursal ACTIVA (o sin sucursal).
+// Para operar en otra, el usuario debe cambiar de sucursal; ALL_BRANCHES nunca escribe.
+func RecordWritable(c fiber.Ctx, recordBranchID uint) bool {
+	if recordBranchID == 0 {
+		return true
+	}
+	active := ActiveBranchID(c)
+	return active != 0 && recordBranchID == active
+}
+
+// ResolveWriteBranchID devuelve la sucursal en la que se registra una operación: SIEMPRE la activa del contexto
+// validado (JWT + BD). El branch_id que envíe el cliente solo se acepta si coincide con ella; ni siquiera quien ve
+// todas las sucursales puede escribir en otra por el body: debe cambiar de sucursal activa primero.
 func ResolveWriteBranchID(c fiber.Ctx, requested uint) (uint, error) {
 	active := ActiveBranchID(c)
 	if active == 0 {
@@ -97,32 +142,69 @@ func ResolveWriteBranchID(c fiber.Ctx, requested uint) (uint, error) {
 	if requested == 0 || requested == active {
 		return active, nil
 	}
-	if IsBranchAdmin(c) {
-		return requested, nil
-	}
-	return 0, errors.New("no puede operar en otra sucursal")
+	return 0, errors.New("la operación debe registrarse en la sucursal activa; cambie de sucursal para operar en otra")
 }
 
-// ResolveReadBranchFilter para listados: 0 = activa; admin puede filtrar otra sucursal.
+// ResolveReadBranchFilter para listados: 0 = activa; se acepta otra solo si el usuario puede acceder a ella.
+// Nunca devuelve 0 ("todas"): sin sucursal resuelta devuelve NoBranchFilter (fail-closed).
 func ResolveReadBranchFilter(c fiber.Ctx, requested uint) uint {
 	active := ActiveBranchID(c)
-	if requested == 0 {
-		return active
-	}
-	if IsBranchAdmin(c) {
+	if requested != 0 && CanAccessBranch(c, requested) {
 		return requested
+	}
+	// Modo explícito ALL_BRANCHES (solo lectura, solo con branches.view_all): consulta consolidada.
+	if requested == 0 && IsAllBranchesMode(c) {
+		return 0
+	}
+	if active == 0 {
+		return NoBranchFilter
 	}
 	return active
 }
 
-// BumpSessionVersion incrementa versión al cambiar asignación de sucursal del usuario.
+// ResolveReportBranchFilter sucursal para dashboards y reportes de ventas, donde "Todas las
+// sucursales" es una opción real: solo quien ve todo (IsBranchAdmin) que no elige ninguna (requested
+// = 0) y pide "todas" (allWhenEmpty) obtiene 0 = toda la empresa. Una sucursal pedida debe ser accesible.
+//
+// ResolveReadBranchFilter no sirve para esto: con requested = 0 devuelve la sucursal activa, así
+// que un reporte con el selector en "Todas" mostraba solo la sucursal activa mientras el
+// dashboard (sin ese filtro) sumaba todas, y los totales de ambos no coincidían.
+func ResolveReportBranchFilter(c fiber.Ctx, requested uint, allWhenEmpty bool) uint {
+	if requested > 0 && CanAccessBranch(c, requested) {
+		return requested
+	}
+	if requested == 0 && allWhenEmpty && IsBranchAdmin(c) {
+		return 0
+	}
+	if ActiveBranchID(c) == 0 {
+		return NoBranchFilter
+	}
+	return ActiveBranchID(c)
+}
+
+// BumpSessionVersion incrementa la versión de sesión del usuario (tenant_users.branch_session_version): revoca
+// los access tokens ya emitidos (409 SESSION_UPDATED). Se llama al cambiar sucursales asignadas, rol, permisos
+// del rol, contraseña, PIN y al activar/desactivar. Un usuario aún en 0 (sin backfill V178) pasa directo a 2
+// para que ni siquiera un token legado con claim 0 sobreviva a la primera revocación.
 // No-op si el tenant aún no tiene la columna (rolling deploy / legacy).
 func BumpSessionVersion(db *gorm.DB, userID uint) error {
 	if !database.TenantBranchSessionVersionReady(db) {
 		return nil
 	}
 	return db.Model(&database.TenantUser{}).Where("id = ?", userID).
-		UpdateColumn("branch_session_version", gorm.Expr("branch_session_version + 1")).Error
+		UpdateColumn("branch_session_version", gorm.Expr(bumpExpr)).Error
+}
+
+const bumpExpr = "CASE WHEN branch_session_version < 1 THEN 2 ELSE branch_session_version + 1 END"
+
+// BumpSessionVersionForRole revoca las sesiones de TODOS los usuarios de un rol (cambio de permisos del rol).
+// No-op si el tenant aún no tiene la columna.
+func BumpSessionVersionForRole(db *gorm.DB, roleID uint) error {
+	if !database.TenantBranchSessionVersionReady(db) {
+		return nil
+	}
+	return db.Model(&database.TenantUser{}).Where("role_id = ?", roleID).
+		UpdateColumn("branch_session_version", gorm.Expr(bumpExpr)).Error
 }
 
 // SyncUserBranchFields al crear/actualizar usuario desde branch_id legacy.

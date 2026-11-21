@@ -45,6 +45,10 @@ func transporte1004Input(contactID, seriesID uint) CreateSaleInput {
 			GoodCode: "027", ValorReferencialPen: 1232.28, MtcRegistro: "15X123CNG",
 			ConfiguracionVehicular: "C3", PuntoOrigen: "AV. INDUSTRIAL 578 - LIMA",
 			PuntoDestino: "JR. BUENAVISTA 234 - CASMA", CargaEfectivaTm: 12, CargaUtilTm: 15,
+			TripDetail:   "Transporte de mercadería general, viaje directo",
+			OriginUbigeo: "150101", OriginAddress: "AV. INDUSTRIAL 578 - LIMA",
+			DestinationUbigeo: "021803", DestinationAddress: "JR. BUENAVISTA 234 - CASMA",
+			ValorRefCargaEfectivaPen: 1100.50, ValorRefCargaUtilPen: 1300.75,
 		},
 	}
 }
@@ -82,6 +86,14 @@ func TestCreate1004_FlujoCompleto(t *testing.T) {
 	if det.MtcRegistro != "15X123CNG" {
 		t.Errorf("mtc_registro no persistido: %q", det.MtcRegistro)
 	}
+	if det.OriginUbigeo != "150101" || det.DestinationUbigeo != "021803" ||
+		det.OriginAddress == "" || det.DestinationAddress == "" {
+		t.Errorf("ubigeo/dirección de origen y destino no persistidos: %+v", det)
+	}
+	if det.ValorRefCargaEfectivaPen == nil || *det.ValorRefCargaEfectivaPen != 1100.50 ||
+		det.ValorRefCargaUtilPen == nil || *det.ValorRefCargaUtilPen != 1300.75 {
+		t.Errorf("valores referenciales de carga no persistidos: %+v", det)
+	}
 }
 
 // Sin los campos de transporte, la venta completa debe fallar (no solo Evaluate/Persist
@@ -93,7 +105,7 @@ func TestCreate1004_RechazaSinDatosDeTransporte(t *testing.T) {
 	seriesID := seedSeries(t, db, "Factura", "01", "F001")
 
 	in := transporte1004Input(contactID, seriesID)
-	in.Detraccion.PuntoDestino = ""
+	in.Detraccion.DestinationUbigeo = ""
 	if _, err := svc.Create(in); err == nil {
 		t.Fatal("esperaba error: falta punto de destino")
 	}

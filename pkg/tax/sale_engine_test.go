@@ -1,6 +1,9 @@
 package tax
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestCalcSaleCheckoutGlobalPercentOnly(t *testing.T) {
 	r := CalcSaleCheckout(SaleCheckoutInput{
@@ -141,5 +144,29 @@ func TestCalcSaleCheckoutBonificacionGravada15(t *testing.T) {
 	}
 	if r.Lines[1].Subtotal != 50 || r.Lines[1].TaxAmount != 9 || r.Lines[1].Total != 0 {
 		t.Fatalf("bonif line fiscal=%v/%v chargeable=%v want 50/9/0", r.Lines[1].Subtotal, r.Lines[1].TaxAmount, r.Lines[1].Total)
+	}
+}
+
+// Contrato con los clientes: el monto de descuento que llega al servidor es SIEMPRE sobre la base
+// imponible. Los formularios convierten lo que teclea el usuario (S/ 100 con IGV incluido) a base
+// (100 ÷ 1.18) antes de enviarlo; el motor no vuelve a sumarle IGV ni a quitárselo.
+func TestCalcSaleCheckoutLineAmountIncludesIgvCaso395(t *testing.T) {
+	base := 100 / 1.18 // lo que envía el formulario para "S/ 100" sobre un precio con IGV incluido
+	r := CalcSaleCheckout(SaleCheckoutInput{
+		Lines: []SaleLineInput{{
+			UnitPrice: 395, Quantity: 1, IgvAffectationType: "10", PriceIncludesIgv: true,
+			LineDiscountMode: "amount", LineDiscountValue: base,
+		}},
+		TaxCfg: cfg18(),
+	})
+	if r.Total != 295 {
+		t.Fatalf("total=%v want 295", r.Total)
+	}
+	if r.Subtotal != 250 || r.TaxAmount != 45 {
+		t.Fatalf("base/igv=%v/%v want 250/45 (IGV sobre la base ya descontada)", r.Subtotal, r.TaxAmount)
+	}
+	ch := r.Lines[0].LineCharges
+	if len(ch) != 1 || math.Abs(ch[0].Monto-84.75) > 0.005 || math.Abs(ch[0].MontoBase-334.75) > 0.005 {
+		t.Fatalf("allowance=%+v want monto 84.75 sobre base 334.75 (sin IGV)", ch)
 	}
 }

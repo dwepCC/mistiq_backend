@@ -11,67 +11,6 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestListOpenVouchers_listsByAffectationWithoutContactFilter(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:prepay_list?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.AutoMigrate(
-		&database.TenantSale{},
-		&database.TenantContact{},
-		&database.TenantSalePrepaymentVoucher{},
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	c1, c2 := uint(1), uint(2)
-	now := time.Now()
-	for _, tc := range []struct {
-		saleID  uint
-		contact uint
-		doc     string
-		balance float64
-	}{
-		{10, c1, "F001-1", 100},
-		{20, c2, "F001-2", 200},
-	} {
-		contact := tc.contact
-		sale := database.TenantSale{
-			ID: tc.saleID, BranchID: 1, UserID: 1, SeriesID: 1, DocType: "FACTURA",
-			ContactID: &contact, Number: tc.doc, Total: tc.balance, BillingStatus: "accepted",
-			IssueDate: now,
-		}
-		if err := db.Create(&sale).Error; err != nil {
-			t.Fatal(err)
-		}
-		voucher := database.TenantSalePrepaymentVoucher{
-			SaleID:            sale.ID,
-			ContactID:         &contact,
-			SunatDocCode:      "01",
-			DocumentNumber:    tc.doc,
-			OperationTypeCode: "0101",
-			AffectationGroup:  sunatpre.AffectationGravado,
-			RelatedDocType:    "02",
-			OriginalAmount:    tc.balance,
-			BalanceAmount:     tc.balance,
-			Currency:          "PEN",
-			Status:            sunatpre.StatusOpen,
-			AvailableAt:       &now,
-		}
-		if err := db.Create(&voucher).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	svc := NewService(db)
-	rows, err := svc.ListOpenVouchers(0, sunatpre.AffectationGravado, 18)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 open vouchers (PHP no filtra cliente), got %d", len(rows))
-	}
-}
 
 // Anular con NC la venta que dedujo un anticipo debe reponer el saldo del voucher origen y volver a
 // mostrarlo en la lista de anticipos disponibles — antes esto no pasaba (bug reportado).
@@ -128,7 +67,7 @@ func TestReverseApplicationsForConsumerSale_restoresVoucherBalanceAndReappearsIn
 	svc := NewService(db)
 
 	// Antes de anular: el voucher no aparece (sin saldo).
-	before, err := svc.ListOpenVouchers(0, sunatpre.AffectationGravado, 18)
+	before, err := svc.ListOpenVouchers(contact, sunatpre.AffectationGravado, 18)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +99,7 @@ func TestReverseApplicationsForConsumerSale_restoresVoucherBalanceAndReappearsIn
 	}
 
 	// Después de anular: el voucher vuelve a aparecer en la lista de anticipos disponibles.
-	after, err := svc.ListOpenVouchers(0, sunatpre.AffectationGravado, 18)
+	after, err := svc.ListOpenVouchers(contact, sunatpre.AffectationGravado, 18)
 	if err != nil {
 		t.Fatal(err)
 	}

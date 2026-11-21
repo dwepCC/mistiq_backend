@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 
+	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 
 	"gorm.io/gorm"
@@ -82,8 +83,13 @@ func (s *RoleService) RolePermissions(roleID uint) ([]uint, error) {
 }
 
 // SetRolePermissions reemplaza todos los permisos de un rol.
+//
+// Revoca las sesiones de todos los usuarios del rol (branch_session_version + 1): los permisos viajan en el JWT.
 func (s *RoleService) SetRolePermissions(roleID uint, permissionIDs []uint) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := branch.BumpSessionVersionForRole(tx, roleID); err != nil {
+			return err
+		}
 		if err := tx.Where("role_id = ?", roleID).Delete(&database.TenantRolePermission{}).Error; err != nil {
 			return err
 		}
@@ -147,14 +153,22 @@ func (s *RoleService) SeedPermissions() error {
 		{Module: "roles", Action: "manage", Label: "Gestionar roles"},
 		{Module: "company", Action: "view", Label: "Ver configuración de empresa"},
 		{Module: "company", Action: "edit", Label: "Editar configuración de empresa"},
-		{Module: "contacts", Action: "view", Label: "Ver contactos"},
-		{Module: "contacts", Action: "create", Label: "Crear contactos"},
-		{Module: "contacts", Action: "edit", Label: "Editar contactos"},
-		{Module: "contacts", Action: "delete", Label: "Eliminar contactos"},
+		{Module: "customers", Action: "view", Label: "Ver clientes"},
+		{Module: "customers", Action: "create", Label: "Crear clientes"},
+		{Module: "customers", Action: "edit", Label: "Editar clientes"},
+		{Module: "customers", Action: "delete", Label: "Eliminar clientes"},
+		{Module: "suppliers", Action: "view", Label: "Ver proveedores"},
+		{Module: "suppliers", Action: "create", Label: "Crear proveedores"},
+		{Module: "suppliers", Action: "edit", Label: "Editar proveedores"},
+		{Module: "suppliers", Action: "delete", Label: "Eliminar proveedores"},
 		{Module: "products", Action: "view", Label: "Ver productos"},
 		{Module: "products", Action: "create", Label: "Crear productos"},
 		{Module: "products", Action: "edit", Label: "Editar productos"},
 		{Module: "products", Action: "delete", Label: "Eliminar productos"},
+		{Module: "products", Action: "view_cost", Label: "Ver y editar el costo de los productos"},
+		{Module: "pos", Action: "view_stock", Label: "Ver stock por sucursal en el punto de venta"},
+		{Module: "pos", Action: "view_cost", Label: "Ver costo del producto en el punto de venta"},
+		{Module: "pos", Action: "view_prices", Label: "Ver precios del producto en el punto de venta"},
 		{Module: "inventory", Action: "view", Label: "Ver inventario"},
 		{Module: "inventory", Action: "manage", Label: "Gestionar inventario (todo lo de abajo)"},
 		{Module: "inventory", Action: "create_document", Label: "Crear documento de ingreso/egreso"},
@@ -169,6 +183,8 @@ func (s *RoleService) SeedPermissions() error {
 		{Module: "sales", Action: "create", Label: "Crear ventas"},
 		{Module: "sales", Action: "cancel", Label: "Anular ventas"},
 		{Module: "sales", Action: "pos", Label: "Usar punto de venta"},
+		{Module: "sales", Action: "void_rejected", Label: "Anular localmente un comprobante rechazado por SUNAT"},
+		{Module: "sales", Action: "override_price", Label: "Cambiar precio al vender sin restricción de catálogo"},
 		{Module: "quotations", Action: "view", Label: "Ver cotizaciones"},
 		{Module: "quotations", Action: "create", Label: "Crear cotizaciones"},
 		{Module: "quotations", Action: "edit", Label: "Editar cotizaciones"},
@@ -188,7 +204,16 @@ func (s *RoleService) SeedPermissions() error {
 		{Module: "cashbank", Action: "close", Label: "Cerrar caja"},
 		{Module: "cashbank", Action: "movements", Label: "Movimientos de caja"},
 		{Module: "cashbank", Action: "arqueo", Label: "Registrar arqueo de caja"},
+		// Permisos finos de Caja y bancos (V173): cada pantalla/acción se asigna por separado.
+		{Module: "cashbank", Action: "income_view", Label: "Ver ingresos de caja"},
+		{Module: "cashbank", Action: "expense_view", Label: "Ver egresos de caja"},
+		{Module: "cashbank", Action: "bank_view", Label: "Ver cuentas y bancos"},
+		{Module: "cashbank", Action: "bank_manage", Label: "Crear/editar cuentas bancarias y registrar movimientos bancarios"},
+		{Module: "cashbank", Action: "report_view", Label: "Ver reporte de caja"},
+		{Module: "cashbank", Action: "payment_methods_manage", Label: "Gestionar métodos de pago"},
+		{Module: "cashbank", Action: "delete_session", Label: "Eliminar una caja sin movimientos"},
 		{Module: "billing", Action: "manage", Label: "Gestionar facturación electrónica (todo lo de abajo)"},
+		{Module: "billing", Action: "view", Label: "Ver consulta de comprobantes (solo lectura)"},
 		{Module: "billing", Action: "send", Label: "Enviar/consultar comprobantes en SUNAT"},
 		{Module: "billing", Action: "credit_note", Label: "Anular venta con nota de crédito"},
 		{Module: "billing", Action: "debit_note", Label: "Emitir nota de débito"},
@@ -218,6 +243,31 @@ func (s *RoleService) SeedPermissions() error {
 		{Module: "fleet", Action: "manage", Label: "Gestionar transportistas, conductores y vehículos"},
 		{Module: "subscription", Action: "view", Label: "Ver suscripción y facturación de Mistiq"},
 		{Module: "subscription", Action: "manage", Label: "Registrar pagos y comprar paquetes de documentos"},
+		// reports.*: gatea la PÁGINA de cada reporte en /reports/* (solo Tukifac — Tukichef no
+		// tiene esta sección). Los endpoints que consumen esos reportes siguen exigiendo el
+		// permiso de su módulo real (sales.view, products.view, etc.), sin cambios.
+		// Contabilidad (módulo accounting, V174): cada pantalla/acción se asigna por separado.
+		{Module: "accounting", Action: "sales_register", Label: "Contabilidad: exportar registro de ventas"},
+		{Module: "accounting", Action: "purchases_register", Label: "Contabilidad: exportar registro de compras"},
+		{Module: "accounting", Action: "export_formats", Label: "Contabilidad: exportar formatos a sistemas contables"},
+		{Module: "accounting", Action: "summary_report", Label: "Contabilidad: reporte resumido de ventas"},
+		{Module: "accounting", Action: "ledger", Label: "Contabilidad: libro mayor"},
+		{Module: "accounting", Action: "sire_view", Label: "Contabilidad: consultar SIRE (ventas y compras)"},
+		{Module: "accounting", Action: "sire_manage", Label: "Contabilidad: solicitar propuesta SIRE y aceptar propuesta de ventas"},
+		{Module: "accounting", Action: "settings", Label: "Contabilidad: cuentas contables y credenciales SIRE"},
+		{Module: "products", Action: "manage_global", Label: "Catálogo global: crear/editar/eliminar productos, categorías, marcas, unidades, imágenes, atributos y precio global"},
+		{Module: "branches", Action: "view_all", Label: "Sucursales: ver todas las sucursales (consulta consolidada, solo lectura)"},
+		{Module: "branches", Action: "switch", Label: "Sucursales: cambiar entre las sucursales asignadas"},
+		{Module: "branches", Action: "manage", Label: "Sucursales: crear/editar sucursales y asignar acceso total"},
+		{Module: "reports", Action: "manage", Label: "Ver todos los reportes"},
+		{Module: "reports", Action: "sales", Label: "Ver reporte de ventas"},
+		{Module: "reports", Action: "sales_by_product", Label: "Ver reporte de ventas por producto"},
+		{Module: "reports", Action: "notes", Label: "Ver reporte de notas de crédito/débito"},
+		{Module: "reports", Action: "products", Label: "Ver reporte de productos"},
+		{Module: "reports", Action: "purchases", Label: "Ver reporte de compras"},
+		{Module: "reports", Action: "kardex", Label: "Ver reporte de kardex"},
+		{Module: "reports", Action: "cash", Label: "Ver reporte de caja"},
+		{Module: "reports", Action: "profit", Label: "Ver reporte de utilidades"},
 	}
 
 	for _, want := range perms {
@@ -247,8 +297,9 @@ var defaultRolePermissions = map[string][][2]string{
 		{"dashboard", "view"},
 		{"roles", "view"},
 		{"company", "view"},
-		{"contacts", "view"},
+		{"customers", "view"}, {"suppliers", "view"},
 		{"products", "view"},
+		{"pos", "view_stock"}, {"pos", "view_prices"},
 		{"inventory", "view"},
 		{"sales", "view"},
 		{"quotations", "view"},
@@ -256,6 +307,7 @@ var defaultRolePermissions = map[string][][2]string{
 		{"purchases", "view"},
 		{"payables", "view"},
 		{"cashbank", "view"}, {"cashbank", "arqueo"},
+		{"cashbank", "income_view"}, {"cashbank", "expense_view"}, {"cashbank", "bank_view"}, {"cashbank", "report_view"},
 		{"memberships", "view"},
 		{"subscription", "view"},
 		// Gestión completa de pedidos web (Contrato v2 §7): confirmar, preparar, convertir,
@@ -263,22 +315,32 @@ var defaultRolePermissions = map[string][][2]string{
 		// Administrador/Supervisor, punto 4 aprobado).
 		{"ecommerce", "orders_view"}, {"ecommerce", "orders_manage"}, {"ecommerce", "orders_prepare"},
 		{"ecommerce", "orders_convert"}, {"ecommerce", "orders_dispatch"}, {"ecommerce", "orders_return"},
+		{"reports", "sales"}, {"reports", "sales_by_product"}, {"reports", "notes"},
+		{"reports", "products"}, {"reports", "purchases"}, {"reports", "kardex"}, {"reports", "cash"},
+		{"reports", "profit"},
 	},
 	"Cajero": {
 		{"dashboard", "view"},
-		{"contacts", "view"},
+		{"customers", "view"}, {"suppliers", "view"},
 		{"products", "view"},
-		{"sales", "view"}, {"sales", "create"}, {"sales", "pos"},
+		{"pos", "view_stock"}, {"pos", "view_prices"},
+		{"sales", "view"}, {"sales", "create"}, {"sales", "pos"}, {"sales", "override_price"},
+		{"billing", "view"},
 		{"quotations", "view"}, {"quotations", "convert"},
 		{"receivables", "view"}, {"receivables", "collect"},
 		{"cashbank", "view"}, {"cashbank", "open"}, {"cashbank", "close"},
 		{"cashbank", "movements"}, {"cashbank", "arqueo"},
+		{"cashbank", "income_view"}, {"cashbank", "expense_view"}, {"cashbank", "report_view"},
+		{"reports", "sales"}, {"reports", "sales_by_product"}, {"reports", "notes"}, {"reports", "products"}, {"reports", "cash"},
+		{"reports", "profit"},
 	},
 	"Vendedor": {
 		{"dashboard", "view"},
-		{"contacts", "view"}, {"contacts", "create"}, {"contacts", "edit"},
+		{"customers", "view"}, {"customers", "create"}, {"customers", "edit"}, {"suppliers", "view"},
 		{"products", "view"},
-		{"sales", "view"}, {"sales", "create"}, {"sales", "pos"},
+		{"pos", "view_stock"}, {"pos", "view_prices"},
+		{"sales", "view"}, {"sales", "create"}, {"sales", "pos"}, {"sales", "override_price"},
+		{"billing", "view"},
 		{"quotations", "view"}, {"quotations", "create"}, {"quotations", "edit"}, {"quotations", "convert"},
 		{"receivables", "view"}, {"receivables", "collect"},
 		{"memberships", "view"}, {"memberships", "create"}, {"memberships", "generate_sale"},
@@ -286,11 +348,14 @@ var defaultRolePermissions = map[string][][2]string{
 		// Consultar, confirmar, gestionar y convertir pedidos web — SIN despachar ni devolver
 		// (Contrato v2 §7, matriz de roles aprobada).
 		{"ecommerce", "orders_view"}, {"ecommerce", "orders_manage"}, {"ecommerce", "orders_convert"},
+		{"reports", "sales"}, {"reports", "sales_by_product"}, {"reports", "notes"}, {"reports", "products"}, {"reports", "cash"},
+		{"reports", "profit"},
 	},
 	"Almacenero": {
 		{"dashboard", "view"},
-		{"contacts", "view"},
+		{"customers", "view"}, {"suppliers", "view"},
 		{"products", "view"}, {"products", "create"}, {"products", "edit"},
+		{"products", "view_cost"}, {"pos", "view_stock"}, {"pos", "view_prices"}, {"pos", "view_cost"},
 		{"inventory", "view"}, {"inventory", "manage"},
 		{"inventory", "create_document"}, {"inventory", "confirm_document"}, {"inventory", "void_document"},
 		{"inventory", "transfer"}, {"inventory", "confirm_transfer"}, {"inventory", "cancel_transfer"},
@@ -299,19 +364,22 @@ var defaultRolePermissions = map[string][][2]string{
 		// Ver y preparar pedidos web — SIN convertir a venta, cancelar, devolver ni modificar
 		// información comercial (Contrato v2 §7, punto 3 aprobado explícitamente).
 		{"ecommerce", "orders_view"}, {"ecommerce", "orders_prepare"},
+		{"reports", "products"}, {"reports", "kardex"}, {"reports", "purchases"},
 	},
 	"Contador": {
 		{"dashboard", "view"},
 		{"company", "view"}, {"company", "edit"},
-		{"contacts", "view"},
+		{"customers", "view"}, {"suppliers", "view"},
 		{"sales", "view"},
 		{"purchases", "view"},
 		{"receivables", "view"}, {"receivables", "collect"}, {"receivables", "confirm_bn"},
 		{"payables", "view"}, {"payables", "pay"},
-		{"cashbank", "view"},
-		{"billing", "manage"}, {"billing", "send"}, {"billing", "credit_note"}, {"billing", "debit_note"},
+		{"cashbank", "view"}, {"cashbank", "income_view"}, {"cashbank", "expense_view"}, {"cashbank", "bank_view"}, {"cashbank", "report_view"},
+		{"billing", "manage"}, {"billing", "view"}, {"billing", "send"}, {"billing", "credit_note"}, {"billing", "debit_note"},
 		{"billing", "despatch"}, {"billing", "advanced_docs"},
 		{"subscription", "view"}, {"subscription", "manage"},
+		{"reports", "sales"}, {"reports", "sales_by_product"}, {"reports", "notes"}, {"reports", "purchases"}, {"reports", "cash"},
+		{"reports", "profit"},
 	},
 }
 

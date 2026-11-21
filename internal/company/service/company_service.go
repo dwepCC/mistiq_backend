@@ -2,11 +2,16 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"tukifac/pkg/branchscope"
 
+	"tukifac/pkg/branch"
 	"tukifac/pkg/database"
 	"tukifac/pkg/docseries"
 	"tukifac/pkg/facturador"
+	"tukifac/pkg/receiptdesign"
+	"tukifac/pkg/tax"
 
 	"gorm.io/gorm"
 )
@@ -47,6 +52,9 @@ func (s *CompanyService) GetConfig() (*database.TenantCompanyConfig, error) {
 	if strings.TrimSpace(cfg.SendMode) == "" {
 		cfg.SendMode = "sunat_direct"
 	}
+	cfg.LogoSizeTicket = normalizeLogoSize(cfg.LogoSizeTicket)
+	cfg.LogoSizeA4 = normalizeLogoSize(cfg.LogoSizeA4)
+	cfg.PdfA4Design = receiptdesign.NormalizeA4(cfg.PdfA4Design)
 	return &cfg, nil
 }
 
@@ -64,6 +72,14 @@ type CompanyConfigPatch struct {
 	AdditionalNotes                *string  `json:"additional_notes"`
 	TermsAndConditions             *string  `json:"terms_and_conditions"`
 	ShowTermsConditions            *bool    `json:"show_terms_conditions"`
+	ExportsEnabled                 *bool    `json:"exports_enabled"`
+	ShowBusinessNameOnSaleNote     *bool    `json:"show_business_name_on_sale_note"`
+	ShowIgvBreakdownOnSaleNote     *bool    `json:"show_igv_breakdown_on_sale_note"`
+	ServiceChargeEnabled           *bool    `json:"service_charge_enabled"`
+	ServiceChargeRate              *float64 `json:"service_charge_rate"`
+	LogoSizeTicket                 *string  `json:"logo_size_ticket"`
+	LogoSizeA4                     *string  `json:"logo_size_a4"`
+	PdfA4Design                    *string  `json:"pdf_a4_design"`
 	DetractionBNAccount            *string  `json:"detraction_bn_account"`
 	DetractionDefaultPaymentMethod *string  `json:"detraction_default_payment_method"`
 	ColorTheme                     *string  `json:"color_theme"`
@@ -76,6 +92,9 @@ func (s *CompanyService) ApplyConfigPatch(patch CompanyConfigPatch) error {
 		return errors.New("configure primero los datos generales de la empresa")
 	}
 	updates := map[string]interface{}{}
+	if patch.ServiceChargeRate != nil && !tax.ValidServiceChargeRate(*patch.ServiceChargeRate) {
+		return fmt.Errorf("el recargo al consumo debe ser mayor que 0 y no pasar de %.0f%% (tope legal, DL 25988)", tax.MaxServiceChargeRate)
+	}
 	if patch.TradeName != nil {
 		updates["trade_name"] = strings.TrimSpace(*patch.TradeName)
 	}
@@ -114,6 +133,30 @@ func (s *CompanyService) ApplyConfigPatch(patch CompanyConfigPatch) error {
 	if patch.ShowTermsConditions != nil {
 		updates["show_terms_conditions"] = *patch.ShowTermsConditions
 	}
+	if patch.ExportsEnabled != nil {
+		updates["exports_enabled"] = *patch.ExportsEnabled
+	}
+	if patch.ShowBusinessNameOnSaleNote != nil {
+		updates["show_business_name_on_sale_note"] = *patch.ShowBusinessNameOnSaleNote
+	}
+	if patch.ShowIgvBreakdownOnSaleNote != nil {
+		updates["show_igv_breakdown_on_sale_note"] = *patch.ShowIgvBreakdownOnSaleNote
+	}
+	if patch.ServiceChargeEnabled != nil {
+		updates["service_charge_enabled"] = *patch.ServiceChargeEnabled
+	}
+	if patch.ServiceChargeRate != nil {
+		updates["service_charge_rate"] = *patch.ServiceChargeRate
+	}
+	if patch.LogoSizeTicket != nil {
+		updates["logo_size_ticket"] = normalizeLogoSize(*patch.LogoSizeTicket)
+	}
+	if patch.LogoSizeA4 != nil {
+		updates["logo_size_a4"] = normalizeLogoSize(*patch.LogoSizeA4)
+	}
+	if patch.PdfA4Design != nil {
+		updates["pdf_a4_design"] = receiptdesign.NormalizeA4(*patch.PdfA4Design)
+	}
 	if patch.DetractionBNAccount != nil {
 		updates["detraction_bn_account"] = strings.TrimSpace(*patch.DetractionBNAccount)
 	}
@@ -143,19 +186,19 @@ func (s *CompanyService) SaveConfig(input database.TenantCompanyConfig) error {
 	}
 	updates := map[string]interface{}{
 		// Razón Social y RUC no se actualizan desde el panel tenant; solo desde el panel central.
-		"trade_name": input.TradeName,
-		"address":    input.Address,
-		"ubigeo":     input.Ubigeo,
-		"country":    input.Country,
-		"phone":      input.Phone,
-		"email":      input.Email,
-		"website":    input.Website,
-		"currency":         input.Currency,
-		"tax_rate":         input.TaxRate,
-		"additional_notes": strings.TrimSpace(input.AdditionalNotes),
-		"terms_and_conditions":  strings.TrimSpace(input.TermsAndConditions),
-		"show_terms_conditions": input.ShowTermsConditions,
-		"detraction_bn_account":            strings.TrimSpace(input.DetractionBNAccount),
+		"trade_name":                        input.TradeName,
+		"address":                           input.Address,
+		"ubigeo":                            input.Ubigeo,
+		"country":                           input.Country,
+		"phone":                             input.Phone,
+		"email":                             input.Email,
+		"website":                           input.Website,
+		"currency":                          input.Currency,
+		"tax_rate":                          input.TaxRate,
+		"additional_notes":                  strings.TrimSpace(input.AdditionalNotes),
+		"terms_and_conditions":              strings.TrimSpace(input.TermsAndConditions),
+		"show_terms_conditions":             input.ShowTermsConditions,
+		"detraction_bn_account":             strings.TrimSpace(input.DetractionBNAccount),
 		"detraction_default_payment_method": normalizeDetractionPaymentMethod(input.DetractionDefaultPaymentMethod),
 	}
 	// color_theme solo desde panel tenant; Tukichef y otros clientes no deben vaciarlo.
@@ -185,6 +228,17 @@ func normalizeDetractionPaymentMethod(raw string) string {
 	return code
 }
 
+// normalizeLogoSize valida el tamaño de logo (ticket/A4): cualquier valor fuera de las 3
+// opciones soportadas cae a "mediano" (el tamaño base de los renderers).
+func normalizeLogoSize(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case "pequeno", "grande":
+		return strings.TrimSpace(raw)
+	default:
+		return "mediano"
+	}
+}
+
 // SaveReceiptWallet guarda QR Yape/Plin y cuentas bancarias visibles en comprobantes.
 func (s *CompanyService) SaveReceiptWallet(provider, phone, qrURL string, showOnA4, showOnTicket bool, bankAccountIDs []uint) error {
 	var existing database.TenantCompanyConfig
@@ -205,12 +259,12 @@ func (s *CompanyService) SaveReceiptWallet(provider, phone, qrURL string, showOn
 		return errors.New("el QR es demasiado grande: use el botón Subir QR (se guardará como archivo en el servidor)")
 	}
 	return s.db.Model(&existing).Updates(map[string]interface{}{
-		"wallet_provider":            provider,
-		"wallet_phone":               phone,
-		"wallet_qr_url":              qrURL,
-		"wallet_show_on_a4":          showOnA4,
-		"wallet_show_on_ticket":      showOnTicket,
-		"receipt_bank_account_ids":   EncodeReceiptBankAccountIDs(bankAccountIDs),
+		"wallet_provider":          provider,
+		"wallet_phone":             phone,
+		"wallet_qr_url":            qrURL,
+		"wallet_show_on_a4":        showOnA4,
+		"wallet_show_on_ticket":    showOnTicket,
+		"receipt_bank_account_ids": EncodeReceiptBankAccountIDs(bankAccountIDs),
 	}).Error
 }
 
@@ -305,22 +359,36 @@ func (s *CompanyService) GetBranch(id uint) (*database.TenantBranch, error) {
 	return &b, err
 }
 
+// ErrMainBranchRequired: el tenant debe tener SIEMPRE una (y solo una) sucursal principal.
+var ErrMainBranchRequired = errors.New("el negocio debe tener una sucursal principal: para cambiarla, marque otra sucursal como principal")
+
+// CreateBranch crea una sucursal. Un tenant tiene exactamente UNA sucursal principal: si se pide is_main (o aún no existe ninguna
+// principal) la nueva pasa a serlo y la anterior deja de serlo, todo en una sola transacción.
 func (s *CompanyService) CreateBranch(name, address, phone, fiscalDomicileCode string, isMain bool) (*database.TenantBranch, error) {
 	if name == "" {
 		return nil, errors.New("el nombre de la sucursal es requerido")
-	}
-	if isMain {
-		s.db.Model(&database.TenantBranch{}).Update("is_main", false)
 	}
 	b := &database.TenantBranch{
 		Name:               name,
 		Address:            address,
 		Phone:              phone,
 		FiscalDomicileCode: strings.TrimSpace(fiscalDomicileCode),
-		IsMain:             isMain,
 		Active:             true,
 	}
-	if err := s.db.Create(b).Error; err != nil {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var mains int64
+		if err := tx.Model(&database.TenantBranch{}).Where("is_main = ?", true).Count(&mains).Error; err != nil {
+			return err
+		}
+		b.IsMain = isMain || mains == 0
+		if b.IsMain {
+			if err := tx.Model(&database.TenantBranch{}).Where("is_main = ?", true).Update("is_main", false).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Create(b).Error
+	})
+	if err != nil {
 		return nil, err
 	}
 	if err := database.SeedInventoryDocumentSeriesForBranch(s.db, b.ID); err != nil {
@@ -329,21 +397,71 @@ func (s *CompanyService) CreateBranch(name, address, phone, fiscalDomicileCode s
 	return b, nil
 }
 
+// UpdateBranch actualiza una sucursal. Marcarla principal la hace la única principal; quitarle la marca a la principal actual
+// sin designar otra se rechaza (ErrMainBranchRequired).
 func (s *CompanyService) UpdateBranch(id uint, name, address, phone, fiscalDomicileCode string, isMain bool) error {
-	if isMain {
-		s.db.Model(&database.TenantBranch{}).Where("id != ?", id).Update("is_main", false)
-	}
-	return s.db.Model(&database.TenantBranch{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"name":                 name,
-		"address":              address,
-		"phone":                phone,
-		"fiscal_domicile_code": strings.TrimSpace(fiscalDomicileCode),
-		"is_main":              isMain,
-	}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var cur database.TenantBranch
+		if err := tx.First(&cur, id).Error; err != nil {
+			return err
+		}
+		if !isMain && cur.IsMain {
+			return ErrMainBranchRequired
+		}
+		if isMain {
+			if err := tx.Model(&database.TenantBranch{}).Where("id != ? AND is_main = ?", id, true).Update("is_main", false).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&database.TenantBranch{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"name":                 name,
+			"address":              address,
+			"phone":                phone,
+			"fiscal_domicile_code": strings.TrimSpace(fiscalDomicileCode),
+			"is_main":              isMain,
+		}).Error
+	})
 }
 
+// BranchDeleteBlockedError la sucursal no se puede eliminar por una regla de negocio (mensaje apto para el usuario).
+type BranchDeleteBlockedError struct{ Msg string }
+
+func (e *BranchDeleteBlockedError) Error() string { return e.Msg }
+
+// DeleteBranch elimina una sucursal sin dejar usuarios huérfanos: no se elimina la principal ni una que sea la
+// única sucursal de algún usuario; a los demás se les quita la asignación y se reubica su sucursal de origen.
 func (s *CompanyService) DeleteBranch(id uint) error {
-	return s.db.Delete(&database.TenantBranch{}, id).Error
+	var b database.TenantBranch
+	if err := s.db.First(&b, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if b.IsMain {
+		return &BranchDeleteBlockedError{"No se puede eliminar la sucursal principal; marque otra sucursal como principal primero."}
+	}
+	names, err := branch.UsersOnlyInBranch(s.db, id)
+	if err != nil {
+		return err
+	}
+	if len(names) > 0 {
+		return &BranchDeleteBlockedError{fmt.Sprintf(
+			"No se puede eliminar la sucursal %s: estos usuarios solo la tienen asignada (%s). Asígneles otra sucursal primero.",
+			b.Name, strings.Join(names, ", "))}
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := branch.DetachBranchFromUsers(tx, id); err != nil {
+			return err
+		}
+		return tx.Delete(&database.TenantBranch{}, id).Error
+	})
+}
+
+// UpdateBranchLogoURL guarda (o, con url="", borra) el logo propio de la sucursal. Vacío no es
+// un error: es la forma de volver a depender del logo global (ver pkg/branchlogo.ResolveURL).
+func (s *CompanyService) UpdateBranchLogoURL(branchID uint, url string) error {
+	return s.db.Model(&database.TenantBranch{}).Where("id = ?", branchID).Update("logo_url", url).Error
 }
 
 // Series y correlativos
@@ -362,7 +480,9 @@ func (s *CompanyService) assertSeriesCodeUnique(branchID uint, category, seriesN
 	if code == "" {
 		return errors.New("código de serie inválido")
 	}
-	q := s.db.Model(&database.TenantDocumentSeries{}).Where("series = ?", code)
+	// Regla GLOBAL del tenant: la unicidad se comprueba sobre TODAS las sucursales, no solo las del usuario (con el
+	// scope de sucursal activo, un código repetido en otra sucursal no se vería).
+	q := branchscope.System(s.db, "company: unicidad global del código de serie").Model(&database.TenantDocumentSeries{}).Where("series = ?", code)
 	// Series de almacén: código único dentro de la sucursal (puede repetirse en otra sucursal).
 	if strings.TrimSpace(strings.ToLower(category)) == "almacen" {
 		if branchID == 0 {

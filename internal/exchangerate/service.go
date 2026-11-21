@@ -10,6 +10,7 @@ import (
 	"time"
 
 	ajustesvc "tukifac/internal/ajustes/service"
+	"tukifac/pkg/dailyfx"
 	"tukifac/pkg/database"
 	"tukifac/pkg/logger"
 	"tukifac/pkg/saas"
@@ -320,4 +321,36 @@ func (s *CacheService) GetTodayStatus() (*QueryResult, *database.SaasExchangeRat
 	res, err := s.GetExchangeRate(today)
 	row, _ := s.repo.findByDate(today)
 	return res, row, err
+}
+
+func init() {
+	// Conecta el TC diario guardado con los servicios de documentos (ventas, cotizaciones, compras, órdenes).
+	dailyfx.Lookup = func(day string) (float64, bool, bool) {
+		res, err := DefaultService().GetExchangeRate(day)
+		if err != nil || res == nil || !res.Success || res.Venta <= 0 {
+			return 0, false, false
+		}
+		return res.Venta, res.EsFallback, true
+	}
+}
+
+// EnsureRecentDays garantiza que exista un TC guardado para **cada día** de los últimos daysBack días y hoy: los que
+// faltan (servidor caído, fin de semana, proveedor sin respuesta) se consultan/propagan desde el último confirmado y
+// se guardan. Así todo documento, aun de un día sin cron, tiene su TC registrado. Devuelve cuántos días completó.
+func (s *CacheService) EnsureRecentDays(daysBack int) int {
+	if daysBack < 1 {
+		daysBack = 1
+	}
+	today := saas.NowLima()
+	filled := 0
+	for i := daysBack; i >= 0; i-- {
+		day := today.AddDate(0, 0, -i).Format("2006-01-02")
+		if row, err := s.repo.findByDate(day); err == nil && row != nil && row.SaleRate > 0 {
+			continue
+		}
+		if res, err := s.GetExchangeRate(day); err == nil && res != nil && res.Success {
+			filled++
+		}
+	}
+	return filled
 }

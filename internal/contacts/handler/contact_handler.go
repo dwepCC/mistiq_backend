@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"tukifac/internal/contacts/service"
+	"tukifac/pkg/middleware"
 	"tukifac/pkg/pagination"
 	"tukifac/pkg/tenantstorage"
 	"tukifac/pkg/uploadlimits"
@@ -135,7 +138,9 @@ func (h *ContactHandler) DeleteForm(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString("ID inválido")
 	}
-	service.NewContactService(db(c)).Delete(uint(id))
+	if err := service.NewContactService(db(c)).Delete(uint(id)); err != nil {
+		return c.Redirect().To("/contacts?error=" + url.QueryEscape(err.Error()))
+	}
 	return c.Redirect().To("/contacts?success=deleted")
 }
 
@@ -154,6 +159,7 @@ type contactBody struct {
 	TradeName                       string              `json:"trade_name"`
 	Address                         string              `json:"address"`
 	Ubigeo                          string              `json:"ubigeo"`
+	Country                         string              `json:"country"`
 	Phone                           string              `json:"phone"`
 	Email                           string              `json:"email"`
 	PhotoURL                        string              `json:"photo_url"`
@@ -182,6 +188,7 @@ func bodyToInput(b contactBody) service.ContactInput {
 		TradeName:                       b.TradeName,
 		Address:                         b.Address,
 		Ubigeo:                          b.Ubigeo,
+		Country:                         b.Country,
 		Phone:                           b.Phone,
 		Email:                           b.Email,
 		PhotoURL:                        b.PhotoURL,
@@ -200,6 +207,11 @@ func (h *ContactHandler) SearchAPI(c fiber.Ctx) error {
 		Type:   c.Query("type"),
 		Status: c.Query("status"),
 	}
+	scope := middleware.ContactsScopeFrom(c)
+	if (params.Type == "customer" && !scope.Customers) || (params.Type == "supplier" && !scope.Suppliers) {
+		return contactAccessError(c, fiber.StatusForbidden)
+	}
+	params.TypesIn = scope.TypesFor()
 
 	// Paginación opt-in: solo cuando el cliente manda per_page. Sin él se devuelve todo, que
 	// es lo que necesitan los selectores del POS/ventas (retrocompatible).
@@ -227,6 +239,9 @@ func (h *ContactHandler) SearchAPI(c fiber.Ctx) error {
 }
 
 func (h *ContactHandler) DefaultClientAPI(c fiber.Ctx) error {
+	if !middleware.ContactsScopeFrom(c).Customers {
+		return contactAccessError(c, fiber.StatusForbidden)
+	}
 	contact, err := service.NewContactService(db(c)).GetDefaultClient()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
@@ -246,6 +261,9 @@ func (h *ContactHandler) GetAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "No encontrado"})
 	}
+	if !middleware.ContactsScopeFrom(c).Allows(contactTypeOf(contact.Type), false) {
+		return contactAccessError(c, fiber.StatusForbidden)
+	}
 	return c.JSON(fiber.Map{"data": contact})
 }
 
@@ -253,6 +271,9 @@ func (h *ContactHandler) CreateAPI(c fiber.Ctx) error {
 	var body contactBody
 	if err := c.Bind().JSON(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
+	}
+	if !middleware.ContactsScopeFrom(c).Allows(contactTypeOf(body.Type), true) {
+		return contactAccessError(c, fiber.StatusForbidden)
 	}
 	svc := service.NewContactService(db(c))
 	contact, err := svc.Create(bodyToInput(body))
@@ -272,6 +293,13 @@ func (h *ContactHandler) UpdateAPI(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
 	}
 	svc := service.NewContactService(db(c))
+	if status := scopedContactStatus(c, svc, uint(id), true); status != 0 {
+		return contactAccessError(c, status)
+	}
+	// Cambiar el tipo también exige poder actuar sobre el tipo nuevo.
+	if !middleware.ContactsScopeFrom(c).Allows(contactTypeOf(body.Type), true) {
+		return contactAccessError(c, fiber.StatusForbidden)
+	}
 	if err := svc.Update(uint(id), bodyToInput(body)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -284,7 +312,17 @@ func (h *ContactHandler) DeleteAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	if err := service.NewContactService(db(c)).Delete(uint(id)); err != nil {
+	svc := service.NewContactService(db(c))
+	if status := scopedContactStatus(c, svc, uint(id), true); status != 0 {
+		return contactAccessError(c, status)
+	}
+	if err := svc.Delete(uint(id)); err != nil {
+		var inUse *service.ContactInUseError
+		if errors.As(err, &inUse) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": inUse.Error(), "code": "contact_in_use", "documents": inUse.Documents,
+			})
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
@@ -295,7 +333,11 @@ func (h *ContactHandler) ToggleAPI(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	if err := service.NewContactService(db(c)).ToggleActive(uint(id)); err != nil {
+	svc := service.NewContactService(db(c))
+	if status := scopedContactStatus(c, svc, uint(id), true); status != 0 {
+		return contactAccessError(c, status)
+	}
+	if err := svc.ToggleActive(uint(id)); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
@@ -317,6 +359,9 @@ func (h *ContactHandler) UploadPhotoAPI(c fiber.Ctx) error {
 	contact, err := svc.GetByID(uint(id))
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "contacto no encontrado"})
+	}
+	if !middleware.ContactsScopeFrom(c).Allows(contactTypeOf(contact.Type), true) {
+		return contactAccessError(c, fiber.StatusForbidden)
 	}
 	oldPhotoURL := strings.TrimSpace(contact.PhotoURL)
 

@@ -182,12 +182,24 @@ func (s *MembershipService) List(p ListParams) ([]database.TenantMembership, int
 
 // ReminderCounts devuelve membresías activas con cobro vencido o con próximo cobro en los próximos 7 días (Perú).
 func (s *MembershipService) ReminderCounts() (overdue int64, upcoming int64, err error) {
+	return s.ReminderCountsInBranch(0)
+}
+
+// ReminderCountsInBranch igual que ReminderCounts acotado a una sucursal (0 = todas, uso interno).
+func (s *MembershipService) ReminderCountsInBranch(branchID uint) (overdue int64, upcoming int64, err error) {
 	day0 := todayPeru()
 	day8 := day0.AddDate(0, 0, 8)
-	if err = s.db.Model(&database.TenantMembership{}).Where("status = ? AND next_billing_date < ?", "active", day0).Count(&overdue).Error; err != nil {
+	scope := func() *gorm.DB {
+		q := s.db.Model(&database.TenantMembership{})
+		if branchID > 0 {
+			q = q.Where("branch_id = ?", branchID)
+		}
+		return q
+	}
+	if err = scope().Where("status = ? AND next_billing_date < ?", "active", day0).Count(&overdue).Error; err != nil {
 		return 0, 0, err
 	}
-	if err = s.db.Model(&database.TenantMembership{}).Where("status = ? AND next_billing_date >= ? AND next_billing_date < ?", "active", day0, day8).Count(&upcoming).Error; err != nil {
+	if err = scope().Where("status = ? AND next_billing_date >= ? AND next_billing_date < ?", "active", day0, day8).Count(&upcoming).Error; err != nil {
 		return 0, 0, err
 	}
 	return overdue, upcoming, nil
@@ -472,6 +484,9 @@ func (s *MembershipService) GenerateSale(membershipID uint, userID uint, central
 			Discount:           0,
 			IgvAffectationType: m.IgvAffectationType,
 			PriceIncludesIgv:   m.PriceIncludesIgv,
+			// m.Amount es el monto pactado de la membresía, no el SalePrice del producto vinculado
+			// (son conceptos distintos a propósito) — no reevaluar contra validateAuthorizedPrices.
+			PriceAuthorized: true,
 		}
 	} else {
 		desc := strings.TrimSpace(m.Title)
@@ -489,6 +504,7 @@ func (s *MembershipService) GenerateSale(membershipID uint, userID uint, central
 			Discount:           0,
 			IgvAffectationType: m.IgvAffectationType,
 			PriceIncludesIgv:   m.PriceIncludesIgv,
+			PriceAuthorized:    true, // línea manual sin ProductID; validateAuthorizedPrices tampoco la tocaría, pero se marca por consistencia con la rama de arriba.
 		}
 	}
 	cid := m.ContactID

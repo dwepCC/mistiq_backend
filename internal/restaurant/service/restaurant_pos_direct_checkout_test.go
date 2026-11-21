@@ -155,7 +155,7 @@ func TestCheckoutDirect_ComboAloneDeductsComponentStock(t *testing.T) {
 			ProductID: &comboID, Quantity: 2,
 			ComboJSON: comboSelectionJSON(t, f.BebidaG.ID, f.Agua.ID, 1),
 		}},
-		Payments: []PaymentInput{{Method: "card", Amount: 40}},
+		Payments: []PaymentInput{{Method: "card", Amount: 36}},
 	}
 
 	sale, err := svc.Checkout(in, tax.DefaultConfig())

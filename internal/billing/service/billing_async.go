@@ -347,3 +347,9 @@ func (s *BillingService) WaitForJob(saleID uint, timeout time.Duration) (*databa
 	return s.GetBillingJobStatus(saleID)
 }
 
+
+// IsAlreadyAccepted: el comprobante ya fue aceptado por SUNAT (no hay nada que reenviar).
+func IsAlreadyAccepted(err error) bool { return errors.Is(err, errAlreadyAccepted) }
+
+// IsAlreadyProcessing: el comprobante ya está en proceso de emisión (otro job lo tiene).
+func IsAlreadyProcessing(err error) bool { return errors.Is(err, errAlreadyProcessing) }

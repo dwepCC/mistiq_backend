@@ -81,6 +81,7 @@ var SACentralPermissionCatalog = []saPermissionDef{
 	{Module: "fiscal", Action: "retry", Label: "Reintentar/reenviar un comprobante a SUNAT"},
 	{Module: "fiscal", Action: "bulk", Label: "Acciones masivas sobre comprobantes fiscales"},
 	{Module: "fiscal", Action: "cancel", Label: "Anular un comprobante fiscal"},
+	{Module: "fiscal", Action: "attend", Label: "Marcar/desmarcar un comprobante fiscal como atendido"},
 
 	{Module: "usuarios_central", Action: "view", Label: "Ver usuarios del panel central"},
 	{Module: "usuarios_central", Action: "create", Label: "Crear usuarios del panel central"},
@@ -127,7 +128,7 @@ var SADefaultRoles = []saDefaultRoleDef{
 			"suscripciones.view", "suscripciones.create", "suscripciones.update", "suscripciones.change_status",
 			"pagos.view", "pagos.approve", "pagos.reject", "pagos.refund",
 			"documentos.view", "documentos.manage", "documentos.approve_purchase",
-			"fiscal.view", "fiscal.retry", "fiscal.bulk", "fiscal.cancel",
+			"fiscal.view", "fiscal.retry", "fiscal.bulk", "fiscal.cancel", "fiscal.attend",
 			"usuarios_central.view", "usuarios_central.create", "usuarios_central.update",
 			"usuarios_central.reset_password", "usuarios_central.change_status", "usuarios_central.destroy",
 			// NO incluye: usuarios_central.change_role, roles.* (administración de roles/escalamiento

@@ -19,6 +19,10 @@ type FleetOptions struct {
 	Workers    int
 	ActiveOnly bool
 	WorkerID   string
+	// SkipDriftScan omite el escaneo de deriva previo a la migración. ScanSchemaDriftBatch abre la BD
+	// de cada tenant de forma SECUENCIAL (~2 s c/u): con Limit grande (deploy) tarda >20 min aunque no
+	// haya nada pendiente. El cron sigue haciéndolo con su Limit normal.
+	SkipDriftScan bool
 }
 
 // FleetSummary resultado del lote.
@@ -56,10 +60,12 @@ func RunFleetMigrate(opts FleetOptions) FleetSummary {
 	if n := database.RecoverStaleMigrationLocks(); n > 0 {
 		logger.L.Info("fleet_stale_locks_recovered", slog.Int64("count", n))
 	}
-	if drifted, err := ScanSchemaDriftBatch(opts.Limit); err != nil {
-		logger.L.Warn("fleet_drift_scan_failed", slog.Any("error", err))
-	} else if drifted > 0 {
-		logger.L.Info("fleet_drift_scan_marked", slog.Int("count", drifted))
+	if !opts.SkipDriftScan {
+		if drifted, err := ScanSchemaDriftBatch(opts.Limit); err != nil {
+			logger.L.Warn("fleet_drift_scan_failed", slog.Any("error", err))
+		} else if drifted > 0 {
+			logger.L.Info("fleet_drift_scan_marked", slog.Int("count", drifted))
+		}
 	}
 
 	pending, err := ListPendingTenants(opts.Limit, opts.ActiveOnly)

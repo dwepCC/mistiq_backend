@@ -220,9 +220,13 @@ type InvoiceRow struct {
 	PeriodEnd   string
 	DueDate     string
 	Amount      float64
-	Currency    string
-	Status      string
-	PaidAt      string
+	// ReconnectionFee: cargo por reconexión de este ciclo específico (ver
+	// ChargeReconnectionFee) — se expone aparte de Amount para que el panel central pueda
+	// desglosar plan vs. reconexión, no solo mostrar un total sin explicar.
+	ReconnectionFee float64
+	Currency        string
+	Status          string
+	PaidAt          string
 }
 
 // ToInvoiceRow normaliza fechas a AAAA-MM-DD en hora de Lima.
@@ -239,7 +243,7 @@ func ToInvoiceRow(c *database.SaasBillingCycle) InvoiceRow {
 	row := InvoiceRow{
 		ID: c.ID, TenantID: c.TenantID,
 		PeriodStart: day(c.PeriodStart), PeriodEnd: day(c.PeriodEnd), DueDate: day(c.DueDate),
-		Amount: c.Amount, Currency: c.Currency, Status: c.Status,
+		Amount: c.Amount, ReconnectionFee: c.ReconnectionFee, Currency: c.Currency, Status: c.Status,
 	}
 	if c.PaidAt != nil {
 		row.PaidAt = day(*c.PaidAt)
