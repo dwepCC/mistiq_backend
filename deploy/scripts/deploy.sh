@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Deploy completo en VPS: pull → migrate-central → restart → health
+# Deploy completo en VPS: pull → migrate-central → migrate-fleet (todos los tenants) → restart → health
 # Uso:
 #   ./deploy/scripts/deploy.sh
 #   MISTIQ_IMAGE=ghcr.io/org/repo:abc123 ./deploy/scripts/deploy.sh
 #   SKIP_MIGRATE=1 ./deploy/scripts/deploy.sh
+#   ALLOW_FLEET_FAILURES=1 ./deploy/scripts/deploy.sh   # desplegar aunque falle algún tenant
 set -euo pipefail
 
 BASE_DIR="${TUKIFAC_BASE:-/opt/mistiq}"
@@ -70,7 +71,23 @@ if [[ "${SKIP_MIGRATE}" != "1" ]]; then
     echo "ERROR: migrate-central falló"
     exit 1
   fi
-  echo "    Fleet tenants: usar deploy/scripts/migrate-fleet.sh o cron (docs/MIGRATIONS-SaaS.md)"
+
+  # Esquema de TODOS los tenants con la imagen nueva ANTES del restart; si se deja al cron el código
+  # nuevo corre hasta ~1 h contra tenants sin la columna nueva ("Unknown column"). El contenedor viejo
+  # sigue atendiendo mientras tanto (migraciones solo aditivas, ver docs/MIGRATIONS-SaaS.md). Mismo
+  # flock que el cron: espera el ciclo en curso y lo pausa. Si falla, no se reinicia.
+  echo "==> Migración de todos los tenants (ANTES del restart, imagen nueva)"
+  if ! flock -w 900 "${MIGRATE_LOCKFILE:-/tmp/tukifac-migrate-fleet.lock}" \
+    docker compose -f "${COMPOSE_FILE}" run --rm --no-deps backend-go \
+    ./tukifac-api migrate-fleet --limit=100000 --workers=8 --active-only=false --skip-drift-scan; then
+    if [[ "${ALLOW_FLEET_FAILURES:-0}" == "1" ]]; then
+      echo "    migrate-fleet con fallos — ALLOW_FLEET_FAILURES=1, se continúa"
+    else
+      echo "ERROR: migrate-fleet falló — deploy abortado, sigue corriendo la versión anterior"
+      echo "       (revisar los tenants listados; ALLOW_FLEET_FAILURES=1 para desplegar igual)"
+      exit 1
+    fi
+  fi
 else
   echo "==> SKIP_MIGRATE=1 — migrate central omitido"
 fi

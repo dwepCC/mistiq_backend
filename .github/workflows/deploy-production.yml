@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      allow_fleet_failures:
+        description: "Desplegar aunque migrate-fleet falle en algún tenant"
+        required: false
+        default: false
+        type: boolean
 
 env:
   IMAGE_SHA: ghcr.io/dwepcc/mistiq_backend:latest
@@ -79,6 +84,8 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: IMAGE_SHA
           script_stop: true
+          # migrate-fleet sobre todos los tenants + espera del lock del cron (hasta 15 min).
+          command_timeout: 30m
           script: |
             set -euo pipefail
 
@@ -100,8 +107,26 @@ jobs:
             fi
 
             if [ "$SKIP_MIGRATE" = "0" ]; then
-              echo "Running migrate-central (fleet is separate cron)..."
+              echo "Running migrate-central..."
               docker compose -f docker-compose.production.yml run --rm --no-deps backend-go ./tukifac-api migrate-central
+
+              # Esquema de TODOS los tenants con la imagen nueva ANTES del restart. Si se deja al cron
+              # (100 tenants cada ~10 min) el código nuevo corre hasta ~1 h contra tenants sin la
+              # columna nueva → "Unknown column" y no se puede vender (v160, 08-oct-2026: 01:20→02:20).
+              # Mientras tanto el contenedor viejo sigue atendiendo: las migraciones solo agregan
+              # (ver docs/MIGRATIONS-SaaS.md). El flock es el mismo del cron: espera a que termine el
+              # ciclo en curso y lo pausa mientras dure esto. Si falla, se aborta sin reiniciar.
+              echo "Running migrate-fleet (all tenants, before restart)..."
+              if ! flock -w 900 /tmp/tukifac-migrate-fleet.lock \
+                docker compose -f docker-compose.production.yml run --rm --no-deps backend-go \
+                ./tukifac-api migrate-fleet --limit=100000 --workers=8 --active-only=false --skip-drift-scan; then
+                if [ "${{ inputs.allow_fleet_failures }}" = "true" ]; then
+                  echo "migrate-fleet con fallos — allow_fleet_failures=true, se continúa"
+                else
+                  echo "ERROR: migrate-fleet falló — deploy abortado, sigue corriendo la versión anterior"
+                  exit 1
+                fi
+              fi
             fi
 
             echo "Restarting container..."
