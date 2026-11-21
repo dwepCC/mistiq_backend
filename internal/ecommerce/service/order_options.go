@@ -66,6 +66,19 @@ func (s *EcommerceService) loadPublicProduct(productID uint) (*database.TenantPr
 	return &p, nil
 }
 
+// loadOrderProduct producto para armar una línea de pedido: la tienda solo admite lo publicado; el personal
+// (pedido manual) cualquier producto activo. Los combos se resuelven aparte.
+func (s *EcommerceService) loadOrderProduct(productID uint, manual bool) (*database.TenantProduct, error) {
+	if !manual {
+		return s.loadPublicProduct(productID)
+	}
+	var p database.TenantProduct
+	if err := s.db.Where("id = ? AND active = ?", productID, true).First(&p).Error; err != nil || p.HasCombo {
+		return nil, errProductUnavailable
+	}
+	return &p, nil
+}
+
 func (s *EcommerceService) activePresentations(productID uint) []database.TenantProductPresentation {
 	var rows []database.TenantProductPresentation
 	s.db.Where("product_id = ? AND active = ?", productID, true).Order("sort_order ASC, id ASC").Find(&rows)
@@ -177,8 +190,8 @@ func round2(n float64) float64 { return math.Round(n*100) / 100 }
 
 // resolveOrderItem valida la elección del cliente contra el catálogo y devuelve la línea con el
 // nombre, el precio y el snapshot de modificadores calculados por el servidor.
-func (s *EcommerceService) resolveOrderItem(it OrderItemInput) (OrderItemInput, error) {
-	p, err := s.loadPublicProduct(it.ProductID)
+func (s *EcommerceService) resolveOrderItem(it OrderItemInput, manual bool) (OrderItemInput, error) {
+	p, err := s.loadOrderProduct(it.ProductID, manual)
 	if err != nil {
 		label := strings.TrimSpace(it.Name)
 		if label == "" {

@@ -338,11 +338,15 @@ func loadOrderItems(db *gorm.DB, order database.TenantEcommerceOrder) ([]OrderIt
 		items := make([]OrderItemInput, len(rows))
 		for i, r := range rows {
 			items[i] = OrderItemInput{
-				ProductID: r.ProductID,
-				Name:      r.Name,
-				Quantity:  r.Quantity,
-				UnitPrice: r.UnitPrice,
-				ComboJSON: r.ComboJSON,
+				ProductID:      r.ProductID,
+				Name:           r.Name,
+				Quantity:       r.Quantity,
+				UnitPrice:      r.UnitPrice,
+				ComboJSON:      r.ComboJSON,
+				PresentationID: r.PresentationID,
+				SaleUnitID:     r.SaleUnitID,
+				ModifiersJSON:  r.ModifiersJSON,
+				Detail:         r.Detail,
 			}
 		}
 		return items, nil

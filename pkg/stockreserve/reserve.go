@@ -54,7 +54,7 @@ func Reserved(db *gorm.DB, branchID, excludeOrderID uint, productIDs []uint) (ma
 
 	// Líneas normales (productos y variantes).
 	q := base().
-		Select("i.product_id AS product_id, COALESCE(i.presentation_id, 0) AS presentation_id, SUM(i.quantity) AS qty").
+		Select("i.product_id AS product_id, COALESCE(i.presentation_id, 0) AS presentation_id, SUM(COALESCE(i.base_quantity, i.quantity)) AS qty").
 		Where("(i.combo_components_json IS NULL OR i.combo_components_json = '')")
 	if len(productIDs) > 0 {
 		q = q.Where("i.product_id IN ?", productIDs)

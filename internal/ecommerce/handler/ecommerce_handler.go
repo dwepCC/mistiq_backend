@@ -892,9 +892,11 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 			Ubigeo      string `json:"ubigeo"`
 		} `json:"address"`
 		Items []struct {
-			ProductID      uint    `json:"product_id"`
-			PresentationID *uint   `json:"presentation_id"`
-			Quantity       float64 `json:"quantity"`
+			ProductID         uint    `json:"product_id"`
+			PresentationID    *uint   `json:"presentation_id"`
+			SaleUnitID        *uint   `json:"sale_unit_id"`
+			ModifierOptionIDs []uint  `json:"modifier_option_ids"`
+			Quantity          float64 `json:"quantity"`
 			// Combo: elección del cliente en los grupos del combo.
 			Combo json.RawMessage `json:"combo"`
 		} `json:"items"`
@@ -905,10 +907,12 @@ func (h *EcommerceHandler) CreatePublicOrderAPI(c fiber.Ctx) error {
 	items := make([]service.CreateOrderItemInput, 0, len(body.Items))
 	for _, it := range body.Items {
 		items = append(items, service.CreateOrderItemInput{
-			ProductID:      it.ProductID,
-			PresentationID: it.PresentationID,
-			Quantity:       it.Quantity,
-			ComboJSON:      comboSelection(it.Combo),
+			ProductID:         it.ProductID,
+			PresentationID:    it.PresentationID,
+			SaleUnitID:        it.SaleUnitID,
+			ModifierOptionIDs: it.ModifierOptionIDs,
+			Quantity:          it.Quantity,
+			ComboJSON:         comboSelection(it.Combo),
 		})
 	}
 	input := service.CreateOrderInput{

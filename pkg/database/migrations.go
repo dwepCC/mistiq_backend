@@ -1282,7 +1282,14 @@ type TenantEcommerceOrderItem struct {
 	// propio: lo que reserva y descuenta son sus componentes.
 	ComboJSON           string    `gorm:"type:text" json:"combo_json,omitempty"`
 	ComboComponentsJSON string    `gorm:"type:text" json:"combo_components_json,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
+	// SaleUnitID: unidad de venta elegida (TenantProductSaleUnit); BaseQuantity: cantidad TOTAL de la línea en
+	// unidad base (nil = igual a Quantity). ModifiersJSON/Detail: extras y presentación elegidos, ya resueltos
+	// por el servidor, que se copian a la venta al convertir.
+	SaleUnitID    *uint     `gorm:"index" json:"sale_unit_id,omitempty"`
+	ModifiersJSON string    `gorm:"type:text" json:"modifiers_json,omitempty"`
+	Detail        string    `gorm:"size:255" json:"detail,omitempty"`
+	BaseQuantity  *float64  `gorm:"type:decimal(15,6)" json:"base_quantity,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // TenantEcommerceOrderStatusHistory bitácora de transiciones de TenantEcommerceOrder.Status —

@@ -37,10 +37,12 @@ func (h *EcommerceHandler) CreateManualOrderAPI(c fiber.Ctx) error {
 			Ubigeo      string `json:"ubigeo"`
 		} `json:"address"`
 		Items []struct {
-			ProductID      uint            `json:"product_id"`
-			PresentationID *uint           `json:"presentation_id"`
-			Quantity       float64         `json:"quantity"`
-			Combo          json.RawMessage `json:"combo"`
+			ProductID         uint            `json:"product_id"`
+			PresentationID    *uint           `json:"presentation_id"`
+			SaleUnitID        *uint           `json:"sale_unit_id"`
+			ModifierOptionIDs []uint          `json:"modifier_option_ids"`
+			Quantity          float64         `json:"quantity"`
+			Combo             json.RawMessage `json:"combo"`
 		} `json:"items"`
 	}
 	if err := c.Bind().JSON(&body); err != nil {
@@ -49,7 +51,8 @@ func (h *EcommerceHandler) CreateManualOrderAPI(c fiber.Ctx) error {
 	items := make([]service.CreateOrderItemInput, 0, len(body.Items))
 	for _, it := range body.Items {
 		items = append(items, service.CreateOrderItemInput{
-			ProductID: it.ProductID, PresentationID: it.PresentationID, Quantity: it.Quantity,
+			ProductID: it.ProductID, PresentationID: it.PresentationID, SaleUnitID: it.SaleUnitID,
+			ModifierOptionIDs: it.ModifierOptionIDs, Quantity: it.Quantity,
 			ComboJSON: comboSelection(it.Combo),
 		})
 	}

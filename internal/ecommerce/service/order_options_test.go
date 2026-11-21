@@ -21,7 +21,9 @@ func setupOrderOptionsDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&database.TenantProduct{}, &database.TenantProductPresentation{}, &database.TenantProductPresentationStock{},
 		&database.TenantProductSaleUnit{}, &database.TenantModifierGroup{}, &database.TenantModifierOption{},
-		&database.TenantProductModifierGroup{}, &database.TenantEcommerceOrder{},
+		&database.TenantProductModifierGroup{}, &database.TenantProductStock{}, &database.TenantEcommerceOrder{},
+		&database.TenantEcommerceOrderItem{}, &database.TenantEcommerceOrderStatusHistory{}, &database.TenantNotification{},
+		&database.TenantCarrier{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -36,11 +38,11 @@ func TestCreateOrder_PresentationPriceResolvedByServer(t *testing.T) {
 	db.Create(&m)
 	svc := NewEcommerceService(db)
 
-	if _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 1, UnitPrice: 1}}}); err == nil || !strings.Contains(err.Error(), "presentación") {
+	if _, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1}}}); err == nil || !strings.Contains(err.Error(), "presentación") {
 		t.Fatalf("sin presentación debe pedirla, got %v", err)
 	}
 	// El precio que manda el cliente (1) se ignora: manda el de la presentación.
-	o, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 2, UnitPrice: 1, PresentationID: &m.ID}}})
+	o, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 2, PresentationID: &m.ID}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,10 +62,10 @@ func TestCreateOrder_ExtrasAndRequiredGroup(t *testing.T) {
 	db.Create(&database.TenantProductModifierGroup{ProductID: p.ID, GroupID: g.ID})
 	svc := NewEcommerceService(db)
 
-	if _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 1}}}); err == nil {
+	if _, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1}}}); err == nil {
 		t.Fatal("grupo obligatorio sin elegir debe fallar")
 	}
-	o, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 1, ModifierOptionIDs: []uint{o1.ID}}}})
+	o, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1, ModifierOptionIDs: []uint{o1.ID}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +81,7 @@ func TestCreateOrder_SaleUnitPrice(t *testing.T) {
 	u := database.TenantProductSaleUnit{ProductID: p.ID, Name: "Saco 50 KG", ConversionFactor: 50, Price1: 220, Active: true}
 	db.Create(&u)
 	svc := NewEcommerceService(db)
-	o, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 1, SaleUnitID: &u.ID}}})
+	o, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 1, SaleUnitID: &u.ID}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +101,14 @@ func TestCreateOrder_RejectsOverStockButDoesNotDiscount(t *testing.T) {
 	db.Create(&database.TenantProductStock{ProductID: p.ID, BranchID: 2, Quantity: 2})
 	svc := NewEcommerceService(db)
 
-	if _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 6}}}); err == nil || !strings.Contains(err.Error(), "stock") {
+	if _, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 6}}}); err == nil || !strings.Contains(err.Error(), "stock") {
 		t.Fatalf("debía rechazar por stock, got %v", err)
 	}
 	// Dos líneas del mismo producto suman contra el mismo stock.
-	if _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 3}, {ProductID: p.ID, Quantity: 3}}}); err == nil {
+	if _, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 3}, {ProductID: p.ID, Quantity: 3}}}); err == nil {
 		t.Fatal("la suma de líneas debía rechazarse")
 	}
-	if _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", Items: []OrderItemInput{{ProductID: p.ID, Quantity: 5}}}); err != nil {
+	if _, _, err := svc.CreateOrder(CreateOrderInput{CustomerName: "Ana", CustomerPhone: "999", DeliveryMethod: DeliveryMethodPickup, Items: []CreateOrderItemInput{{ProductID: p.ID, Quantity: 5}}}); err != nil {
 		t.Fatalf("5 de 5 debía pasar: %v", err)
 	}
 	var total float64

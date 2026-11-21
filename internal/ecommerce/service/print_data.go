@@ -142,6 +142,18 @@ func BuildPrintDataForOrder(db *gorm.DB, orderID uint) (*salessvc.PrintData, err
 		}
 	}
 
+	// Combos: lo que llevan dentro (las líneas normalizadas están en el mismo orden que el JSON).
+	comboNotes := make([]string, len(items))
+	var normalized []database.TenantEcommerceOrderItem
+	db.Where("order_id = ?", order.ID).Order("id ASC").Find(&normalized)
+	for i, it := range items {
+		if i < len(normalized) && normalized[i].ProductID == it.ProductID {
+			if inc := comboIncludes(normalized[i].ComboComponentsJSON); inc != "" {
+				comboNotes[i] = "Incluye: " + inc
+			}
+		}
+	}
+
 	type itemMeta struct {
 		code, unit, igvType string
 		includesIgv         bool
@@ -188,7 +200,7 @@ func BuildPrintDataForOrder(db *gorm.DB, orderID uint) (*salessvc.PrintData, err
 			UnitPrice:          it.UnitPrice,
 			IgvAffectationType: metas[i].igvType,
 			ModifiersJSON:      it.ModifiersJSON,
-			ItemNote:           strings.TrimSpace(it.Detail),
+			ItemNote:           orderItemNote(it, comboNotes[i]),
 			ProductID:          pid,
 			SaleUnitID:         it.SaleUnitID,
 		}
@@ -217,4 +229,16 @@ func BuildPrintDataForOrder(db *gorm.DB, orderID uint) (*salessvc.PrintData, err
 	}
 
 	return pd, nil
+}
+
+// orderItemNote nota de la línea: los extras elegidos y, en los combos, lo que llevan dentro.
+func orderItemNote(it OrderItemInput, combo string) string {
+	parts := make([]string, 0, 2)
+	if d := strings.TrimSpace(it.Detail); d != "" {
+		parts = append(parts, d)
+	}
+	if combo != "" {
+		parts = append(parts, combo)
+	}
+	return strings.Join(parts, " ")
 }

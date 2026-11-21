@@ -17,7 +17,7 @@ func setupComboOrderDB(t *testing.T) *gorm.DB {
 	db := setupConvertTestDB(t)
 	for _, m := range []interface{}{
 		&database.TenantComboGroup{}, &database.TenantComboGroupItem{},
-		&database.TenantProductPresentation{}, &database.TenantProductPresentationStock{},
+		&database.TenantProductPresentation{}, &database.TenantProductPresentationStock{}, &database.TenantCategory{},
 		&database.TenantEcommerceCustomerAccount{}, &database.TenantEcommerceCustomerAddress{},
 	} {
 		if err := db.AutoMigrate(m); err != nil {

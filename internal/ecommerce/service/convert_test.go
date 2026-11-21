@@ -30,7 +30,7 @@ func setupConvertTestDB(t *testing.T) *gorm.DB {
 		&database.TenantCashSession{}, &database.TenantPaymentMethod{}, &database.TenantProduct{},
 		&database.TenantBranch{}, &database.TenantProductStock{}, &database.TenantStockMovement{},
 		&database.TenantInventoryOperationType{},
-		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
+		&database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{}, &database.TenantProductBranchPrice{},
 		&database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{},
 		&database.TenantEcommerceDispatchStatusHistory{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{}, &database.TenantNotification{},
 	}

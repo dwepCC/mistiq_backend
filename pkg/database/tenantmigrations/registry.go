@@ -179,6 +179,7 @@ var TenantMigrations = []TenantMigration{
 	V205DocumentSnapshots{},
 	V206SaleItemPackLabel{},
 	V207CategoryBranch{},
+	V208EcommerceOrderItemOptions{},
 }
 
 // ByVersion mapa versión → migración.

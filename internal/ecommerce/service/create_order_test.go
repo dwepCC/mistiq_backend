@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"tukifac/pkg/database"
@@ -130,7 +131,7 @@ func TestCreateOrder_ConPresentacion(t *testing.T) {
 	if items[0].UnitPrice != 28 {
 		t.Errorf("UnitPrice = %.2f, quería 28 (precio de la presentación)", items[0].UnitPrice)
 	}
-	if items[0].Name != "Polo — Rojo / M" {
+	if !strings.Contains(items[0].Name, "Rojo / M") {
 		t.Errorf("Name = %q, quería incluir el nombre de la presentación", items[0].Name)
 	}
 }

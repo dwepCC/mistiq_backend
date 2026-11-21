@@ -25,7 +25,8 @@ func setupEcommerceConvertDB(t *testing.T) *gorm.DB {
 		&database.TenantSale{}, &database.TenantSaleItem{}, &database.TenantSalePayment{},
 		&database.TenantCashSession{}, &database.TenantPaymentMethod{}, &database.TenantProduct{},
 		&database.TenantBranch{}, &database.TenantProductStock{}, &database.TenantStockMovement{},
-		&database.TenantInventoryOperationType{}, &database.TenantEcommerceOrder{},
+		&database.TenantInventoryOperationType{}, &database.TenantEcommerceOrder{}, &database.TenantEcommerceOrderItem{},
+		&database.TenantProductBranchPrice{}, &database.TenantEcommerceOrderPayment{}, &database.TenantCarrier{}, &database.TenantSaleCreditInstallment{}, &database.TenantEcommerceSettings{}, &database.TenantNotification{}, &database.TenantEcommerceOrderStatusHistory{}, &database.TenantEcommerceDispatch{}, &database.TenantEcommerceDispatchStatusHistory{},
 	}
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {

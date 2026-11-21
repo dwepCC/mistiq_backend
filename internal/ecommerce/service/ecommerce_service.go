@@ -14,6 +14,7 @@ import (
 	productservice "tukifac/internal/products/service"
 	"tukifac/pkg/database"
 	"tukifac/pkg/money"
+	"tukifac/pkg/saleunit"
 	"tukifac/pkg/notificationevents"
 	"tukifac/pkg/stockreserve"
 
@@ -521,6 +522,10 @@ type CreateOrderItemInput struct {
 	// nombre/precio que el frontend ya tenía cacheado del catálogo.
 	PresentationID *uint
 	Quantity       float64
+	// SaleUnitID: unidad de venta elegida (caja, docena…) cuando el producto las tiene.
+	SaleUnitID *uint
+	// ModifierOptionIDs: extras elegidos (solo IDs; el servidor resuelve nombre y precio).
+	ModifierOptionIDs []uint
 	// ComboJSON: si el producto es un combo, lo que el cliente eligió en cada grupo
 	// ([{"group_id":1,"items":[{"product_id":9,"quantity":1}]}]). Los grupos fijos no hace falta enviarlos.
 	ComboJSON string
@@ -579,6 +584,11 @@ type resolvedOrderLine struct {
 	// Combo (vacíos si la línea no es un combo).
 	ComboJSON           string
 	ComboComponentsJSON string
+	// Unidad de venta, extras y cantidad total en unidad base (nil = igual a Quantity).
+	SaleUnitID    *uint
+	ModifiersJSON string
+	Detail        string
+	BaseQuantity  *float64
 }
 
 // resolveOrderLine valida y resuelve UNA línea contra el catálogo del tenant actual (s.db, ya
@@ -606,8 +616,9 @@ func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput, manual bool
 
 	name := product.Name
 	unitPrice := product.SalePrice
-	var presentationID *uint
-	var comboJSON, comboComponents string
+	var presentationID, saleUnitID *uint
+	var comboJSON, comboComponents, modifiersJSON, detail string
+	var baseQty *float64
 	if product.HasCombo {
 		// Combo: el servidor valida la elección contra los grupos y calcula el precio (precio del combo
 		// + sobreprecios de lo elegido); nunca se confía en el precio que mande el navegador.
@@ -626,18 +637,29 @@ func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput, manual bool
 		if b, merr := json.Marshal(res.ComponentsPayload()); merr == nil {
 			comboComponents = string(b)
 		}
-	} else if it.PresentationID != nil && *it.PresentationID > 0 {
-		var pres database.TenantProductPresentation
-		if err := s.db.Where("id = ? AND product_id = ? AND active = ?", *it.PresentationID, product.ID, true).
-			First(&pres).Error; err != nil {
+	} else {
+		// Producto normal: presentación, unidad de venta y extras se resuelven en el servidor (order_options.go).
+		res, err := s.resolveOrderItem(OrderItemInput{
+			ProductID: product.ID, Name: product.Name, Quantity: it.Quantity,
+			PresentationID: it.PresentationID, SaleUnitID: it.SaleUnitID, ModifierOptionIDs: it.ModifierOptionIDs,
+		}, manual)
+		if err != nil {
+			return resolvedOrderLine{}, err
+		}
+		if it.PresentationID != nil && *it.PresentationID > 0 && res.PresentationID == nil {
 			return resolvedOrderLine{}, fmt.Errorf("la presentación elegida para '%s' ya no está disponible", product.Name)
 		}
-		name = product.Name + " — " + pres.Name
-		unitPrice = pres.SalePrice
-		id := pres.ID
-		presentationID = &id
-	} else if product.HasVariants {
-		return resolvedOrderLine{}, fmt.Errorf("'%s' requiere elegir una presentación", product.Name)
+		name, unitPrice = res.Name, res.UnitPrice
+		presentationID, saleUnitID = res.PresentationID, res.SaleUnitID
+		modifiersJSON, detail = res.ModifiersJSON, res.Detail
+		if saleUnitID != nil {
+			r, err := saleunit.ResolveForLine(s.db, product.ID, saleUnitID, it.Quantity)
+			if err != nil {
+				return resolvedOrderLine{}, err
+			}
+			b := r.BaseQuantity
+			baseQty = &b
+		}
 	}
 	if !(unitPrice > 0) {
 		return resolvedOrderLine{}, fmt.Errorf("'%s' no tiene un precio de venta válido (S/ 0.00)", name)
@@ -648,6 +670,7 @@ func (s *EcommerceService) resolveOrderLine(it CreateOrderItemInput, manual bool
 		ProductID: product.ID, PresentationID: presentationID, Name: name,
 		Quantity: qty, UnitPrice: unitPrice, Subtotal: money.RoundDisplay(qty * unitPrice),
 		ComboJSON: comboJSON, ComboComponentsJSON: comboComponents,
+		SaleUnitID: saleUnitID, ModifiersJSON: modifiersJSON, Detail: detail, BaseQuantity: baseQty,
 	}, nil
 }
 
@@ -720,7 +743,22 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 
 	legacyItems := make([]OrderItemInput, len(lines))
 	for i, l := range lines {
-		legacyItems[i] = OrderItemInput{ProductID: l.ProductID, Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice, ComboJSON: l.ComboJSON}
+		legacyItems[i] = OrderItemInput{
+			ProductID: l.ProductID, Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice, ComboJSON: l.ComboJSON,
+			PresentationID: l.PresentationID, SaleUnitID: l.SaleUnitID, ModifiersJSON: l.ModifiersJSON, Detail: l.Detail,
+		}
+	}
+	if !input.Manual {
+		// El pedido web no puede pedir más de lo que hay en total (no reserva: eso pasa al confirmar).
+		check := make([]OrderItemInput, 0, len(legacyItems))
+		for _, it := range legacyItems {
+			if it.ComboJSON == "" {
+				check = append(check, it)
+			}
+		}
+		if err := s.validateOrderStock(check); err != nil {
+			return nil, nil, err
+		}
 	}
 	itemsJSON, err := json.Marshal(legacyItems)
 	if err != nil {
@@ -773,6 +811,7 @@ func (s *EcommerceService) CreateOrder(input CreateOrderInput) (*database.Tenant
 				OrderID: order.ID, ProductID: l.ProductID, PresentationID: l.PresentationID,
 				Name: l.Name, Quantity: l.Quantity, UnitPrice: l.UnitPrice, Subtotal: l.Subtotal,
 				ComboJSON: l.ComboJSON, ComboComponentsJSON: l.ComboComponentsJSON,
+				SaleUnitID: l.SaleUnitID, ModifiersJSON: l.ModifiersJSON, Detail: l.Detail, BaseQuantity: l.BaseQuantity,
 			}
 		}
 		if err := tx.Create(&createdItems).Error; err != nil {

@@ -62,7 +62,11 @@ func OrderLines(db *gorm.DB, orderID, branchID uint, lock bool) ([]Line, error) 
 		if it.PresentationID != nil {
 			k.PresentationID = *it.PresentationID
 		}
-		add(k, it.Name, it.Quantity)
+		qty := it.Quantity
+		if it.BaseQuantity != nil {
+			qty = *it.BaseQuantity // unidad de venta: la reserva es en unidad base
+		}
+		add(k, it.Name, qty)
 	}
 
 	productIDs := make([]uint, 0, len(order))
