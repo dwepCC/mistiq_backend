@@ -3,6 +3,7 @@ package superadmin
 import (
 	agentmod "tukifac/internal/agent"
 	"tukifac/internal/ajustes"
+	"tukifac/internal/equipos"
 	consultaHandler "tukifac/internal/consulta/handler"
 	exchangeRateHandler "tukifac/internal/exchangerate/handler"
 	"tukifac/internal/payments"
@@ -161,6 +162,7 @@ func RegisterRoutes(app *fiber.App) {
 
 	// Ajustes del sistema central (nombre, slogan, token_consulta, etc.)
 	ajustes.RegisterRoutes(saAPI)
+	equipos.RegisterRoutes(saAPI)
 
 	// Consulta DNI/RUC (apiperu.dev) — lookup externo de solo lectura (no crea ni modifica nada
 	// local), usado al completar el formulario de alta de una empresa. Mismo criterio que ubigeo:

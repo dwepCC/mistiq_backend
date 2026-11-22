@@ -102,6 +102,29 @@ var SACentralPermissionCatalog = []saPermissionDef{
 
 	{Module: "system", Action: "view_audit", Label: "Ver bitácora de auditoría (pantalla futura)"},
 
+	// Módulo «Gestión de Equipos» (pedidos, envíos, cobros y stock de equipos POS).
+	{Module: "equipos", Action: "view", Label: "Ver el módulo de equipos (catálogo, pedidos y envíos)"},
+	{Module: "equipos", Action: "create", Label: "Crear pedidos de equipos"},
+	{Module: "equipos", Action: "update", Label: "Editar pedidos de equipos"},
+	{Module: "equipos", Action: "cancel", Label: "Anular pedidos de equipos"},
+	{Module: "equipos", Action: "validate", Label: "Validar o observar pedidos (encargada)"},
+	{Module: "equipos", Action: "payments", Label: "Registrar y anular cobros de equipos"},
+	{Module: "equipos", Action: "payments_view", Label: "Ver historial de pagos y estados de cuenta de clientes"},
+	{Module: "equipos", Action: "shipments", Label: "Gestionar envíos (guía, despacho, llegada, recojo)"},
+	{Module: "equipos", Action: "returns", Label: "Gestionar retornos de equipos"},
+	{Module: "equipos", Action: "returns_receive", Label: "Marcar retornos como recibidos (reingresa el stock si el equipo está en buen estado)"},
+	{Module: "equipos", Action: "returns_cancel", Label: "Anular retornos de equipos (revierte el stock si ya se recibió)"},
+	{Module: "equipos", Action: "stock_view", Label: "Ver stock de equipos y su kardex"},
+	{Module: "equipos", Action: "stock_adjust", Label: "Registrar ingresos, ajustes y bajas de stock"},
+	{Module: "equipos", Action: "warehouses", Label: "Administrar almacenes de equipos"},
+	{Module: "equipos", Action: "stock_transfer", Label: "Crear requerimientos y transferencias entre almacenes"},
+	{Module: "equipos", Action: "stock_transfer_cancel", Label: "Anular requerimientos y transferencias entre almacenes"},
+	{Module: "equipos", Action: "catalog", Label: "Administrar catálogo de equipos y combos"},
+	{Module: "equipos", Action: "carriers", Label: "Administrar transportistas"},
+	{Module: "equipos", Action: "reports", Label: "Ver reportes de equipos"},
+	{Module: "equipos", Action: "import", Label: "Importar el Excel de control de equipos"},
+	{Module: "equipos", Action: "settings", Label: "Configurar el módulo de equipos"},
+
 	{Module: "assistant", Action: "view", Label: "Ver bandeja, conocimiento y analítica del agente comercial IA"},
 	{Module: "assistant", Action: "manage", Label: "Gestionar conversaciones, configuración y conocimiento del agente comercial IA"},
 }

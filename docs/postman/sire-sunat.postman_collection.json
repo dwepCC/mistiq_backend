@@ -1,0 +1,469 @@
+{
+  "info": {
+    "name": "SUNAT SIRE - pruebas Tukifac",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Completa client_id, client_secret, ruc, usuario_sol y clave_sol en Variables (valor actual, no inicial) y ejecuta primero 1. Token. No compartas ni subas esta coleccion con las claves llenas."
+  },
+  "variable": [
+    {
+      "key": "auth_url",
+      "value": "https://api-seguridad.sunat.gob.pe"
+    },
+    {
+      "key": "api_url",
+      "value": "https://api-sire.sunat.gob.pe"
+    },
+    {
+      "key": "client_id",
+      "value": ""
+    },
+    {
+      "key": "client_secret",
+      "value": ""
+    },
+    {
+      "key": "ruc",
+      "value": "20612257320"
+    },
+    {
+      "key": "usuario_sol",
+      "value": ""
+    },
+    {
+      "key": "clave_sol",
+      "value": ""
+    },
+    {
+      "key": "per",
+      "value": "202610"
+    },
+    {
+      "key": "ticket",
+      "value": ""
+    },
+    {
+      "key": "archivo",
+      "value": ""
+    },
+    {
+      "key": "tipo_archivo",
+      "value": "01"
+    },
+    {
+      "key": "token",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Token (RUC+usuario SOL)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 200) { pm.collectionVariables.set('token', pm.response.json().access_token); console.log('token guardado'); } else { console.log(pm.response.code, pm.response.text()); }"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "grant_type",
+              "value": "password"
+            },
+            {
+              "key": "scope",
+              "value": "https://api-sire.sunat.gob.pe"
+            },
+            {
+              "key": "client_id",
+              "value": "{{client_id}}"
+            },
+            {
+              "key": "client_secret",
+              "value": "{{client_secret}}"
+            },
+            {
+              "key": "username",
+              "value": "{{ruc}}{{usuario_sol}}"
+            },
+            {
+              "key": "password",
+              "value": "{{clave_sol}}"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{auth_url}}/v1/clientessol/{{client_id}}/oauth2/token/",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "v1",
+            "clientessol",
+            "{{client_id}}",
+            "oauth2",
+            "token",
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "VENTAS (RVIE)",
+      "item": [
+        {
+          "name": "2. Periodos ventas",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Es lo primero que consulta la pantalla SIRE. Si da 422, mira errors[].cod",
+            "url": {
+              "raw": "{{api_url}}/v1/contribuyente/migeigv/libros/rvierce/padron/web/omisos/140000/periodos",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "contribuyente",
+                "migeigv",
+                "libros",
+                "rvierce",
+                "padron",
+                "web",
+                "omisos",
+                "140000",
+                "periodos"
+              ],
+              "query": []
+            }
+          }
+        },
+        {
+          "name": "3. Pedir propuesta ventas (ticket)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{api_url}}/v1/contribuyente/migeigv/libros/rvie/propuesta/web/propuesta/{{per}}/exportapropuesta?codTipoArchivo=0",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "contribuyente",
+                "migeigv",
+                "libros",
+                "rvie",
+                "propuesta",
+                "web",
+                "propuesta",
+                "{{per}}",
+                "exportapropuesta"
+              ],
+              "query": [
+                {
+                  "key": "codTipoArchivo",
+                  "value": "0"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "4. Estado del ticket (ventas/compras)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "De la respuesta toma archivoReporte[0].nomArchivoReporte y codTipoAchivoReporte",
+            "url": {
+              "raw": "{{api_url}}/v1/contribuyente/migeigv/libros/rvierce/gestionprocesosmasivos/web/masivo/consultaestadotickets?perIni={{per}}&perFin={{per}}&page=1&perPage=20&numTicket={{ticket}}",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "contribuyente",
+                "migeigv",
+                "libros",
+                "rvierce",
+                "gestionprocesosmasivos",
+                "web",
+                "masivo",
+                "consultaestadotickets"
+              ],
+              "query": [
+                {
+                  "key": "perIni",
+                  "value": "{{per}}"
+                },
+                {
+                  "key": "perFin",
+                  "value": "{{per}}"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "perPage",
+                  "value": "20"
+                },
+                {
+                  "key": "numTicket",
+                  "value": "{{ticket}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "5. Descargar archivo ventas",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{api_url}}/v1/contribuyente/migeigv/libros/rvierce/gestionprocesosmasivos/web/masivo/archivoreporte?nomArchivoReporte={{archivo}}&codTipoArchivoReporte={{tipo_archivo}}&codLibro=140000",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "contribuyente",
+                "migeigv",
+                "libros",
+                "rvierce",
+                "gestionprocesosmasivos",
+                "web",
+                "masivo",
+                "archivoreporte"
+              ],
+              "query": [
+                {
+                  "key": "nomArchivoReporte",
+                  "value": "{{archivo}}"
+                },
+                {
+                  "key": "codTipoArchivoReporte",
+                  "value": "{{tipo_archivo}}"
+                },
+                {
+                  "key": "codLibro",
+                  "value": "140000"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "COMPRAS (RCE)",
+      "item": [
+        {
+          "name": "2. Periodos compras",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{api_url}}/v1/contribuyente/migeigv/libros/rvierce/padron/web/omisos/080000/periodos",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "contribuyente",
+                "migeigv",
+                "libros",
+                "rvierce",
+                "padron",
+                "web",
+                "omisos",
+                "080000",
+                "periodos"
+              ],
+              "query": []
+            }
+          }
+        },
+        {
+          "name": "3. Pedir propuesta compras (ticket)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{api_url}}/v1/contribuyente/migeigv/libros/rce/propuesta/web/propuesta/{{per}}/exportacioncomprobantepropuesta?codTipoArchivo=0&codOrigenEnvio=2",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "contribuyente",
+                "migeigv",
+                "libros",
+                "rce",
+                "propuesta",
+                "web",
+                "propuesta",
+                "{{per}}",
+                "exportacioncomprobantepropuesta"
+              ],
+              "query": [
+                {
+                  "key": "codTipoArchivo",
+                  "value": "0"
+                },
+                {
+                  "key": "codOrigenEnvio",
+                  "value": "2"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "5. Descargar archivo compras",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{api_url}}/v1/contribuyente/migeigv/libros/rvierce/gestionprocesosmasivos/web/masivo/archivoreporte?nomArchivoReporte={{archivo}}&codTipoArchivoReporte={{tipo_archivo}}",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "contribuyente",
+                "migeigv",
+                "libros",
+                "rvierce",
+                "gestionprocesosmasivos",
+                "web",
+                "masivo",
+                "archivoreporte"
+              ],
+              "query": [
+                {
+                  "key": "nomArchivoReporte",
+                  "value": "{{archivo}}"
+                },
+                {
+                  "key": "codTipoArchivoReporte",
+                  "value": "{{tipo_archivo}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
